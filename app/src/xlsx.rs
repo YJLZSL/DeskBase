@@ -121,12 +121,23 @@ pub struct ImportReport {
     pub file_bytes: u64,
     pub sheets: Vec<SheetPreview>,
     pub warnings: Vec<Warning>,
+    /// CSV 才有：探测到的编码与依据（"UTF-8（严格校验通过）"这种）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+    /// CSV 才有：探测到的分隔符
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
 }
 
 /// 读一个表格文件并给出预览与告警。**不写任何东西。**
 pub fn inspect(path: &Path) -> Result<ImportReport> {
     let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件信息：{e}"))?;
-    if meta.len() > MAX_FILE_BYTES {
+    let kind = sniff(path)?;
+
+    // 体积闸门分两档：表格要整表解析（200 MB 已经很大），CSV 是流式的可以放宽。
+    // 所以这里不能一刀切 —— 否则 300 MB 的 CSV 会被 xlsx 的限额先拦下来，
+    // 而它其实完全处理得了。
+    if kind != FileKind::Text && meta.len() > MAX_FILE_BYTES {
         return Err(format!(
             "文件 {:.1} MB，超过单次导入上限 {} MB。建议按年份拆成几个文件再导。",
             meta.len() as f64 / 1048576.0,
@@ -134,18 +145,53 @@ pub fn inspect(path: &Path) -> Result<ImportReport> {
         ));
     }
 
-    let kind = sniff(path)?;
     match kind {
         FileKind::Html => Err(
             "这个文件其实是 HTML 表格，不是真正的 Excel 文件。\
              请用 Excel 或 WPS 打开它，另存为 .xlsx 之后再导入。"
                 .into(),
         ),
-        FileKind::Text => Err(
-            "这个文件是纯文本。请把扩展名改成 .csv 后按 CSV 导入（支持 UTF-8 与 GBK/GB18030）。".into(),
-        ),
+        // 纯文本走 CSV 解析（编码探测在 csv_import 里，见那里的注释：
+        // 中文 Excel 的「另存为 CSV」输出的是 GBK 不是 UTF-8）
+        FileKind::Text => from_csv(path, meta.len()),
         FileKind::Zip | FileKind::Ole2 => read_spreadsheet(path, kind, meta.len()),
     }
+}
+
+/// 把 `csv_import` 的报告翻译成本模块的 `ImportReport`。
+///
+/// 这层翻译是刻意的：**前端只需要认得一种报告结构**，Excel 与 CSV 走同一个渲染路径，
+/// 以后加 `.txt` / `.tsv` 也不用再动 UI。
+fn from_csv(path: &Path, bytes: u64) -> Result<ImportReport> {
+    let rep = crate::csv_import::inspect(path)?;
+    Ok(ImportReport {
+        kind: "CSV".into(),
+        file_bytes: bytes,
+        sheets: vec![SheetPreview {
+            name: "CSV".into(),
+            rows: rep.rows,
+            cols: rep.cols,
+            head: rep.head,
+        }],
+        warnings: rep
+            .warnings
+            .into_iter()
+            .map(|w| Warning {
+                kind: w.kind,
+                count: w.count,
+                samples: w.samples,
+                advice: w.advice,
+            })
+            .collect(),
+        encoding: Some(format!("{}（{}）", rep.encoding, rep.encoding_confidence)),
+        delimiter: Some(match rep.delimiter.as_str() {
+            "," => "逗号".into(),
+            "\t" => "制表符".into(),
+            ";" => "分号".into(),
+            "|" => "竖线".into(),
+            other => other.to_string(),
+        }),
+    })
 }
 
 fn read_spreadsheet(path: &Path, kind: FileKind, bytes: u64) -> Result<ImportReport> {
@@ -246,6 +292,9 @@ fn read_spreadsheet(path: &Path, kind: FileKind, bytes: u64) -> Result<ImportRep
         file_bytes: bytes,
         sheets,
         warnings,
+        // 只有 CSV 分支会填这两项
+        encoding: None,
+        delimiter: None,
     })
 }
 

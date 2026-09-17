@@ -608,6 +608,7 @@ name = "deskbase"
 version = "0.1.0-alpha.1"
 dependencies = [
  "calamine",
+ "encoding_rs",
  "rfd",
  "rusqlite",
  "rust_xlsxwriter",

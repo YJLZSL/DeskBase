@@ -27,6 +27,12 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const TARGETS = [
   path.join(ROOT, 'app', 'ui', 'theme.css'),
+  // P1/P2 新增的三份样式表也曾在门禁视野之外 —— 门禁只扫 theme.css 时，
+  // 它们"通过"只是因为压根没被读过。**新增 UI 样式表必须同步加进这里**，
+  // 否则门禁会给出一种很危险的通过：绿勾是真的，覆盖是假的。
+  path.join(ROOT, 'app', 'ui', 'motion.css'),
+  path.join(ROOT, 'app', 'ui', 'components.css'),
+  path.join(ROOT, 'app', 'ui', 'palette.css'),
 ];
 
 /** 布局属性：动画它们会触发布局重算 */

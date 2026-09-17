@@ -47,7 +47,21 @@
 
   const toastEl = $("#toast");
   let toastTimer = null;
-  function toast(text, kind) {
+
+  /**
+   * 提示条。
+   *
+   * P2 之后真正的实现是 `components.js` 里的 Toast 栈（多条能叠、能带撤销按钮、
+   * 有进出场动效）。这里保留旧实现作为**降级路径**：如果组件库没加载成功
+   * （资源表漏登记、加载顺序变了），提示仍然要能出来 —— 静默丢失用户反馈
+   * 比样式难看严重得多。
+   */
+  function toast(text, kind, opts) {
+    const UI = window.DeskBaseUI;
+    if (UI && typeof UI.toast === "function") {
+      UI.toast(text, { kind: kind === "error" ? "error" : "info", ...(opts || {}) });
+      return;
+    }
     toastEl.textContent = text;
     toastEl.dataset.kind = kind === "error" ? "error" : "info";
     toastEl.dataset.show = "true";
@@ -702,6 +716,20 @@
     h.textContent = `检查结果 · ${name}`;
     box.appendChild(h);
 
+    // CSV 才有：把探测到的编码与分隔符显式写出来。
+    // 用户报"导入进来全是乱码"时，这一行就是第一个要看的地方 ——
+    // 编码猜错了要让他能一眼看出来，而不是去猜。
+    if (report.encoding || report.delimiter) {
+      const meta = document.createElement("p");
+      meta.className = "muted";
+      meta.style.margin = "0 0 var(--sp-2)";
+      meta.textContent = [
+        report.encoding ? `编码 ${report.encoding}` : null,
+        report.delimiter ? `分隔符 ${report.delimiter}` : null,
+      ].filter(Boolean).join(" · ");
+      box.appendChild(meta);
+    }
+
     for (const s of report.sheets || []) {
       const p = document.createElement("p");
       p.className = "muted";
@@ -761,9 +789,112 @@
   });
 
   // ============================================================
+  // 命令面板（P2）
+  // ============================================================
+  // 面板自己接管 Ctrl+K。这里只负责"有哪些命令" —— 面板不认识业务，
+  // 业务也不认识面板，两边靠这张表解耦。
+  //
+  // 仓库地址与 openLink 是 boot() 里才拿到的（要先问 Rust），所以从参数传进来，
+  // 不用模块级变量 —— 那些命令在 boot 之外没有意义。
+  function registerCommands(ctx) {
+    const P = window.DeskBasePalette;
+    if (!P || typeof P.register !== "function") return false;
+
+    const cmds = [
+      {
+        id: "note.new", title: "新建笔记", group: "笔记", shortcut: "Ctrl+N", py: "xinjianbiji",
+        run: () => $("#btn-new-note").click(),
+      },
+      {
+        id: "note.save", title: "保存当前笔记", group: "笔记", shortcut: "Ctrl+S", py: "baocundangqianbiji",
+        run: () => flushSave(),
+      },
+      {
+        id: "note.delete", title: "删除当前笔记", group: "笔记", py: "shanchudangqianbiji",
+        run: () => $("#btn-delete-note").click(),
+      },
+      {
+        id: "note.export", title: "导出全部笔记为 Excel", group: "数据", py: "daochuquanbubiji",
+        run: () => $("#btn-export-xlsx").click(),
+      },
+      {
+        id: "data.import", title: "导入表格文件（Excel / CSV）", group: "数据", py: "daorubiaogewenjian",
+        run: () => $("#btn-import-xlsx").click(),
+      },
+      {
+        id: "data.reveal", title: "在资源管理器里打开导出目录", group: "数据", py: "dakaidaochumulu",
+        run: () => $("#btn-reveal-export").click(),
+      },
+    ];
+
+    // 四个视图各来一条，标题就是导航项的字，省得手抄一份还会抄错
+    VIEW_ORDER.forEach((v) => {
+      cmds.push({
+        id: "goto." + v,
+        title: "转到" + (TITLES[v] || v),
+        group: "导航",
+        run: () => showView(v),
+      });
+    });
+
+    // 主题切换也做成命令：主题有 11 个，逐个点设置页很慢，
+    // 而"换个主题看看"是个高频的随手动作
+    document.querySelectorAll("#theme-select option").forEach((opt) => {
+      cmds.push({
+        id: "theme." + opt.value,
+        title: "主题：" + opt.textContent,
+        group: "外观",
+        run: () => {
+          themeSel.value = opt.value;
+          applyThemeSmoothly(() => applyTheme(opt.value));
+          store("deskbase.theme", opt.value);
+        },
+      });
+    });
+
+    if (ctx && ctx.repo) {
+      cmds.push({
+        id: "app.repo", title: "打开项目仓库", group: "帮助", py: "dakaixiangmucangku",
+        run: () => ctx.openLink(ctx.repo),
+      });
+      cmds.push({
+        id: "app.releases", title: "检查更新", group: "帮助", py: "jianchagengxin",
+        shortcut: "",
+        run: () => $("#btn-check-update").click(),
+      });
+    }
+
+    P.register(cmds);
+    return cmds.length;
+  }
+
+  /**
+   * 界面自检：把"哪些模块真的加载成功了"报给 Rust 写进日志。
+   *
+   * 四个 <script> 是彼此独立的 —— 一个抛异常不影响其余，所以组件库或命令面板
+   * 没加载时页面看着完全正常，只是某个功能悄悄不工作。这种情况下
+   * "页面能打开"不能当作验收依据。让界面自己报告，出问题时看 app.log 即可。
+   */
+  async function selfCheck(cmdCount) {
+    try {
+      await call("app.diag", {
+        motion: !!(window.DeskBaseMotion && window.DeskBaseMotion.spring),
+        ui: !!(window.DeskBaseUI && window.DeskBaseUI.toast),
+        palette: !!(window.DeskBasePalette && window.DeskBasePalette.open),
+        motionTier: (window.DeskBaseMotion && window.DeskBaseMotion.tier && window.DeskBaseMotion.tier()) || "?",
+        commands: cmdCount || 0,
+        theme: root.dataset.theme || "?",
+      });
+    } catch (e) {
+      // 自检本身失败不该影响使用，也不该刷屏 —— 静默即可
+    }
+  }
+
+  // ============================================================
   // 启动
   // ============================================================
   async function boot() {
+    let lastCmdCount = 0;
     // 主题（默认宣纸；D-016 决定不让"跟随系统"当默认，保证用户第一眼看到宣纸）
     applyTheme(restoreSelect(themeSel, "deskbase.theme", "xuan"));
 
@@ -819,9 +950,18 @@
       });
       $("#btn-check-update").addEventListener("click", () => openLink(repo + "/releases"));
       refreshAudit();
+
+      // 命令面板留到最后注册：此时仓库地址已经拿到，
+      // 「打开项目仓库」那条命令带的才是真实地址而不是空串。
+      // 它必须在 try 内 —— repo / openLink 都是这个块里的 const。
+      lastCmdCount = registerCommands({ repo, openLink }) || 0;
     } catch (e) {
+      // 连 app.info 都拿不到时也要有面板可用：业务命令会因为没有数据而报错，
+      // 但至少"转到设置""换主题"这些纯前端的命令还能用
+      lastCmdCount = registerCommands(null) || 0;
       toast("初始化失败：" + e.message, "error");
     }
+
     await refreshList();
     showView("notes", { keepList: true });
     applySidebar();
@@ -840,6 +980,9 @@
         if (window.innerWidth >= 720) setPane("list");
       });
     });
+
+    // 自检放最后：首屏渲染完再报，不占启动路径
+    selfCheck(lastCmdCount);
   }
 
   // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）

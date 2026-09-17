@@ -11,6 +11,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod csv_import;
 mod db;
 mod render;
 mod xlsx;
@@ -354,6 +355,50 @@ fn dispatch(state: &AppState, req: Request) -> String {
                 }
                 Err(e) => err(id, e),
             }
+        }
+
+        // 界面自检。UI 在 boot 末尾调一次，把"哪些模块加载成功了"写进日志。
+        //
+        // 为什么值得专门做一个：模块是四个独立的 <script>，**一个抛异常不影响其余**，
+        // 所以组件库没加载时页面看起来一切正常，只是某个功能悄悄不工作。
+        // 这种情况下"页面能打开"是完全不可信的验收依据 —— 必须让界面自己报告。
+        // 出问题时用户把 app.log 发过来就能定位，不用远程调试。
+        "app.diag" => {
+            let a = &req.args;
+            let b = |k: &str| a.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+            let n = |k: &str| a.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let s = |k: &str| {
+                a.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            };
+            let mut missing: Vec<&str> = Vec::new();
+            if !b("motion") {
+                missing.push("motion");
+            }
+            if !b("ui") {
+                missing.push("components");
+            }
+            if !b("palette") {
+                missing.push("palette");
+            }
+            let line = if missing.is_empty() {
+                format!(
+                    "界面自检通过：动效=✓（档位 {}）组件库=✓ 命令面板=✓（{} 条命令）主题={}",
+                    s("motionTier"),
+                    n("commands"),
+                    s("theme"),
+                )
+            } else {
+                format!(
+                    "界面自检异常：模块未加载 {} —— 对应功能会静默失效，\
+                     请检查 app/src/assets.rs 的资源表是否登记了这些文件",
+                    missing.join(" / ")
+                )
+            };
+            log_line(&state.data_dir, &line);
+            ok(id, serde_json::json!({ "logged": true }))
         }
 
         "audit.tail" => {

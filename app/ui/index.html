@@ -7,6 +7,12 @@
 <!-- 相对引用即可：整页从 deskbase://localhost/ 加载，
      CSS / JS / 字体 / 图标都在同一个 origin 下（见 app/src/assets.rs） -->
 <link rel="stylesheet" href="theme.css" />
+<!-- motion.css 只声明三条 linear() 弹簧曲线，不写任何 transition；
+     components.css / palette.css 是自包含组件的样式。
+     三者的选择器都带自己的前缀或属性作用域，顺序不影响结果。 -->
+<link rel="stylesheet" href="motion.css" />
+<link rel="stylesheet" href="components.css" />
+<link rel="stylesheet" href="palette.css" />
 <link rel="icon" href="brand/icon-64.png" />
 </head>
 <body>
@@ -329,6 +335,11 @@
 
 <div class="toast" id="toast" data-show="false" role="status" aria-live="polite"></div>
 
+<!-- 组件库与命令面板都是自包含的 IIFE：DOM 在运行时创建并挂到 body，
+     这里只负责把它们加载进来。必须排在 app.js 之前 —— app.js 是它们的调用方。 -->
+<script src="motion.js"></script>
+<script src="components.js"></script>
+<script src="palette.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

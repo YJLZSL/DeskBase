@@ -1,0 +1,564 @@
+/* ============================================================
+   DeskBase 基础组件库 · 样式
+   ============================================================
+   为什么单独一份文件，而不是继续往 theme.css 里塞：
+     theme.css 是 token 层 + 主题层，它的改动被"十个主题的观感"驱动；
+     组件是"行为与动效"的宿主，两者改动节奏完全不同。docs/18 第十一节
+     把顺序钉死为「token → 组件 → 主题打磨」：组件只认 token，不知道
+     主题从哪来；主题也不需要知道有哪些组件。混在一个文件里，这两件事
+     会互相污染（最典型的是有人为了某个组件往主题里加一条组件专用 token）。
+
+   为什么所有类名都带 `dbui-` 前缀：
+     theme.css 里已经有 `.toast` / `.card` / `.btn` / `.field`，那些是应用
+     自己的样式，和本文件的同名组件不是同一个东西。前缀是这里唯一能保证
+     互不干扰的办法（本文件不许改 theme.css，也不想被它的选择器命中）。
+
+   动效三条铁律（docs/18 原则 7 + scripts/check-motion.cjs）：
+     1. 只动 transform / opacity。transition / animation 里绝不出现
+        width / height / top / left / margin / padding / gap 等布局属性 ——
+        布局属性每帧重算几何，长列表里这是掉帧的第一来源。
+     2. 没有任何循环动画。骨架屏微光也只扫一次（loop 会违反「空闲时
+        唯一动画数 = 0」的性能红线）。
+     3. 时长一律走 token（这里是 --dbui-dur-*，它们由 --dur-* 派生）。
+        动效档位调到「关」时 --dur-* 自己变成 1ms，于是本文件里的所有
+        过渡都会瞬间完成 —— 不需要在 CSS 里为「关」写任何特例。
+   ============================================================ */
+
+/* ============================================================
+   派生时长与几何
+   ============================================================
+   docs/18 给的是具体毫秒（240 / 250 / 150 / 1600），token 表给的是
+   90/150/200/320/460。两者并不冲突：这里用 calc 从 token 乘出来，
+   既命中规格值，又保持"改 token 就能整体调节"的性质。
+   off 档下 --dur-* 是 1ms，乘出来的还是 1ms 级别，档位语义不丢。
+   ============================================================ */
+:root {
+  --dbui-dur-toast-in: calc(var(--dur-normal) * 1.2); /* 240ms：新 toast 从下方浮上来 */
+  --dbui-dur-toast-out: var(--dur-fast); /* 150ms：退出比进入快 */
+  --dbui-dur-toast-shift: var(--dur-normal); /* 200ms：已有 toast 让位 */
+  --dbui-dur-panel-in: calc(var(--dur-normal) * 1.25); /* 250ms */
+  --dbui-dur-panel-out: var(--dur-fast); /* 150ms：出比入快 */
+  --dbui-dur-scrim: var(--dur-normal); /* 200ms：遮罩淡入 */
+  --dbui-dur-cross: var(--dur-normal); /* 200ms：骨架 ⇄ 内容交接，两边同长、无间隔 */
+  --dbui-dur-switch: var(--dur-fast); /* 150ms */
+  --dbui-dur-tip: var(--dur-fast);
+  --dbui-dur-shimmer: calc(var(--dur-slow) * 5); /* 1600ms：docs/18 7.5 C 给的骨架微光时长 */
+
+  /* 工具提示的进场缓动。规格要求用 --ease-spring-snappy；theme.css 目前
+     没有这个 token，所以按「有则用、没有就退回」的链条写：
+       spring-snappy（规格名）→ spring（项目里真实存在的过冲曲线）
+       → standard（兜底）。
+     这样今天就能拿到"轻微过冲"，而一旦 theme.css 补上 spring-snappy，
+     它会自动接管，这里不用改。minimal / off 档下 --ease-spring 自己会
+     变成标准曲线或 linear，档位语义同样不丢。 */
+  --dbui-ease-tip: var(--ease-spring-snappy, var(--ease-spring, var(--ease-standard)));
+
+  /* 滚动边缘阴影的高度。它是静态几何（不是过渡目标），
+     所以这里写长度是安全的。 */
+  --dbui-shadow-h: 16px;
+  --dbui-shadow-range: 32px; /* 顶部阴影从"滚了 32px"开始完全显形 */
+}
+
+/* ============================================================
+   Toast 栈
+   ============================================================
+   几何方案：容器是一个 0×0 的定位基准点，每条 toast 都绝对定位在
+   它的左下角，再靠 translateY 抬到自己那一层。
+   为什么不直接用 flex 列（那样代码更短）：
+     新 toast 插入时，其它 toast 的"上移"会变成一次布局变化 —— 布局
+     变化是瞬间的、不可过渡的，看起来就是"跳一下"。这里让每条 toast
+     的高度只决定它自己的 --dbui-stack-y，位置全部由 transform 表达，
+     于是"让位"是一次纯合成层的位移，可以平滑过渡。
+   ============================================================ */
+.dbui-toasts {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-5);
+  width: 0;
+  height: 0;
+  z-index: 90;
+  /* 容器不参与命中测试，只有 toast 本体可交互 */
+  pointer-events: none;
+  --dbui-toast-gap: var(--sp-2); /* JS 读这个值来算让位距离，只有一处定义 */
+}
+
+.dbui-toast {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  /* width 必须显式给 max-content：容器的宽是 0（它只是个定位基准点），
+     绝对定位的 toast 会按"可用宽度 0"收缩到最小内容宽度 —— 中文会
+     变成一列竖排的单字。max-content 让宽度只由内容决定，再由 max-width 封顶。 */
+  width: max-content;
+  max-width: min(560px, 80vw);
+  padding: 10px var(--sp-4);
+  border-radius: var(--radius-md);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--fs-sub);
+  line-height: 1.6;
+  text-align: left;
+  box-shadow: var(--shadow-2);
+  pointer-events: auto;
+  /* 位置完全由 transform 表达：--dbui-stack-y 是"下面压着多少条"的累计高度 */
+  transform: translate(-50%, calc(var(--dbui-stack-y, 0px) * -1));
+  transition: transform var(--dbui-dur-toast-shift) var(--ease-standard),
+    opacity var(--dbui-dur-toast-out) var(--ease-exit);
+  animation: dbui-toast-in var(--dbui-dur-toast-in) var(--ease-enter) both;
+}
+
+/* 只写 from：to 取元素自己的计算值（即上面那个 translate），
+   于是"从下方 12px 浮到自己的层位"是一句话的事，不需要两处同步。
+   位移量用 --mo-slide 派生 —— 标准档正好是 12px，精简/丰富档自动收放。 */
+@keyframes dbui-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(
+      -50%,
+      calc(var(--dbui-stack-y, 0px) * -1 + var(--mo-slide, 8px) + 4px)
+    );
+  }
+}
+
+/* 退出：只淡出 + 略微下沉。150ms 比进场短，符合"出比入快"的通用规律
+   （用户已经做了决定，系统不该再让他等）。 */
+.dbui-toast[data-state="leaving"] {
+  opacity: 0;
+  transform: translate(-50%, calc(var(--dbui-stack-y, 0px) * -1 + var(--mo-lift, 2px)));
+  /* 进场动画的 fill:both 会一直压着 transform/opacity，退出过渡就没有起点。
+     JS 侧会先摘掉动画并强制一次重排，这里再兜一道。 */
+  animation: none;
+}
+
+/* 语义色：文字一律用 --paper 而不是写死白色。
+   --danger 在暗色/高对比主题里是**浅色**（如 #ff9080），白字在上面
+   只有 1.9:1；--paper 在那些主题里是深色，反而全部达标。 */
+.dbui-toast[data-kind="error"] {
+  background: var(--danger);
+  color: var(--paper);
+}
+.dbui-toast[data-kind="success"] {
+  background: var(--success);
+  color: var(--paper);
+}
+
+.dbui-toast-act {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: transform var(--dur-instant) var(--ease-standard);
+}
+.dbui-toast-act:active {
+  transform: scale(0.96);
+}
+
+/* ============================================================
+   确认框 / 模态框（confirm / modal）
+   ============================================================ */
+.dbui-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-4);
+  overflow: auto;
+  /* 遮罩用墨色的低透明度，而不是写死黑：暗色主题下纯黑遮罩会把
+     整个界面压成一片，看不出景深 */
+  background: color-mix(in srgb, var(--ink) 40%, transparent);
+  opacity: 0;
+  /* visibility 只做开关、不做过渡。留着它是为了让关闭状态彻底离开
+     可访问性树与命中测试；关闭动画期间必须保持 visible，所以两条规则
+     一起写。 */
+  visibility: hidden;
+  transition: opacity var(--dbui-dur-scrim) var(--ease-standard);
+}
+.dbui-scrim[data-state="open"],
+.dbui-scrim[data-state="leaving"] {
+  visibility: visible;
+}
+.dbui-scrim[data-state="open"] {
+  opacity: 1;
+}
+.dbui-scrim[data-state="leaving"] {
+  opacity: 0;
+  transition-duration: var(--dbui-dur-panel-out);
+}
+
+.dbui-panel {
+  width: min(440px, 100%);
+  background: var(--card);
+  color: var(--ink);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  padding: var(--sp-5);
+  /* transform-origin 由 JS 按触发位置写内联样式，默认居中 */
+  animation: dbui-panel-in var(--dbui-dur-panel-in) var(--ease-enter) both;
+  transition: opacity var(--dbui-dur-panel-out) var(--ease-exit),
+    transform var(--dbui-dur-panel-out) var(--ease-exit);
+}
+
+/* 缩放 + 淡入。不用"从中心爆开"：面板尺寸越大，中心放大的位移越夸张 */
+@keyframes dbui-panel-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.dbui-scrim[data-state="leaving"] .dbui-panel {
+  opacity: 0;
+  transform: scale(0.97);
+  animation: none;
+}
+
+.dbui-panel-title {
+  margin: 0 0 var(--sp-3);
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+.dbui-panel-body {
+  margin: 0 0 var(--sp-5);
+  font-size: var(--fs-sub);
+  color: var(--ink-2);
+  line-height: var(--lh-body);
+  text-wrap: pretty;
+  /* 内容可能很长（如"这个操作会影响 N 条笔记"）—— 让面板自己滚，
+     而不是把面板撑出视口。max-height 是静态几何，不参与任何过渡。 */
+  max-height: 56vh;
+  overflow: auto;
+}
+.dbui-panel-body p {
+  margin: 0 0 var(--sp-2);
+}
+.dbui-panel-body p:last-child {
+  margin-bottom: 0;
+}
+
+.dbui-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* ---------- 面板里的按钮 ----------
+   刻意不复用 theme.css 的 .btn：那是一个应用级样式，本文件不许依赖它，
+   否则它的改动会连带影响弹窗（而且弹窗可能在 .btn 之前就被渲染出来）。
+   视觉上贴着 .btn 走，全部用 token，主题换掉时观感一致。 */
+.dbui-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sub);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform var(--dur-instant) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+.dbui-btn:hover {
+  background: var(--paper-2);
+}
+.dbui-btn:active {
+  transform: scale(0.972);
+}
+.dbui-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.dbui-btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+.dbui-btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--paper);
+}
+.dbui-btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 86%, #000);
+}
+.dbui-btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+/* ============================================================
+   骨架屏
+   ============================================================
+   交接（replace）时的关键约束：骨架**就地**淡出，不做任何位移。
+   骨架一旦滑动，用户看到的"内容到达"就发生在错误的位置上 ——
+   位置感一乱，骨架屏反而比转圈更糟。
+   ============================================================ */
+.dbui-skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.dbui-skel-row {
+  position: relative;
+  overflow: hidden;
+  height: 12px; /* 静态几何：骨架行高不参与过渡 */
+  width: var(--dbui-skel-w, 100%);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+}
+.dbui-skel-row:nth-child(3n) {
+  /* 宽度错落一下，避免整块看起来像表格 */
+  --dbui-skel-w: 72%;
+}
+
+/* 微光：一条高光扫过。只扫一次 —— 循环会违反 docs/18 原则 7「无循环」，
+   而空闲时唯一动画数必须为 0。扫一次足够表达"正在加载"，之后骨架静态。
+   高光用 --ink 的低透明度，明暗主题都能用（暗色主题里它是一条更深的扫过）。 */
+.dbui-skel-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--ink) 8%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: dbui-skel-sweep var(--dbui-dur-shimmer) linear 1 both;
+}
+
+@keyframes dbui-skel-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.dbui-skel[data-state="leaving"] {
+  opacity: 0;
+  transition: opacity var(--dbui-dur-cross) var(--ease-exit);
+}
+
+/* 真实内容进场：只淡入、不位移（与骨架淡出同时开始、同时结束）。
+   JS 在动画结束后会把类摘掉，不留痕迹。 */
+.dbui-arrive {
+  animation: dbui-arrive var(--dbui-dur-cross) var(--ease-enter) both;
+}
+
+@keyframes dbui-arrive {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ============================================================
+   开关
+   ============================================================
+   轨道与滑块都是静态几何：切换时只动滑块的 translateX 与轨道的
+   背景色。轨道宽度里含 --line-w（高对比/粗野主题是 2–3px），
+   所以位移量按 --line-w 扣掉两条边框，滑块才不会被推到边框外面。
+   ============================================================ */
+.dbui-switch {
+  --dbui-knob: 16px;
+  --dbui-switch-travel: calc(18px - 2 * var(--line-w));
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper-2);
+  cursor: pointer;
+  transition: background-color var(--dbui-dur-switch) var(--ease-standard),
+    border-color var(--dbui-dur-switch) var(--ease-standard);
+}
+
+.dbui-switch::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: var(--dbui-knob);
+  height: var(--dbui-knob);
+  /* 负 margin 只用来做静态垂直居中，从不参与过渡 */
+  margin-top: calc(var(--dbui-knob) / -2);
+  border-radius: 50%;
+  background: var(--card);
+  box-shadow: var(--shadow-1);
+  transform: translateX(0);
+  transition: transform var(--dbui-dur-switch) var(--ease-standard);
+}
+
+.dbui-switch[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.dbui-switch[aria-checked="true"]::after {
+  transform: translateX(var(--dbui-switch-travel));
+}
+.dbui-switch:active::after {
+  /* 按下的即时反馈：极短的横向拉伸，沿用 translateX 通道 */
+  transform: translateX(0) scaleX(1.08);
+}
+.dbui-switch[aria-checked="true"]:active::after {
+  transform: translateX(var(--dbui-switch-travel)) scaleX(1.08);
+}
+
+/* ============================================================
+   工具提示
+   ============================================================ */
+.dbui-tip {
+  position: fixed;
+  z-index: 100;
+  max-width: min(280px, 60vw);
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--fs-aux);
+  line-height: 1.55;
+  box-shadow: var(--shadow-2);
+  pointer-events: none;
+  /* transform-origin 由 JS 写到朝向被提示元素的那一角 */
+  opacity: 0;
+  transform: translateY(calc(var(--mo-lift, 2px) * var(--dbui-tip-dir, 1))) scale(0.94);
+  transition: opacity var(--dbui-dur-tip) var(--ease-exit),
+    transform var(--dbui-dur-tip) var(--dbui-ease-tip);
+}
+.dbui-tip[data-state="on"] {
+  opacity: 1;
+  transform: none;
+}
+
+/* ============================================================
+   滚动边缘阴影
+   ============================================================
+   用 position: sticky 的伪元素，而不是"滚动监听 + 改 opacity"：
+   后者每一帧都要跑 JS 读 scrollTop 再写样式，滚动帧率直接被拖下去
+   （docs/18 9 要求滚动帧率 ≥ 55 FPS）。sticky 伪元素是纯 CSS 的，
+   配 animation-timeline 连"何时出现"都由合成器算。
+   两条路径：
+     · dbui-scroll-tl —— 支持 scroll() 时间线：纯 CSS，零 JS 运行成本
+     · dbui-scroll-io —— 兜底：IntersectionObserver 切属性，只做一次切换
+   伪元素用负 margin 抵消自身高度，所以遮罩不占内容空间（容器是 block 流时）。
+   例外：容器若是 flex/grid，伪元素会成为 flex 项 / 网格项，可能多出
+   一个 gap 的偏移（grid 容器更严重，JS 侧会直接跳过并给出提示）。
+   ============================================================ */
+.dbui-scroll::before,
+.dbui-scroll::after {
+  content: "";
+  position: sticky;
+  display: block;
+  height: var(--dbui-shadow-h);
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+}
+.dbui-scroll::before {
+  top: 0;
+  margin-bottom: calc(var(--dbui-shadow-h) * -1);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--ink) 14%, transparent),
+    transparent
+  );
+}
+.dbui-scroll::after {
+  bottom: 0;
+  margin-top: calc(var(--dbui-shadow-h) * -1);
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--ink) 14%, transparent),
+    transparent
+  );
+}
+
+/* ---------- 路径一：滚动时间线 ----------
+   动画进度直接由滚动位置驱动，没有时长、没有缓动（scroll 时间线只接受
+   linear），因此不会"播放"，也就不存在循环的可能。 */
+.dbui-scroll-tl::before,
+.dbui-scroll-tl::after {
+  animation-name: dbui-scroll-shadow-in;
+  /* auto = 跟随时间线的整段范围；写清楚是为了不依赖初始值 */
+  animation-duration: auto;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+  /* 必须写在 animation-* 简写之后：简写会把 timeline 重置回 auto */
+  /* nearest 而不是 self：动画挂在伪元素上，而 self 指的是"元素自己" ——
+     伪元素不是滚动容器，时间线会是"非活跃"的，动画从头到尾不生效
+     （实测：opacity 恒为 0）。nearest 找到的是伪元素最近的可滚动祖先，
+     正是宿主容器本身。 */
+  animation-timeline: scroll(nearest block);
+}
+.dbui-scroll-tl::before {
+  animation-range: 0 var(--dbui-shadow-range);
+}
+.dbui-scroll-tl::after {
+  /* 底部用百分比而不是 calc(100% - 32px)：百分比在滚动范围上按比例
+     解析，长列表的淡出区会跟着变长，且不必赌 calc 在各版本的解析行为。
+     容器不可滚动时时间线是"非活跃"的，动画不生效，遮罩保持 opacity:0，
+     所以不会有"没得滚却挂着一条底部阴影"的假象。 */
+  animation-range: 88% 100%;
+}
+
+@keyframes dbui-scroll-shadow-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dbui-scroll-shadow-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* 底部阴影是"反过来"的一条：滚到接近底就该消失 */
+.dbui-scroll-tl::after {
+  animation-name: dbui-scroll-shadow-out;
+}
+
+/* ---------- 路径二：IntersectionObserver 兜底 ----------
+   JS 只切换 data-dbui-top / data-dbui-bottom 两个属性，滚动过程中
+   一行 JS 都不跑；淡入淡出由 opacity 过渡承担。 */
+.dbui-scroll-io::before,
+.dbui-scroll-io::after {
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.dbui-scroll-io[data-dbui-top="true"]::before,
+.dbui-scroll-io[data-dbui-bottom="true"]::after {
+  opacity: 1;
+}

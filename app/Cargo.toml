@@ -33,6 +33,13 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 calamine = { version = "0.36", features = ["chrono"] }
 rust_xlsxwriter = "0.99"
 
+# 编码：CSV 导入用（app/src/csv_import.rs）。
+# 中文 Excel 的「另存为 CSV」输出的是 **GBK 不是 UTF-8** —— 这是本模块存在的主要理由，
+# 也是最常见的"导入进来全是乱码"的原因。GB18030 是 GBK 的超集，简体场景一个就够。
+# 选它的额外好处：它本来就是 calamine 的传递依赖，**已经在 Cargo.lock 里**，
+# 提成直接依赖不新增任何包、不需要联网、也不改变体积（LTO 会剔掉未用到的表）。
+encoding_rs = "0.8"
+
 # 原生文件选择框（导入 Excel、选备份目录等）。
 # 为什么必须是原生对话框而不是 <input type="file">：WebView2 里后者只给
 # `C:\fakepath\x.xlsx` 这种假路径，拿不到真实路径，Rust 侧无法打开文件。

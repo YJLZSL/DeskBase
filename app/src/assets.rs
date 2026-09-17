@@ -66,6 +66,39 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- 动效运行时（P1） ----------
+        // motion.css 只声明变量（三条 linear() 弹簧曲线），motion.js 是它的运行时。
+        // 两者必须**成对**登记：只挂 CSS 时 spring() 读不到曲线，只会退化成
+        // cubic-bezier 近似并在控制台告警；只挂 JS 时 lift() 无处可读时长。
+        "/motion.css" => Asset {
+            bytes: include_bytes!("../ui/motion.css"),
+            mime: CSS,
+        },
+        "/motion.js" => Asset {
+            bytes: include_bytes!("../ui/motion.js"),
+            mime: JS,
+        },
+
+        // ---------- 基础组件库与命令面板（P2） ----------
+        // 这四份都是自包含的：DOM 在运行时创建并挂到 body，
+        // index.html 里只负责加 <link> / <script>，不写任何标记。
+        "/components.css" => Asset {
+            bytes: include_bytes!("../ui/components.css"),
+            mime: CSS,
+        },
+        "/components.js" => Asset {
+            bytes: include_bytes!("../ui/components.js"),
+            mime: JS,
+        },
+        "/palette.css" => Asset {
+            bytes: include_bytes!("../ui/palette.css"),
+            mime: CSS,
+        },
+        "/palette.js" => Asset {
+            bytes: include_bytes!("../ui/palette.js"),
+            mime: JS,
+        },
+
         // ---------- 字体（见 tools/fonts/ 的来源登记与校验脚本） ----------
         // 得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
         // 许可原文随包分发：app/ui/fonts/OFL-smiley-sans.txt
@@ -198,6 +231,46 @@ mod tests {
                 "UI 引用了 {path}，但 assets.rs 的资源表里没有它 —— 会渲染成破图"
             );
         }
+    }
+
+    /// 上面那个测试只查 brand/ 与 fonts/，`<script src>` 和 `<link href>` 完全不在它的
+    /// 视野里 —— 而新增的每个 JS/CSS 都要在资源表里登记一行，漏了就静默 404，
+    /// 页面照样能开，只是某个功能悄悄不工作。这正是并行开发最容易踩的一脚。
+    ///
+    /// 所以这里把所有**站内**引用（相对路径、非 http/data/# ）都扫一遍。
+    #[test]
+    fn 首页引用的每个脚本与样式都能被服务() {
+        let html = std::str::from_utf8(include_bytes!("../ui/index.html")).unwrap();
+
+        // 取出 src="..." 与 href="..." 的值
+        let mut refs: Vec<String> = Vec::new();
+        for attr in ["src=\"", "href=\""] {
+            for part in html.split(attr).skip(1) {
+                if let Some(end) = part.find('"') {
+                    refs.push(part[..end].to_string());
+                }
+            }
+        }
+
+        assert!(refs.len() >= 5, "一个引用都没扫到，说明这个测试本身失效了");
+
+        let mut checked = 0;
+        for r in &refs {
+            // 只关心站内资源：外链、行内、锚点一律跳过
+            if r.contains("://") || r.starts_with("data:") || r.starts_with('#') || r.is_empty() {
+                continue;
+            }
+            let path = format!("/{r}");
+            assert!(
+                lookup(&path).is_some(),
+                "index.html 引用了 {r}，但资源表里没有它 —— \
+                 浏览器会拿到 404，页面不报错、功能静默失效。\
+                 请在这里登记：app/src/assets.rs 的 lookup()"
+            );
+            checked += 1;
+        }
+        // 目前是 4 个 CSS + 4 个 JS + 1 个图标 = 9；留点余量防止将来删文件后测试变成空转
+        assert!(checked >= 8, "只校验了 {checked} 个引用，疑似扫描逻辑失效");
     }
 
     #[test]

@@ -1,0 +1,323 @@
+/* ============================================================
+   DeskBase 命令面板 · 样式
+   ============================================================
+   对应 docs 里的 P5-04。这里是**浮层**，不占布局流，所以它可以把
+   当初在顶栏搜索框上没敢做的动效（聚焦展开、落位回弹）在这里做全 ——
+   浮层动的是 transform/opacity，不触发布局。
+
+   ## 三条硬约束（违反会被 scripts/check-motion.cjs 拦下）
+
+   1. 只动 transform / opacity / 颜色类。绝不碰 width / height / top / left /
+      margin / padding —— 命令面板每次按键都要重排列表，一旦动了布局属性，
+      在 120Hz 屏上就是每帧重算几何。
+   2. 没有任何循环动画。空态里不放骨架微光那类装饰。
+   3. 进出用 @starting-style + transition-behavior: allow-discrete，
+      这样常驻 display: none 的浮层也能有进/出过程（老引擎忽略即可，
+      退化成"直接出现/消失"，不影响可用性）。
+
+   ## 时长
+
+   面板定位在 z-index: 60（比 toast 的 50 高：它是模态浮层，被 toast 压住
+   会显得"没打开"）。
+
+   入 200ms（--dur-normal）、出 140ms（0.7 × 入）。**出比入快**是
+   Material / Carbon 都写进规范的一条：关闭是用户已经做完决定之后的动作，
+   再拖 200ms 只会让人觉得卡。这里不写死 140ms，而是用
+   calc(var(--dur-normal) * 0.7) —— 这样「关 / 精简 / 丰富」四档动效
+   以及 prefers-reduced-motion（theme.css 里已统一压时长）都自动跟着走。
+   ============================================================ */
+
+.dp-root {
+  /* 局部时长/位移，全部派生自 token —— 档位一变，这里跟着变 */
+  --dp-enter: var(--dur-normal);
+  --dp-exit: calc(var(--dur-normal) * 0.7);
+  /* 从上方落下：方向 × 幅度都用 token，位移幅度自动响应动效档位 */
+  --dp-drop: calc(var(--mo-slide) * -1.5);
+  --dp-scale: 0.98;
+
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: none;
+
+  /* display 是离散属性：关掉它要等淡出跑完才真的消失，否则退出动画会被
+     自己"藏起来"（这正是 allow-discrete 存在的意义）。用长写而不是
+     transition 简写：不认识 allow-discrete 的引擎只会忽略这一条声明，
+     不会把整条 transition 一起丢掉。 */
+  transition-property: display;
+  transition-duration: var(--dp-exit);
+  transition-timing-function: linear;
+  transition-behavior: allow-discrete;
+}
+
+.dp-root[data-open="true"] {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  /* 面板出现在视口上三分之一 —— 视线起点在那儿，不用整屏找 */
+  padding-block-start: 12vh;
+}
+
+/* 「关 / 精简」两档不做缩放：缩放在这两档里属于"表现型"，用户明确要求少动 */
+[data-motion="off"] .dp-root,
+[data-motion="minimal"] .dp-root {
+  --dp-scale: 1;
+}
+
+/* ---------- 遮罩 ----------
+   颜色用 --shadow-hue：它就是各主题给阴影定的色相（浅色主题是暖灰、
+   暗色主题是纯黑），于是这里天然是"一层阴影盖在页面上"，而且不用写死色值。
+   不加 backdrop-filter：整屏实时模糊在淡入过程中每帧都要重采样背景，
+   是这一屏里最贵的操作，而它换来的信息量为零。 */
+.dp-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, rgb(var(--shadow-hue, 0, 0, 0)) 34%, transparent);
+  opacity: 0;
+  transition: opacity var(--dp-exit) var(--ease-exit);
+}
+
+.dp-root[data-open="true"] .dp-scrim {
+  opacity: 1;
+  transition: opacity var(--dp-enter) var(--ease-enter);
+}
+
+/* ---------- 面板 ---------- */
+.dp-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(640px, calc(100vw - var(--sp-6)));
+  max-height: min(66vh, 560px);
+  overflow: hidden;
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-2);
+  /* 收起态（= 退出动画的目标态）：微微上移 + 缩到 0.98 */
+  opacity: 0;
+  transform: translateY(var(--dp-drop)) scale(var(--dp-scale));
+  transform-origin: 50% 0;
+  transition: opacity var(--dp-exit) var(--ease-exit),
+    transform var(--dp-exit) var(--ease-exit);
+}
+
+.dp-root[data-open="true"] .dp-panel {
+  opacity: 1;
+  transform: none;
+  /* 进入走 --ease-spring-smooth（同事在加；没有就退回 --ease-glide），
+     落位时有一点点过冲 —— 这是"苹果那种感觉"的来源，但过冲只放在
+     transform 上，opacity 仍走标准曲线（透明度过冲会看起来像闪一下） */
+  transition: opacity var(--dp-enter) var(--ease-enter),
+    transform var(--dp-enter) var(--ease-spring-smooth, var(--ease-glide));
+}
+
+/* 进入起点。@starting-style 让"元素第一次被渲染"也能有起始值，
+   这是 display: none ↔ grid 之间做过渡的唯一办法。 */
+@starting-style {
+  .dp-root[data-open="true"] .dp-scrim {
+    opacity: 0;
+  }
+  .dp-root[data-open="true"] .dp-panel {
+    opacity: 0;
+    transform: translateY(var(--dp-drop)) scale(var(--dp-scale));
+  }
+}
+
+/* ---------- 输入行 ---------- */
+.dp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--line-w) solid var(--line);
+}
+
+.dp-head .ico {
+  color: var(--ink-3);
+}
+
+.dp-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-body);
+  outline: none;
+}
+.dp-input::placeholder {
+  color: var(--ink-3);
+}
+/* 输入框一直是焦点，浏览器那圈焦点环会变成面板内部一条常驻描边 ——
+   这里是模态浮层，焦点跑不掉，改用面板自己的边框表达"已就绪" */
+.dp-input:focus-visible {
+  outline: none;
+}
+.dp-root[data-open="true"] .dp-panel {
+  border-color: var(--line-strong);
+}
+
+/* ---------- 结果区 ---------- */
+.dp-body {
+  position: relative; /* 滑动高亮的定位基准 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain; /* 列表滚到底不把后面的页面带着滚 */
+  contain: layout paint;
+  padding-block: var(--sp-1);
+}
+
+/* 选中高亮：一整块背景靠 translateY 滑动。
+   为什么不给每行改 background —— 那样只能"跳"，没有落位感；而这个
+   做法和侧栏的 .nav-pill、筛选条的 .filter-pill 是同一套语言。
+   前提是行高固定（--row-h），所以行高不在这里动，位置由 JS 量出来。 */
+.dp-hi {
+  position: absolute;
+  inset-inline: var(--sp-2);
+  /* top 必须是 0：绝对定位的包含块是 .dp-body 的 padding box，而 JS 量到的
+     offsetTop 也是以同一个 padding box 为原点 —— 两边对齐，位移量才能直接用。
+     写成 var(--sp-1) 就会把 body 的 padding 算两遍，高亮整体偏下。 */
+  top: 0;
+  height: var(--row-h, 34px);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0);
+  transition: transform var(--dur-fast) var(--ease-spring-smooth, var(--ease-glide)),
+    opacity var(--dur-fast) var(--ease-standard);
+}
+.dp-body[data-hi="on"] .dp-hi {
+  opacity: 1;
+}
+
+.dp-group-label {
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  letter-spacing: 0.06em;
+}
+/* 高亮块永远是第一子元素，所以"第一个组标题"就是它后面那个 ——
+   用 :first-child 是不行的（第一子元素永远是 .dp-hi） */
+.dp-hi + .dp-group-label {
+  padding-top: 0;
+}
+
+.dp-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  /* 固定行高：滑动高亮才能只用位移对齐（同 .nav-item 的理由）。
+     行高本身不是动画属性，改它不违反约束。 */
+  height: var(--row-h, 34px);
+  padding: 0 var(--sp-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sub);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard);
+  /* 逐项错峰淡入：--i 由 JS 给（最多累加到 8 项），节奏来自 --stagger
+     （标准档 18ms，精简/关档 0ms，丰富档 34ms） */
+  animation: dp-item-in var(--dur-normal) var(--ease-glide) both;
+  animation-delay: calc(var(--i, 0) * var(--stagger));
+}
+/* 列表重建时（打字过程中）不重放逐项动画 —— 每敲一个字都从 0 淡入
+   会像在闪。只有刚打开那一次做错峰 */
+.dp-body[data-anim="off"] .dp-item {
+  animation: none;
+}
+
+@keyframes dp-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--mo-slide));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.dp-item .t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dp-item[aria-selected="true"] {
+  color: var(--accent);
+}
+
+/* 快捷键提示：等宽字体 + 细边框，和"这是键盘上的那个键"对应起来 */
+.dp-kbd {
+  flex: none;
+  padding: 0 var(--sp-1);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  font-family: var(--font-code);
+  font-size: var(--fs-aux);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.dp-item[aria-selected="true"] .dp-kbd {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+
+/* ---------- 空态 ---------- */
+.dp-empty {
+  padding: var(--sp-5) var(--sp-4);
+  color: var(--ink-3);
+  font-size: var(--fs-sub);
+  text-align: center;
+  text-wrap: pretty;
+}
+
+/* ---------- 底栏 ---------- */
+.dp-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  padding: var(--sp-2) var(--sp-4);
+  border-top: var(--line-w) solid var(--line);
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+}
+/* 底栏左侧的计数/超限提示。类名稳定为 .dp-count，两种状态用 data-kind 区分 */
+.dp-count[data-kind="more"] {
+  color: var(--ink-2);
+}
+.dp-hint {
+  margin-inline-start: auto;
+  white-space: nowrap;
+}
+.dp-hint .dp-kbd {
+  margin-inline: 2px;
+}
+
+/* 触屏/窄窗口：面板几乎占满宽度，落到顶部更好按 */
+@media (max-width: 559px) {
+  .dp-root[data-open="true"] {
+    padding-block-start: var(--sp-4);
+  }
+  .dp-panel {
+    width: calc(100vw - var(--sp-3) * 2);
+    max-height: 78vh;
+  }
+  .dp-foot {
+    padding-inline: var(--sp-3);
+  }
+}
