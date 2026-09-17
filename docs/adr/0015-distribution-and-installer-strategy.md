@@ -3,7 +3,7 @@
 - **状态**：提议
 - **日期**：2026-09-17
 - **决策者**：待定（依赖 ADR-0010 桌面外壳选型，L3 决策）
-- **相关**：[11 · 安全与资源优化专项](../11-security-and-resource-optimization.md)、[12 · 安装与卸载体验](../12-installer-and-uninstaller.md)、[0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md)、[0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)、[`poc/`（基准脚本可复现）](../reference/15-installer-research.md)
+- **相关**：[11 · 安全与资源优化专项](../11-security-and-resource-optimization.md)、[12 · 安装与卸载体验](../12-installer-and-uninstaller.md)、[0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md)、[0010 · 桌面外壳技术选型](0010-desktop-shell-selection.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)、`poc/`（基准脚本可复现）
 
 ---
 
@@ -49,7 +49,9 @@ Rust / NSIS / Inno / WiX / Windows SDK 均 ❌ 未装。任何方案需说明额
 3. **备选（加速交付）**：v0.1.0 若外壳选型未定或时间紧，可先用 NSIS/Inno 产出标准向导安装包占位（UI 降级），后续替换为自绘安装器。
 4. **不采用 MSIX / WiX-MSIX** 作为 v0.1.0 主方案：MSIX 安装 UI 不可定制（系统 App Installer），直接违反 docs/12 硬要求；仅在未来作为可选企业/商店渠道评估（待 Q6）。
 
-本 ADR 状态为「提议」：因 ADR-0010 外壳选型未定，安装器具体技术路线仍需 PoC 确认，故暂不作为「已接受」。
+本 ADR 状态为「提议」：安装器具体技术路线仍需 PoC 确认，故暂不作为「已接受」。
+（原先的理由「因 ADR-0010 外壳选型未定」已经解除 —— ADR-0010 已接受，
+选型定为「Rust + 系统 WebView2，Windows 优先」。）
 
 ---
 
@@ -135,6 +137,6 @@ Rust / NSIS / Inno / WiX / Windows SDK 均 ❌ 未装。任何方案需说明额
 - [11 · 安全与资源优化专项](../11-security-and-resource-optimization.md) — 落点清单、最小注册表、卸载设计
 - [12 · 安装与卸载体验](../12-installer-and-uninstaller.md) — 13 步向导与自绘界面硬要求
 - [0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md) — 用户级 HKCU 决策
-- [0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection.md) — 安装器依赖的选型
+- [0010 · 桌面外壳技术选型](0010-desktop-shell-selection.md) — 安装器依赖的选型
 - [14 · 性能优化与量化指标](../14-performance-budget.md) — 体积与残留预算
-- [`poc/`（基准脚本可复现）](../reference/15-installer-research.md) — 本 ADR 的完整调研与方案比对
+- 本 ADR 的完整调研与方案比对（内部调研资料，未随仓库分发）

@@ -214,6 +214,17 @@ function walk(dir, base = '') {
 
 /** 用 PowerShell 的 Compress-Archive 打包 —— 不引入 zip 依赖 */
 function zipDir(stageDir, outZip) {
+  // ⚠️ 已知不可复现：ZIP 格式会把每个文件的 mtime 写进头部，而 staging 目录
+  // 每次都是重新创建的 —— 所以**同样的源码连跑两次，zip 的 SHA-256 不一样**。
+  // 实测确认过（同一天两次运行得到 f47f7ea… 与 ae0910d…）。
+  //
+  // 这一条要不要修，取决于对"可复现构建"的定义：
+  //   · 里面的 **exe 与 SBOM 是确定的**（exe 由 cargo 构建，SBOM 的组件清单来自
+  //     cargo metadata）—— 真正需要校验的东西是确定的
+  //   · 不确定的只是 ZIP 容器的元数据，不是内容
+  // 要做到逐字节可复现，得自己写 ZIP 头并把 mtime 固定成一个常量。
+  // 在做到那一步之前，**发布说明里给的是校验和而不是"可复现构建"的承诺** ——
+  // 不把没做到的事写成做到了。
   const r = spawnSync('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
     `Compress-Archive -Path '${stageDir}\\*' -DestinationPath '${outZip}' -Force`,
