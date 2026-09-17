@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="xuan">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DeskBase 桌库</title>
+<style>
+/* ============================================================
+   DeskBase 设计系统 —— CSS token 层
+   ============================================================
+   来源：docs/18-visual-and-motion-design.md
+
+   规则：
+     1. 组件只允许使用语义 token，不得直接写死色值
+     2. 主题 = 色板 + 质感 + 排版尺度 + 动效强度
+     3. 中文正文行高 ≥ 1.7
+     4. 动效只动 transform / opacity
+   ============================================================ */
+
+:root {
+  /* ---------- 尺度：8px 基准网格 ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  /* ---------- 圆角 ---------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 999px;
+
+  /* ---------- 字号与行高 ---------- */
+  --fs-title-lg: 24px;
+  --fs-title: 20px;
+  --fs-group: 16px;
+  --fs-body: 14px;
+  --fs-sub: 13px;
+  --fs-aux: 12px;
+  --lh-body: 1.7;      /* 中文正文必须 ≥ 1.7 */
+  --lh-tight: 1.45;
+
+  /* ---------- 字体三槽位 ---------- */
+  --font-heading: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
+    "STSong", "SimSun", Georgia, serif;
+  --font-body: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Noto Sans CJK SC", "Source Han Sans SC", "Hiragino Sans GB", sans-serif;
+  --font-code: "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* ---------- 动效 token ---------- */
+  --dur-instant: 80ms;
+  --dur-fast: 140ms;
+  --dur-normal: 200ms;
+  --dur-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
+
+  /* ---------- 质感强度（默认「轻」）---------- */
+  --texture-opacity: 0.025;
+}
+
+/* ============================================================
+   主题：宣纸（默认）
+   ============================================================ */
+:root,
+[data-theme="xuan"] {
+  --paper: #f6f2e9;
+  --paper-2: #efeade;
+  --card: #fcfaf5;
+  --ink: #2b2823;
+  --ink-2: #5a554c;
+  --ink-3: #8b8578;
+  --line: #ddd5c6;
+  --line-strong: #c8bea9;
+  --accent: #2e4a6b;
+  --accent-soft: #dde5ee;
+  --seal: #a63a2e;
+  --success: #4a6b3e;
+  --warning: #8f6416;
+  --danger: #8c2b22;
+  --shadow: rgba(60, 50, 35, 0.08);
+  --selection: #d3deec;
+}
+
+/* ============================================================
+   主题：夜墨（暗色）
+   ============================================================ */
+[data-theme="yemo"] {
+  --paper: #1a1917;
+  --paper-2: #141312;
+  --card: #242220;
+  --ink: #e9e4da;
+  --ink-2: #b3ada1;
+  --ink-3: #7e796f;
+  --line: #33302c;
+  --line-strong: #4a453e;
+  --accent: #8fb4dc;
+  --accent-soft: #2a3646;
+  --seal: #d46a5a;
+  --success: #7fa86e;
+  --warning: #d8a94e;
+  --danger: #d9705f;
+  --shadow: rgba(0, 0, 0, 0.32);
+  --selection: #34465c;
+}
+
+/* ============================================================
+   基础
+   ============================================================ */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  overflow: hidden;
+}
+
+/* 纸纹：只在背景层，不覆盖文字与卡片内部，不拦截点击（docs/18 第三节） */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--texture-opacity);
+  background-image:
+    radial-gradient(circle at 25% 15%, rgba(120, 100, 70, 0.9) 0 1px, transparent 1px),
+    radial-gradient(circle at 75% 65%, rgba(120, 100, 70, 0.7) 0 1px, transparent 1px);
+  background-size: 7px 7px, 11px 11px;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* 滚动条：圆角细条，不用系统默认（docs/18 3.4） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink-3) 40%, transparent);
+  border-radius: var(--radius-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--ink-3) 65%, transparent);
+  background-clip: content-box;
+}
+
+/* 焦点环：键盘操作可见，鼠标操作不显示（docs/18 3.4） */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   布局骨架
+   ============================================================ */
+.app {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 208px 1fr;
+  height: 100vh;
+}
+
+/* ---------- 侧边栏 ---------- */
+.sidebar {
+  background: var(--paper-2);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-3) 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+}
+
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: var(--card);
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-heading);
+  font-size: 15px;
+  color: var(--ink);
+  flex: none;
+}
+
+.brand-text {
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  letter-spacing: 0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 var(--sp-2);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--fs-sub);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+
+.nav-item:hover {
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  color: var(--ink);
+}
+
+.nav-item[aria-current="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.nav-item .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  opacity: 0.35;
+  flex: none;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: var(--sp-3) var(--sp-4) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+
+.sidebar-foot dl {
+  margin: var(--sp-2) 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--sp-2);
+}
+
+.sidebar-foot dt {
+  color: var(--ink-3);
+}
+
+.sidebar-foot dd {
+  margin: 0;
+  color: var(--ink-2);
+  font-family: var(--font-code);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 主区 ---------- */
+.main {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.content {
+  overflow: auto;
+  padding: var(--sp-5);
+}
+
+.view {
+  display: none;
+}
+.view[data-active="true"] {
+  display: block;
+  animation: fade-up var(--dur-normal) var(--ease-enter);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ============================================================
+   组件
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 6px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sub);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-instant) var(--ease-standard);
+}
+.btn:hover {
+  background: var(--paper-2);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+}
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+.btn-ghost:hover {
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+  color: var(--ink);
+}
+
+/* 笔记双栏 */
+.notes {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: var(--sp-4);
+  height: calc(100vh - 148px);
+  min-height: 320px;
+}
+
+.note-list {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  overflow: auto;
+  padding: var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.note-item {
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.note-item:hover {
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+}
+.note-item[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.note-item .t {
+  display: block;
+  font-size: var(--fs-sub);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-item .d {
+  display: block;
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  font-family: var(--font-code);
+}
+
+.editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.title-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-heading);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  padding: 0;
+}
+.title-input::placeholder {
+  color: var(--ink-3);
+}
+
+.body-input {
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  padding: var(--sp-4);
+  resize: none;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+.save-state {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  min-width: 84px;
+  text-align: right;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+.save-state[data-state="saved"] {
+  color: var(--success);
+}
+.save-state[data-state="error"] {
+  color: var(--danger);
+}
+
+/* 空态 */
+.empty {
+  display: grid;
+  place-content: center;
+  gap: var(--sp-3);
+  text-align: center;
+  color: var(--ink-3);
+  padding: var(--sp-7) var(--sp-4);
+  animation: fade-up var(--dur-slow) var(--ease-enter);
+}
+.empty h2 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.empty p {
+  margin: 0;
+  font-size: var(--fs-sub);
+}
+
+/* 提示条 */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--fs-sub);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-normal) var(--ease-standard),
+    transform var(--dur-normal) var(--ease-enter);
+}
+.toast[data-show="true"] {
+  opacity: 1;
+  transform: translateX(-50%) translateY(-6px);
+}
+.toast[data-kind="error"] {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* 卡片 */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4);
+}
+
+.card h3 {
+  margin: 0 0 var(--sp-3);
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  font-weight: 600;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: var(--sp-2) var(--sp-3);
+  margin: 0;
+  font-size: var(--fs-sub);
+}
+.kv dt {
+  color: var(--ink-3);
+}
+.kv dd {
+  margin: 0;
+  font-family: var(--font-code);
+  word-break: break-all;
+}
+
+/* 设置页 */
+.field {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: var(--sp-2) var(--sp-4);
+  align-items: center;
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sub);
+}
+.field:last-child {
+  border-bottom: none;
+}
+.field .hint {
+  grid-column: 2;
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+}
+
+/* 减少动效：跟随系统（docs/18 第八节） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ================= 侧边栏 ================= -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">库</div>
+      <div class="brand-text">桌库</div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item" data-target="workbench"><span class="dot"></span>工作台</button>
+      <button class="nav-item" data-target="notes" aria-current="true"><span class="dot"></span>笔记</button>
+      <button class="nav-item" data-target="database"><span class="dot"></span>数据库</button>
+      <button class="nav-item" data-target="settings"><span class="dot"></span>设置</button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div id="save-state" class="save-state"></div>
+      <dl>
+        <dt>版本</dt><dd id="about-version">—</dd>
+      </dl>
+    </div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">笔记</h1>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" id="btn-delete-note">删除</button>
+      <button class="btn btn-primary" id="btn-new-note">新建</button>
+    </header>
+
+    <div class="content">
+
+      <!-- ---------- 工作台 ---------- -->
+      <section class="view" data-view="workbench">
+        <div class="card">
+          <h3>说明</h3>
+          <p style="margin:0;color:var(--ink-2);font-size:var(--fs-sub)">
+            工作台尚未实现。当前版本只打通了「外壳 + 存储 + 界面」这条垂直切片，
+            用来验证架构可行。完整规划见 <code>local-docs/handoff/DEVELOPMENT_PLAN.md</code>。
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- 笔记 ---------- -->
+      <section class="view" data-view="notes" data-active="true">
+        <div class="notes">
+          <div class="note-list" id="note-list"></div>
+          <div class="editor">
+            <div class="editor-head">
+              <input class="title-input" id="note-title" placeholder="标题" />
+            </div>
+            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 数据库 ---------- -->
+      <section class="view" data-view="database">
+        <div class="card">
+          <h3>数据库</h3>
+          <p style="margin:0 0 var(--sp-3);color:var(--ink-2);font-size:var(--fs-sub)">
+            存储引擎已经就绪（单文件 SQLite，WAL + 每次提交 fsync）。
+            「笔记」模块就是它的第一个使用者。可视化建表、查询向导等尚未实现。
+          </p>
+          <dl class="kv">
+            <dt>引擎</dt><dd>SQLite（bundled，自带源码编译）</dd>
+            <dt>持久性</dt><dd>WAL + synchronous=FULL</dd>
+            <dt>数据文件</dt><dd id="about-datadir">—</dd>
+            <dt>现有笔记</dt><dd id="about-count">—</dd>
+          </dl>
+        </div>
+      </section>
+
+      <!-- ---------- 设置 ---------- -->
+      <section class="view" data-view="settings">
+        <div class="card">
+          <h3>外观</h3>
+          <div class="field">
+            <label for="theme-select">主题</label>
+            <select id="theme-select" class="btn" style="width:160px">
+              <option value="xuan">宣纸（默认）</option>
+              <option value="yemo">夜墨</option>
+            </select>
+            <div class="hint">宣纸是产品默认。夜墨是它的暗色对应，用于夜间。</div>
+          </div>
+          <div class="field">
+            <span>质感强度</span>
+            <span style="color:var(--ink-3)">轻</span>
+            <div class="hint">纸纹的明显程度。当前固定为「轻」，四档可调尚未实现。</div>
+          </div>
+          <div class="field">
+            <span>字体</span>
+            <span style="color:var(--ink-3)">标题宋体系 / 正文黑体系 / 代码等宽</span>
+            <div class="hint">三槽位与字体导入尚未实现，当前使用系统字体栈。</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:var(--sp-4)">
+          <h3>关于</h3>
+          <dl class="kv">
+            <dt>名称</dt><dd>DeskBase 桌库</dd>
+            <dt>版本</dt><dd id="about-version-2">—</dd>
+            <dt>许可证</dt><dd>Apache License 2.0</dd>
+            <dt>数据位置</dt><dd id="about-datadir-2">—</dd>
+          </dl>
+          <p style="margin:var(--sp-3) 0 0;color:var(--ink-2);font-size:var(--fs-sub)">
+            默认不联网、无遥测、无账号。数据全部存在你的电脑上。
+          </p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" data-show="false"></div>
+
+<script>
+
+/* ===== 预览模式：模拟 Rust 侧的 IPC =====
+   这段只在预览文件里存在，真实应用里由 Rust 提供。 */
+(function () {
+  var notes = [
+    { id: '01J8XK2M9P0000000000000001', title: '诊所用药记录', content: '张爷爷  氨氯地平  每日一次  早饭后\n李奶奶  二甲双胍  每日两次  随餐\n\n注意：王大爷这个月该复诊了。', created_at: Date.now() - 86400000 * 6, updated_at: Date.now() - 600000 },
+    { id: '01J8XK2M9P0000000000000002', title: '客户报价 · 林维', content: '10 月 3 日  婚礼跟拍  8000 元\n10 月 18 日 产品拍摄  4200 元\n\n备注：第 18 日那场要提前一天去踩点。', created_at: Date.now() - 86400000 * 3, updated_at: Date.now() - 3600000 },
+    { id: '01J8XK2M9P0000000000000003', title: '换机待办', content: '1. 把数据目录整个拷到移动硬盘\n2. 确认备份健康检查是绿的\n3. 新机器上解压便携版，指向同一个数据目录', created_at: Date.now() - 86400000, updated_at: Date.now() - 7200000 }
+  ];
+  var seq = 0, pending = {};
+
+  window.ipc = {
+    postMessage: function (raw) {
+      var req = JSON.parse(raw);
+      var self = this;
+      setTimeout(function () {
+        var data = null, error = null;
+        if (req.cmd === 'app.info') {
+          data = { name: 'DeskBase 桌库', version: '0.1.0-alpha.1（预览）',
+                   dataDir: 'D:\\DeskBaseData', noteCount: notes.length, uptimeMs: 1234 };
+        } else if (req.cmd === 'note.list') {
+          data = notes.map(function (n) { return { id: n.id, title: n.title, updated_at: n.updated_at }; });
+        } else if (req.cmd === 'note.get') {
+          var f = notes.filter(function (n) { return n.id === req.args.id; })[0];
+          if (f) data = f; else error = '笔记不存在';
+        } else if (req.cmd === 'note.create') {
+          var n = { id: 'preview-' + (++seq), title: req.args.title || '未命名笔记',
+                    content: '', created_at: Date.now(), updated_at: Date.now() };
+          notes.unshift(n); data = n;
+        } else if (req.cmd === 'note.save') {
+          notes.forEach(function (n) {
+            if (n.id === req.args.id) { n.title = req.args.title; n.content = req.args.content; n.updated_at = Date.now(); }
+          });
+          data = { updatedAt: Date.now() };
+        } else if (req.cmd === 'note.delete') {
+          notes = notes.filter(function (n) { return n.id !== req.args.id; });
+          data = {};
+        } else { error = '预览模式不支持的命令: ' + req.cmd; }
+
+        window.__deskbase.resolve(JSON.stringify({ id: req.id, ok: !error, data: data, error: error }));
+      }, 120);
+    }
+  };
+
+  // 预览提示条
+  window.addEventListener('DOMContentLoaded', function () {
+    var b = document.createElement('div');
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99;background:#A63A2E;color:#fff;' +
+      'font:12px/1.6 system-ui;text-align:center;padding:3px';
+    b.textContent = '预览模式 · 数据是假的，仅用于看界面外观';
+    document.body.appendChild(b);
+    document.querySelector('.app').style.paddingTop = '0';
+  });
+})();
+
+/* ============================================================
+   DeskBase 前端
+   ============================================================
+   与 Rust 的通信全部走 window.ipc.postMessage。
+   前端不直接碰文件系统与数据库 —— 所有能力都要经 IPC 显式请求。
+   ============================================================ */
+(function () {
+  "use strict";
+
+  // ---------- IPC 桥 ----------
+  let seq = 0;
+  const pending = new Map();
+
+  window.__deskbase = {
+    resolve(payload) {
+      let msg;
+      try {
+        msg = typeof payload === "string" ? JSON.parse(payload) : payload;
+      } catch (e) {
+        return;
+      }
+      const p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      if (msg.ok) p.resolve(msg.data);
+      else p.reject(new Error(msg.error || "未知错误"));
+    },
+  };
+
+  function call(cmd, args) {
+    return new Promise((resolve, reject) => {
+      const id = ++seq;
+      pending.set(id, { resolve, reject });
+      // 15 秒兜底，避免请求石沉大海
+      setTimeout(() => {
+        if (pending.has(id)) {
+          pending.delete(id);
+          reject(new Error("请求超时：" + cmd));
+        }
+      }, 15000);
+      window.ipc.postMessage(JSON.stringify({ id, cmd, args: args || {} }));
+    });
+  }
+
+  // ---------- 小工具 ----------
+  const $ = (sel) => document.querySelector(sel);
+
+  const toastEl = $("#toast");
+  let toastTimer = null;
+  function toast(text, kind) {
+    toastEl.textContent = text;
+    toastEl.dataset.kind = kind === "error" ? "error" : "info";
+    toastEl.dataset.show = "true";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toastEl.dataset.show = "false";
+    }, 2400);
+  }
+
+  function fmtTime(ms) {
+    if (!ms) return "";
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return (
+      d.getFullYear() +
+      "-" +
+      p(d.getMonth() + 1) +
+      "-" +
+      p(d.getDate()) +
+      " " +
+      p(d.getHours()) +
+      ":" +
+      p(d.getMinutes())
+    );
+  }
+
+  // ---------- 视图切换 ----------
+  const views = ["workbench", "notes", "database", "settings"];
+  const titles = {
+    workbench: "工作台",
+    notes: "笔记",
+    database: "数据库",
+    settings: "设置",
+  };
+
+  function showView(name) {
+    views.forEach((v) => {
+      const el = document.querySelector('[data-view="' + v + '"]');
+      if (el) el.dataset.active = v === name ? "true" : "false";
+    });
+    document.querySelectorAll(".nav-item").forEach((b) => {
+      b.setAttribute("aria-current", b.dataset.target === name ? "true" : "false");
+    });
+    $("#page-title").textContent = titles[name] || name;
+  }
+
+  document.querySelectorAll(".nav-item").forEach((btn) => {
+    btn.addEventListener("click", () => showView(btn.dataset.target));
+  });
+
+  // ---------- 笔记 ----------
+  let currentId = null;
+  let dirty = false;
+  let saveTimer = null;
+
+  const listEl = $("#note-list");
+  const titleEl = $("#note-title");
+  const bodyEl = $("#note-body");
+  const stateEl = $("#save-state");
+
+  function setSaveState(state, text) {
+    stateEl.dataset.state = state || "";
+    stateEl.textContent = text || "";
+  }
+
+  async function refreshList() {
+    try {
+      const notes = await call("note.list");
+      listEl.innerHTML = "";
+      if (!notes.length) {
+        const d = document.createElement("div");
+        d.className = "empty";
+        d.innerHTML =
+          "<h2>还没有笔记</h2><p>点右上角「新建」开始。</p>";
+        listEl.appendChild(d);
+        return;
+      }
+      for (const n of notes) {
+        const b = document.createElement("button");
+        b.className = "note-item";
+        b.dataset.id = n.id;
+        if (n.id === currentId) b.setAttribute("aria-selected", "true");
+
+        const t = document.createElement("span");
+        t.className = "t";
+        t.textContent = n.title || "（无标题）";
+        const d = document.createElement("span");
+        d.className = "d";
+        d.textContent = fmtTime(n.updated_at);
+        b.appendChild(t);
+        b.appendChild(d);
+
+        b.addEventListener("click", () => openNote(n.id));
+        listEl.appendChild(b);
+      }
+    } catch (e) {
+      toast("读取笔记列表失败：" + e.message, "error");
+    }
+  }
+
+  async function openNote(id) {
+    if (dirty) await flushSave();
+    try {
+      const n = await call("note.get", { id });
+      currentId = n.id;
+      titleEl.value = n.title;
+      bodyEl.value = n.content;
+      dirty = false;
+      setSaveState("", "");
+      markSelected(id);
+    } catch (e) {
+      toast("打开笔记失败：" + e.message, "error");
+    }
+  }
+
+  function markSelected(id) {
+    listEl.querySelectorAll(".note-item").forEach((el) => {
+      if (el.dataset.id === id) el.setAttribute("aria-selected", "true");
+      else el.removeAttribute("aria-selected");
+    });
+  }
+
+  async function flushSave() {
+    if (!currentId || !dirty) return;
+    try {
+      setSaveState("saving", "保存中…");
+      const r = await call("note.save", {
+        id: currentId,
+        title: titleEl.value,
+        content: bodyEl.value,
+      });
+      dirty = false;
+      setSaveState("saved", "已保存");
+      // 只更新当前项的标题与时间，不整列表重绘（避免打断输入）
+      const item = listEl.querySelector('.note-item[data-id="' + currentId + '"]');
+      if (item) {
+        item.querySelector(".t").textContent = titleEl.value || "（无标题）";
+        item.querySelector(".d").textContent = fmtTime(r.updatedAt);
+      }
+    } catch (e) {
+      setSaveState("error", "保存失败");
+      toast("保存失败：" + e.message, "error");
+    }
+  }
+
+  function scheduleSave() {
+    dirty = true;
+    setSaveState("", "未保存");
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 1200);
+  }
+
+  titleEl.addEventListener("input", scheduleSave);
+  bodyEl.addEventListener("input", scheduleSave);
+  // 失焦立即落盘，不等防抖
+  titleEl.addEventListener("blur", flushSave);
+  bodyEl.addEventListener("blur", flushSave);
+
+  $("#btn-new-note").addEventListener("click", async () => {
+    try {
+      if (dirty) await flushSave();
+      const n = await call("note.create", { title: "未命名笔记" });
+      await refreshList();
+      await openNote(n.id);
+      titleEl.focus();
+      titleEl.select();
+    } catch (e) {
+      toast("新建失败：" + e.message, "error");
+    }
+  });
+
+  $("#btn-delete-note").addEventListener("click", async () => {
+    if (!currentId) {
+      toast("先选中一条笔记");
+      return;
+    }
+    try {
+      await call("note.delete", { id: currentId });
+      currentId = null;
+      titleEl.value = "";
+      bodyEl.value = "";
+      dirty = false;
+      setSaveState("", "");
+      await refreshList();
+      toast("已移入回收站");
+    } catch (e) {
+      toast("删除失败：" + e.message, "error");
+    }
+  });
+
+  // ---------- 主题 ----------
+  const themeSel = $("#theme-select");
+  function applyTheme(name) {
+    document.documentElement.dataset.theme = name;
+    try {
+      localStorage.setItem("deskbase.theme", name);
+    } catch (e) {}
+  }
+  themeSel.addEventListener("change", () => applyTheme(themeSel.value));
+
+  // ---------- 启动 ----------
+  async function boot() {
+    // 恢复主题
+    let saved = "xuan";
+    try {
+      saved = localStorage.getItem("deskbase.theme") || "xuan";
+    } catch (e) {}
+    themeSel.value = saved;
+    applyTheme(saved);
+
+    try {
+      const info = await call("app.info");
+      $("#about-version").textContent = info.version;
+      $("#about-datadir").textContent = info.dataDir;
+      $("#about-count").textContent = String(info.noteCount);
+    } catch (e) {
+      toast("初始化失败：" + e.message, "error");
+    }
+    await refreshList();
+    showView("notes");
+  }
+
+  // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）
+  window.addEventListener("beforeunload", () => {
+    if (dirty) flushSave();
+  });
+
+  boot();
+})();
+
+</script>
+</body>
+</html>
