@@ -191,7 +191,7 @@ DeskBase
 
 ### 现在能下载到什么
 
-**只有便携版**，见 [Releases](https://github.com/YJLZSL/DeskBase/releases)（最新为 `v0.1.0-alpha.1`，**预发布**）。
+**只有便携版**，见 [Releases](https://github.com/YJLZSL/DeskBase/releases)（最新为 `v0.2.0-beta.2`，**预发布**）。
 
 | | 状态 |
 |---|---|
