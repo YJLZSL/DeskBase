@@ -1,0 +1,17 @@
+[package]
+name = "deskbase-poc-webview"
+version = "0.1.0"
+edition = "2021"
+description = "DeskBase 技术选型 PoC：系统 WebView 方案（tao + wry，即 Tauri 底层）"
+
+[dependencies]
+tao = "0.37"
+wry = "0.57"
+
+# 接近生产配置的裁剪，否则体积数据没有参考价值
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,16 @@
+# PoC 目录：只提交源码与结果，构建产物一律忽略
+# 注意：锁文件（Cargo.lock / package-lock.json）**要提交**，它们保证可复现
+
+# Rust 构建产物
+target/
+target-msvc/
+
+# Node / Electron 构建产物
+node_modules/
+out/
+dist/
+release/
+
+# 测量产物
+*.log
+RESULT-tmp*

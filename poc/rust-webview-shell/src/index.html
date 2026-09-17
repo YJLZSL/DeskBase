@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>DeskBase PoC · WebView shell</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+  #scroller { height: 640px; overflow: auto; border: 1px solid #999; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  th, td { border-bottom: 1px solid #e2e2e2; padding: 2px 8px; height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  thead th { position: sticky; top: 0; background: #f5f5f5; }
+  .col-i { width: 60px; }
+  .col-n { width: 140px; }
+  #hud { position: fixed; right: 12px; bottom: 12px; background: rgba(0,0,0,.8); color: #0f0; padding: 6px 10px; font: 12px monospace; border-radius: 4px; display: none; }
+</style>
+</head>
+<body>
+  <div id="scroller">
+    <table id="t">
+      <thead><tr><th class="col-i">#</th><th class="col-n">名称</th><th>值</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="hud"></div>
+
+<script>
+(function () {
+  // mode 由 Rust 侧通过 initialization script 注入：
+  //   blank —— 空白页，只测外壳自身的开销（不渲染表格）
+  //   cold  —— 渲染 10 000 行后静置，测冷启动与带负载的空闲内存
+  //   fps   —— 渲染 10 000 行并跑 30 秒滚动帧率测试
+  const MODE = window.__MODE || 'cold';
+
+  // 与 Electron 对照线完全相同的测试负载：10 000 行、固定行高 22px、普通 DOM（不做虚拟滚动）
+  if (MODE !== 'blank') {
+    const tbody = document.querySelector('#t tbody');
+    const N = 10000;
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < N; i++) {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = i;
+      const td2 = document.createElement('td'); td2.textContent = '项目 ' + i;
+      const td3 = document.createElement('td'); td3.textContent = (Math.random() * 1000).toFixed(2);
+      tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+      frag.appendChild(tr);
+    }
+    tbody.appendChild(frag);
+  }
+
+  // 冷启动 / 空白模式：不做额外工作。
+  // Rust 侧用 PageLoadEvent::Finished 记录时间点并写 ready.txt。
+  if (MODE !== 'fps') return;
+
+  // ---------- (c) 帧率测试：匀速滚动 30 秒 ----------
+  const hud = document.querySelector('#hud');
+  hud.style.display = 'block';
+
+  const scroller = document.querySelector('#scroller');
+  const DURATION = 30000;
+  const start = performance.now();
+  let prev = start;
+  let frames = 0;
+  const gaps = [];
+
+  function loop(now) {
+    scroller.scrollTop += 8;                       // 每帧 +8px，与 Electron 线一致
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1) {
+      scroller.scrollTop = 0;
+    }
+    const gap = now - prev;
+    prev = now;
+    if (gap > 0 && gap < 1000) gaps.push(gap);     // 忽略挂起造成的异常大间隔
+    frames++;
+    const elapsed = now - start;
+    if (elapsed < DURATION) {
+      hud.textContent = 'FPS 测试中 ' + (elapsed / 1000).toFixed(1) + 's';
+      requestAnimationFrame(loop);
+    } else {
+      finish();
+    }
+  }
+
+  function finish() {
+    const total = performance.now() - start;
+    const fpsArr = gaps.map(function (g) { return 1000 / g; });
+    fpsArr.sort(function (a, b) { return a - b; });
+    const avgFps = frames / (total / 1000);
+    const minFps = fpsArr.length ? fpsArr[0] : 0;
+    const p1Idx = Math.max(0, Math.floor(fpsArr.length * 0.01));
+    const p1Fps = fpsArr.length ? fpsArr[p1Idx] : 0;
+    const below50 = fpsArr.filter(function (x) { return x < 50; }).length;
+    const belowRatio = fpsArr.length ? below50 / fpsArr.length : 0;
+
+    hud.textContent = 'FPS 完成';
+    const result = {
+      totalMs: +total.toFixed(1),
+      frames: frames,
+      avgFps: +avgFps.toFixed(2),
+      minFps: +minFps.toFixed(2),
+      p1Fps: +p1Fps.toFixed(2),
+      below50Ratio: +belowRatio.toFixed(4),
+      samples: fpsArr.length,
+    };
+    // 回传给 Rust 侧落盘
+    window.ipc.postMessage(JSON.stringify(result));
+  }
+
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

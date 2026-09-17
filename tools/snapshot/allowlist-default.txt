@@ -1,0 +1,43 @@
+# DeskBase 快照对比默认白名单
+#
+# 用途：verify 时，命中下面任意一行正则的差异项会被视为「系统自身产生的可接受变化」，
+#       不计入「真实残留」。每行一个 JavaScript 正则（RegExp），# 开头为注释。
+#
+# 注意：白名单只应容忍「非 DeskBase 写入、且必然会被系统自身改写」的噪声。
+#       任何由 DeskBase 自身产生的项都不应出现在白名单里，否则会掩盖真实污染。
+
+# ---- Windows 自身会写入/改写的位置 ----
+
+# Prefetch：Windows 根据程序运行自动生成，与「是否安装/残留」无关
+Prefetch
+
+# 事件日志相关：系统运行时持续写入，安装/卸载动作不应被其干扰
+EVT
+EventLog
+
+# HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer 下的时间戳/MRU 类值
+# 例如 UserAssist、RecentDocs、ComDlg32 的时间戳，登录后由 Explorer 自动维护
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer
+
+# 应用体验 / 兼容性 / 遥测类：系统定期自动改写，非 DeskBase 可控
+HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\UserAssist
+HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel
+
+# ---- 系统服务状态随时间自然变化 ----
+
+# 时间同步服务（W32Time）状态可能因网络/电源变化在 RUNNING/STOPPED 间切换
+W32Time
+
+# Windows Update 相关服务状态会随系统策略波动
+wuauserv
+UsoSvc
+
+# ---- 计划任务：系统自带任务随运行自然出现/状态变化 ----
+
+# 系统任务目录下的大量内置任务（与 DeskBase 无关）
+Microsoft\\Windows\\
+
+# ---- 临时/缓存类（若监控到系统临时目录时）----
+
+# NTUSER.DAT 相关 volatile 项
+\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo
