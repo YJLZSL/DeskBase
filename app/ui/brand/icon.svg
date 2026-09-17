@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DeskBase 桌库 · 应用图标（源文件，自包含）
+  ============================================================
+  设计：宣纸方巾上一枚朱砂「库」印。
+
+  为什么是这枚：
+    · 印章 = 落款与归属 —— 正对「数据属于你自己」这条产品承诺
+    · 朱砂是设计系统里唯一的强调色（docs/18 2.3），图标是它最该出现的地方
+    · 纸的质感靠光影与层次做出来，不靠符号堆砌 —— 这是它不"直男"的地方
+
+  为什么「库」是画出来的路径而不是用字体排：
+    SVG 当图片被光栅化时（<img src="...svg">）**不会加载外部字体**，
+    用 <text> 会退化成系统字体、在不同机器上长得不一样。
+    所以这个字按缪篆（印章用的那种方正匀满的篆书）的骨架手绘成路径，
+    等宽笔画、方正结体 —— 这既是印章本来的样子，也让 SVG 完全自包含。
+
+  产物与打包：node tools/icon/build-icons.cjs
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"
+     width="512" height="512" role="img" aria-label="DeskBase 桌库">
+  <title>DeskBase 桌库</title>
+
+  <style>
+    @font-face {
+      font-family: "Smiley Sans Oblique";
+      src: url("../fonts/smiley-sans-oblique.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+    }
+    .ku { font-family: "Smiley Sans Oblique", serif; }
+  </style>
+
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#FEFDFA"/>
+      <stop offset="0.55" stop-color="#F8F4EA"/>
+      <stop offset="1" stop-color="#EDE5D4"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.7"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cinnabar" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#BC4840"/>
+      <stop offset="0.45" stop-color="#A63A2E"/>
+      <stop offset="1" stop-color="#892C22"/>
+    </linearGradient>
+    <filter id="dropSoft" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#3C3223" flood-opacity="0.15"/>
+    </filter>
+    <filter id="dropLift" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="7" stdDeviation="9" flood-color="#3C3223" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- 宣纸方巾 -->
+  <rect x="76" y="76" width="872" height="872" rx="228" fill="url(#tile)" filter="url(#dropSoft)"/>
+  <rect x="76" y="76" width="872" height="872" rx="228" fill="url(#sheen)"/>
+  <rect x="77.5" y="77.5" width="869" height="869" rx="226.5"
+        fill="none" stroke="#2B2823" stroke-opacity="0.10" stroke-width="3"/>
+
+  <!-- 朱砂印。整体 -3°：手盖的印不会是正的，这一下让它是"盖上去"的 -->
+  <g id="db-seal" transform="rotate(-3 512 508)">
+    <rect x="316" y="302" width="392" height="412" rx="54" fill="url(#cinnabar)" filter="url(#dropLift)"/>
+    <!-- 印泥透出一点纸色，避免纯色块那种贴纸感 -->
+    <rect x="316" y="302" width="392" height="412" rx="54" fill="#F8F4EA" opacity="0.05"/>
+    <!-- 印边 -->
+    <rect x="338" y="324" width="348" height="368" rx="38"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.30" stroke-width="8"/>
+
+    <!-- 印文：「库」，用产品自带的得意黑。
+         注意：SVG 被当作图片光栅化时**不会加载外部字体**，所以
+         tools/icon 的光栅化流程会把下面这个 <text> 摘掉、改用 canvas 的
+         fillText 重画一遍（字体以 data URI 喂进去）。直接打开这个 SVG
+         看设计稿时，需要本机装了该字体或与 ../fonts/ 同目录。 -->
+    <text id="db-glyph" class="ku" x="512" y="516" font-size="286"
+          fill="#FFFDF8" text-anchor="middle" dominant-baseline="central">库</text>
+  </g>
+</svg>

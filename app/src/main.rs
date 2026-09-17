@@ -12,6 +12,7 @@
 
 mod assets;
 mod db;
+mod render;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,9 @@ use tao::{
 use wry::WebViewBuilder;
 
 use db::Db;
+
+/// tools/icon 产出的窗口图标边长（`ui/brand/icon-rgba-256.bin` 是 256×256×4）
+const ICON_SIZE: u32 = 256;
 
 /// 应用全局状态。IPC 处理器与主线程共享它。
 struct AppState {
@@ -66,6 +70,12 @@ fn err(id: u64, message: impl Into<String>) -> String {
 fn main() -> wry::Result<()> {
     // 数据目录：可用 DESKBASE_DATA_DIR 覆盖（便携版会用它）
     let data_dir = db::default_data_dir();
+
+    // 构建期用的图标光栅化模式，正常启动完全不经过这里
+    if let Ok(out) = std::env::var("DESKBASE_RENDER") {
+        return render::run(&PathBuf::from(out), &data_dir);
+    }
+
     let db_path = data_dir.join("data").join("main.db");
 
     log_line(&data_dir, &format!("启动，数据目录 = {}", data_dir.display()));
@@ -88,8 +98,22 @@ fn main() -> wry::Result<()> {
     });
 
     let event_loop = EventLoop::new();
+    // 窗口与任务栏图标：用 tools/icon 生成的 256×256 原始 RGBA 直接构造，
+    // 不需要在 Rust 侧解码 PNG（见 tools/icon/build-icons.cjs）
+    let window_icon = tao::window::Icon::from_rgba(
+        include_bytes!("../ui/brand/icon-rgba-256.bin").to_vec(),
+        ICON_SIZE,
+        ICON_SIZE,
+    )
+    .map_err(|e| {
+        log_line(&data_dir, &format!("窗口图标构造失败（不影响运行）：{e}"));
+        e
+    })
+    .ok();
+
     let window = WindowBuilder::new()
         .with_title("DeskBase 桌库")
+        .with_window_icon(window_icon)
         .with_inner_size(LogicalSize::new(1180.0, 780.0))
         .with_min_inner_size(LogicalSize::new(880.0, 600.0))
         .build(&event_loop)

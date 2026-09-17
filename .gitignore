@@ -204,6 +204,10 @@ models/
 *.safetensors
 *.bin
 !src/**/*.bin
+# 例外：图标的原始 RGBA 是**必须入库**的构建输入 —— Rust 侧用 include_bytes!
+# 把它编进 exe 当窗口/任务栏图标（这样不必引 PNG 解码依赖）。
+# 不入库的话，干净克隆会直接编译失败。
+!app/ui/brand/*.bin
 
 # ---------- 备份与导出交付物 ----------
 *.deskbase-backup

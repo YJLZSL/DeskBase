@@ -47,6 +47,8 @@ const CSS: &str = "text/css; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
 const TEXT: &str = "text/plain; charset=utf-8";
 const WOFF2: &str = "font/woff2";
+const SVG: &str = "image/svg+xml";
+const PNG: &str = "image/png";
 
 /// 资源表。新增资源就在这里加一行——加进来的东西才会被服务。
 fn lookup(path: &str) -> Option<Asset> {
@@ -70,6 +72,21 @@ fn lookup(path: &str) -> Option<Asset> {
         "/fonts/smiley-sans-oblique.woff2" => Asset {
             bytes: include_bytes!("../ui/fonts/smiley-sans-oblique.woff2"),
             mime: WOFF2,
+        },
+
+        // ---------- 应用图标（源文件与产物见 tools/icon/） ----------
+        "/brand/icon.svg" => Asset {
+            bytes: include_bytes!("../ui/brand/icon.svg"),
+            mime: SVG,
+        },
+        // 界面里用 64px 那张（侧栏品牌位）；关于页显示 56px，高 DPI 下要 128px
+        "/brand/icon-64.png" => Asset {
+            bytes: include_bytes!("../ui/brand/icon-64.png"),
+            mime: PNG,
+        },
+        "/brand/icon-128.png" => Asset {
+            bytes: include_bytes!("../ui/brand/icon-128.png"),
+            mime: PNG,
         },
 
         _ => return None,
@@ -162,6 +179,25 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(r.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn 界面引用到的每个品牌图标都在资源表里() {
+        // UI 里出现过的品牌资源路径，漏登记就会变成破图 —— 这个坑踩过一次
+        // （关于页写的是 icon-128.png，但资源表里只有 64 和 svg）
+        let ui_html = std::str::from_utf8(include_bytes!("../ui/index.html")).unwrap();
+        let ui_css = std::str::from_utf8(include_bytes!("../ui/theme.css")).unwrap();
+        for src in ui_html.split('"').chain(ui_css.split('"')).chain(ui_css.split('(')) {
+            let s = src.trim_matches(|c: char| c == ')' || c == ';' || c.is_whitespace());
+            if !s.starts_with("brand/") && !s.starts_with("fonts/") {
+                continue;
+            }
+            let path = format!("/{s}");
+            assert!(
+                lookup(&path).is_some(),
+                "UI 引用了 {path}，但 assets.rs 的资源表里没有它 —— 会渲染成破图"
+            );
+        }
     }
 
     #[test]

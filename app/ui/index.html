@@ -1,31 +1,62 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="xuan">
+<html lang="zh-CN" data-theme="xuan" data-motion="standard" data-texture="light">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DeskBase 桌库</title>
 <!-- 相对引用即可：整页从 deskbase://localhost/ 加载，
-     CSS / JS / 字体都在同一个 origin 下（见 app/src/assets.rs） -->
+     CSS / JS / 字体 / 图标都在同一个 origin 下（见 app/src/assets.rs） -->
 <link rel="stylesheet" href="theme.css" />
-<!-- 尚无应用图标（P0-13 选型未定）。用空 data URI 显式声明"没有图标"，
-     避免 WebView 去要 /favicon.ico 然后落一条 404 噪音到日志里。 -->
-<link rel="icon" href="data:," />
+<link rel="icon" href="brand/icon-64.png" />
 </head>
 <body>
+
+<!-- ============================================================
+     图标集：手绘 1.5px 线宽，随 currentColor 着色，打包进程序不联网加载
+     ============================================================ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-bench" viewBox="0 0 20 20">
+      <rect x="2.5" y="3" width="15" height="6.2" rx="1.6"/>
+      <rect x="2.5" y="11.4" width="6.6" height="5.6" rx="1.6"/>
+      <rect x="10.9" y="11.4" width="6.6" height="5.6" rx="1.6"/>
+    </symbol>
+    <symbol id="i-note" viewBox="0 0 20 20">
+      <path d="M4.2 3.2h7.4l4.2 4.2v9.4a1 1 0 0 1-1 1H4.2a1 1 0 0 1-1-1V4.2a1 1 0 0 1 1-1Z"/>
+      <path d="M11.4 3.3v4.3h4.2"/>
+      <path d="M6.4 11.2h7.2M6.4 14.1h4.6"/>
+    </symbol>
+    <symbol id="i-db" viewBox="0 0 20 20">
+      <ellipse cx="10" cy="5" rx="6.2" ry="2.6"/>
+      <path d="M3.8 5v10c0 1.44 2.78 2.6 6.2 2.6s6.2-1.16 6.2-2.6V5"/>
+      <path d="M3.8 10c0 1.44 2.78 2.6 6.2 2.6s6.2-1.16 6.2-2.6"/>
+    </symbol>
+    <symbol id="i-gear" viewBox="0 0 20 20">
+      <path d="M3 6h9M15.5 6H17M3 14h1.5M8 14h9"/>
+      <circle cx="13.6" cy="6" r="2"/>
+      <circle cx="6.2" cy="14" r="2"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 20 20">
+      <circle cx="9" cy="9" r="5.2"/>
+      <path d="M12.9 12.9 17 17"/>
+    </symbol>
+  </defs>
+</svg>
 
 <div class="app">
   <!-- ================= 侧边栏 ================= -->
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">库</div>
+      <img class="brand-mark" src="brand/icon-64.png" alt="" width="30" height="30" />
       <div class="brand-text">桌库</div>
     </div>
 
-    <nav class="nav">
-      <button class="nav-item" data-target="workbench"><span class="dot"></span>工作台</button>
-      <button class="nav-item" data-target="notes" aria-current="true"><span class="dot"></span>笔记</button>
-      <button class="nav-item" data-target="database"><span class="dot"></span>数据库</button>
-      <button class="nav-item" data-target="settings"><span class="dot"></span>设置</button>
+    <nav class="nav" id="nav">
+      <div class="nav-pill" id="nav-pill" aria-hidden="true"></div>
+      <button class="nav-item" data-target="workbench"><svg class="ico"><use href="#i-bench"/></svg><span>工作台</span></button>
+      <button class="nav-item" data-target="notes" aria-current="true"><svg class="ico"><use href="#i-note"/></svg><span>笔记</span></button>
+      <button class="nav-item" data-target="database"><svg class="ico"><use href="#i-db"/></svg><span>数据库</span></button>
+      <button class="nav-item" data-target="settings"><svg class="ico"><use href="#i-gear"/></svg><span>设置</span></button>
     </nav>
 
     <div class="sidebar-foot">
@@ -41,27 +72,38 @@
     <header class="topbar">
       <h1 id="page-title">笔记</h1>
       <div class="spacer"></div>
+      <label class="search" id="search-wrap">
+        <svg class="ico"><use href="#i-search"/></svg>
+        <input type="search" id="search-input" placeholder="搜索笔记…" autocomplete="off" />
+      </label>
       <button class="btn btn-ghost" id="btn-delete-note">删除</button>
       <button class="btn btn-primary" id="btn-new-note">新建</button>
     </header>
 
-    <div class="content">
+    <div class="content" id="content">
 
       <!-- ---------- 工作台 ---------- -->
       <section class="view" data-view="workbench">
-        <div class="card">
-          <h3>说明</h3>
-          <p style="margin:0;color:var(--ink-2);font-size:var(--fs-sub)">
-            工作台尚未实现。当前版本只打通了「外壳 + 存储 + 界面」这条垂直切片，
-            用来验证架构可行。完整规划见 <code>local-docs/handoff/DEVELOPMENT_PLAN.md</code>。
-          </p>
+        <div class="stack">
+          <div class="card">
+            <h3>说明</h3>
+            <p class="muted">
+              工作台尚未实现。当前版本打通了「外壳 + 存储 + 界面 + 字体 + 主题与动效」这条链路，
+              用来验证架构可行。完整规划见 <code>local-docs/handoff/DEVELOPMENT_PLAN.md</code>。
+            </p>
+          </div>
         </div>
       </section>
 
       <!-- ---------- 笔记 ---------- -->
       <section class="view" data-view="notes" data-active="true">
         <div class="notes">
-          <div class="note-list" id="note-list"></div>
+          <div class="note-col">
+            <div class="filters" id="filters" role="tablist">
+              <div class="filter-pill" id="filter-pill" aria-hidden="true"></div>
+            </div>
+            <div class="note-list" id="note-list"></div>
+          </div>
           <div class="editor">
             <div class="editor-head">
               <input class="title-input" id="note-title" placeholder="标题" />
@@ -73,70 +115,118 @@
 
       <!-- ---------- 数据库 ---------- -->
       <section class="view" data-view="database">
-        <div class="card">
-          <h3>数据库</h3>
-          <p style="margin:0 0 var(--sp-3);color:var(--ink-2);font-size:var(--fs-sub)">
-            存储引擎已经就绪（单文件 SQLite，WAL + 每次提交 fsync）。
-            「笔记」模块就是它的第一个使用者。可视化建表、查询向导等尚未实现。
-          </p>
-          <dl class="kv">
-            <dt>引擎</dt><dd>SQLite（bundled，自带源码编译）</dd>
-            <dt>持久性</dt><dd>WAL + synchronous=FULL</dd>
-            <dt>数据文件</dt><dd id="about-datadir">—</dd>
-            <dt>现有笔记</dt><dd id="about-count">—</dd>
-          </dl>
+        <div class="stack">
+          <div class="card">
+            <h3>数据库</h3>
+            <p class="muted">
+              存储引擎已经就绪（单文件 SQLite，WAL + 每次提交 fsync）。
+              「笔记」模块就是它的第一个使用者。可视化建表、查询向导等尚未实现。
+            </p>
+            <dl class="kv">
+              <dt>引擎</dt><dd>SQLite（bundled，自带源码编译）</dd>
+              <dt>持久性</dt><dd>WAL + synchronous=FULL</dd>
+              <dt>数据文件</dt><dd id="about-datadir">—</dd>
+              <dt>现有笔记</dt><dd id="about-count">—</dd>
+            </dl>
+          </div>
         </div>
       </section>
 
       <!-- ---------- 设置 ---------- -->
       <section class="view" data-view="settings">
-        <div class="card">
-          <h3>外观</h3>
-          <div class="field">
-            <label for="theme-select">主题</label>
-            <select id="theme-select" class="btn" style="width:160px">
-              <option value="xuan">宣纸（默认）</option>
-              <option value="yemo">夜墨</option>
-            </select>
-            <div class="hint">宣纸是产品默认。夜墨是它的暗色对应，用于夜间。</div>
-          </div>
-          <div class="field">
-            <span>质感强度</span>
-            <span style="color:var(--ink-3)">轻</span>
-            <div class="hint">纸纹的明显程度。当前固定为「轻」，四档可调尚未实现。</div>
-          </div>
-          <div class="field">
-            <label for="heading-select">标题字体</label>
-            <select id="heading-select" class="btn" style="width:200px">
-              <option value="display">得意黑（内置，默认）</option>
-              <option value="serif">宋体系（系统）</option>
-            </select>
-            <div class="hint">
-              标题、模块名与大号数字所用的字体。内置的是「得意黑」（SIL OFL 1.1，
-              1.10 MB，随程序分发，不联网下载）。
-            </div>
-          </div>
-          <div class="field">
-            <span>正文 / 代码</span>
-            <span style="color:var(--ink-3)">系统字体栈</span>
-            <div class="hint">
-              正文走系统黑体（微软雅黑等），代码走系统等宽字体 —— 正文用字量最大，
-              内嵌中文字库得不偿失。自定义字体导入（.ttf / .otf / .woff2）尚未实现。
-            </div>
-          </div>
-        </div>
+        <div class="stack">
+          <div class="card">
+            <h3>外观</h3>
 
-        <div class="card" style="margin-top:var(--sp-4)">
-          <h3>关于</h3>
-          <dl class="kv">
-            <dt>名称</dt><dd>DeskBase 桌库</dd>
-            <dt>版本</dt><dd id="about-version-2">—</dd>
-            <dt>许可证</dt><dd>Apache License 2.0</dd>
-            <dt>数据位置</dt><dd id="about-datadir-2">—</dd>
-          </dl>
-          <p style="margin:var(--sp-3) 0 0;color:var(--ink-2);font-size:var(--fs-sub)">
-            默认不联网、无遥测、无账号。数据全部存在你的电脑上。
-          </p>
+            <div class="field">
+              <label for="theme-select">主题</label>
+              <select id="theme-select" class="select">
+                <optgroup label="跟随系统">
+                  <option value="auto">跟随系统（亮 / 暗自动切换）</option>
+                </optgroup>
+                <optgroup label="浅色">
+                  <option value="xuan">宣纸</option>
+                  <option value="qingci">青瓷</option>
+                  <option value="zhuqing">竹青</option>
+                  <option value="zhumo">朱墨</option>
+                  <option value="hc-light">高对比亮</option>
+                </optgroup>
+                <optgroup label="深色">
+                  <option value="yemo">夜墨</option>
+                  <option value="songyan">松烟</option>
+                  <option value="xuantie">玄铁</option>
+                  <option value="hc-dark">高对比暗</option>
+                </optgroup>
+              </select>
+              <div class="hint" id="theme-hint">
+                共 9 个内置主题。选「跟随系统」会随操作系统的亮暗设置自动切换。
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="texture-select">质感强度</label>
+              <select id="texture-select" class="select">
+                <option value="off">关</option>
+                <option value="light">轻（默认）</option>
+                <option value="standard">标准</option>
+                <option value="strong">明显</option>
+              </select>
+              <div class="hint">背景纸纹的明显程度。纸纹只在最底层，不覆盖文字与卡片内部，不消耗空闲 CPU。</div>
+            </div>
+
+            <div class="field">
+              <label for="motion-select">动效</label>
+              <select id="motion-select" class="select">
+                <option value="off">关</option>
+                <option value="minimal">精简</option>
+                <option value="standard">标准（默认）</option>
+                <option value="rich">丰富</option>
+              </select>
+              <div class="hint" id="motion-hint">
+                动效服务于理解，不做循环播放的装饰动画。调到「关」会立刻停掉全部过渡与位移。
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="heading-select">标题字体</label>
+              <select id="heading-select" class="select">
+                <option value="display">得意黑（内置，默认）</option>
+                <option value="serif">宋体系（系统）</option>
+              </select>
+              <div class="hint" id="heading-hint">
+                标题、模块名与大号数字所用的字体。内置的是「得意黑」（SIL OFL 1.1，1.10 MB，随程序分发，不联网下载）。
+              </div>
+            </div>
+
+            <div class="field">
+              <span>正文 / 代码</span>
+              <span class="muted">系统字体栈</span>
+              <div class="hint">
+                正文走系统黑体（微软雅黑等），代码走系统等宽字体 —— 正文用字量最大，
+                内嵌中文字库得不偿失。自定义字体导入（.ttf / .otf / .woff2）尚未实现。
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>关于</h3>
+            <div class="about-head">
+              <img src="brand/icon-128.png" alt="DeskBase 图标" width="56" height="56" />
+              <div>
+                <div class="about-name">DeskBase 桌库</div>
+                <dl class="kv kv-compact">
+                  <dt>版本</dt><dd id="about-version-2">—</dd>
+                  <dt>许可证</dt><dd>Apache License 2.0</dd>
+                </dl>
+              </div>
+            </div>
+            <dl class="kv" style="margin-top:var(--sp-4)">
+              <dt>数据位置</dt><dd id="about-datadir-2">—</dd>
+            </dl>
+            <p class="muted" style="margin:var(--sp-3) 0 0">
+              默认不联网、无遥测、无账号。数据全部存在你的电脑上。
+            </p>
+          </div>
         </div>
       </section>
 
@@ -144,7 +234,7 @@
   </main>
 </div>
 
-<div class="toast" id="toast" data-show="false"></div>
+<div class="toast" id="toast" data-show="false" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 </body>

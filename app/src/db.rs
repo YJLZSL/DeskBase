@@ -19,6 +19,9 @@ pub struct NoteSummary {
     pub id: String,
     pub title: String,
     pub updated_at: i64,
+    /// 正文摘要（前若干字符）。列表要能按内容搜索与筛选，又不该把整篇正文
+    /// 拖进列表接口 —— 摘要在 SQL 侧截断，避免把大文本搬过 IPC。
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,6 +60,7 @@ impl Db {
     }
 
     /// 只为测试用的内存库
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| format!("打开内存库失败: {e}"))?;
         let db = Db { conn };
@@ -137,7 +141,9 @@ impl Db {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, updated_at FROM note
+                "SELECT id, title, updated_at,
+                        trim(replace(replace(substr(content, 1, 240), char(10), ' '), char(13), ' '))
+                 FROM note
                  WHERE deleted_at IS NULL
                  ORDER BY updated_at DESC, id DESC",
             )
@@ -148,6 +154,7 @@ impl Db {
                     id: r.get(0)?,
                     title: r.get(1)?,
                     updated_at: r.get(2)?,
+                    excerpt: r.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -302,5 +309,30 @@ mod tests {
         let got = db.get_note(&n.id).unwrap().unwrap();
         assert!(got.content.contains("宣纸主题"));
         assert!(got.content.contains('\n'));
+    }
+
+    #[test]
+    fn 列表摘要会把换行压成空格并截断() {
+        let db = Db::open_in_memory().unwrap();
+        let n = db.create_note("带正文").unwrap();
+        let long = "第一行\n第二行\r\n".to_string() + &"很长".repeat(200);
+        db.save_note(&n.id, "带正文", &long).unwrap();
+
+        let list = db.list_notes().unwrap();
+        assert_eq!(list.len(), 1);
+        let ex = &list[0].excerpt;
+        assert!(!ex.contains('\n'), "摘要里不该有换行：{ex:?}");
+        assert!(!ex.contains('\r'), "摘要里不该有回车：{ex:?}");
+        assert!(ex.starts_with("第一行 第二行"), "实际：{ex:?}");
+        // SQL 侧按字符截到 240，加上压平后的空格也不会失控
+        assert!(ex.chars().count() <= 260, "摘要太长了：{}", ex.chars().count());
+    }
+
+    #[test]
+    fn 空笔记的摘要为空串而不是缺失() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_note("空").unwrap();
+        let list = db.list_notes().unwrap();
+        assert_eq!(list[0].excerpt, "");
     }
 }
