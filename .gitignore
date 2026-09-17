@@ -1,0 +1,200 @@
+# ============================================================
+# DeskBase (桌库) — 仓库忽略规则
+# 目标：仓库只保留源码、文档与构建脚本；
+#       本地参考资料、AI 交接文档、构建产物、用户数据一律不入库。
+# ============================================================
+
+# ---------- 本地专属文档（明确不上传仓库）----------
+# 参考文档：竞品分析、选型调研、基准方法、合规清单等
+local-docs/
+# 兼容旧命名 / 其他可能的本地产物目录
+reference-docs/
+ai-handoff/
+handoff/
+# 用户本地笔记与临时文件
+notes/
+*.local.md
+*.private.md
+
+# ---------- 构建产物 ----------
+dist/
+build/
+out/
+release/
+target/
+*.tsbuildinfo
+.gradle/
+obj/
+bin/
+[Dd]ebug/
+[Rr]elease/
+x64/
+*.exp
+*.lib
+*.pdb
+*.ilk
+
+# ---------- 依赖目录 ----------
+node_modules/
+bower_components/
+jspm_packages/
+.pnpm-store/
+vendor/bundle/
+__pypackages__/
+.venv/
+venv/
+env/
+.conda/
+packages/*/node_modules/
+
+# ---------- 缓存 ----------
+.npm/
+.yarn/cache
+.yarn/install-state.gz
+.pnp.*
+.eslintcache
+.stylelintcache
+.parcel-cache
+.next/
+.nuxt/
+.svelte-kit/
+.turbo/
+.vite/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage/
+htmlcov/
+*.lcov
+
+# ---------- 编辑器与 IDE ----------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.recommended.json
+*.swp
+*.swo
+*~
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.history/
+
+# ---------- 操作系统 ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---------- 日志与临时文件 ----------
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+_probe.txt
+tmp/
+temp/
+
+# ---------- 环境变量与密钥（绝不入库）----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets/
+*.keystore
+!**/signing/*.md
+
+# ---------- 测试与覆盖率 ----------
+test-results/
+playwright-report/
+cypress/videos/
+cypress/screenshots/
+allure-results/
+
+# ---------- 打包与安装器产物 ----------
+*.exe
+*.msi
+*.msix
+*.appx
+*.dmg
+*.pkg
+*.AppImage
+*.deb
+*.rpm
+*.snap
+*.flatpak
+*.asar
+*.blockmap
+*.nupkg
+!scripts/**/*.ps1
+!scripts/**/*.sh
+
+# ---------- 数据库与运行时数据（本地优先，不入库）----------
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.mdb
+data/
+userdata/
+backups/
+snapshots/
+
+# ---------- 大型二进制资源 ----------
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+# 例外：允许示例数据集以 LFS 或小体积形式入库
+!docs/**/*.csv
+!examples/**/*.csv
+
+# ---------- 语言特定 ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.dll
+*.so
+*.dylib
+*.o
+*.a
+
+# ---------- 本地 AI 模型（体积巨大，永不入库）----------
+models/
+*.gguf
+*.ggml
+*.onnx
+*.safetensors
+*.bin
+!src/**/*.bin
+
+# ---------- 备份与导出交付物 ----------
+*.deskbase-backup
+*.deskbase-export
+deliverables/

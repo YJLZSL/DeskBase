@@ -1,0 +1,50 @@
+name: 文档问题
+description: 报告文档错误、缺失或表述不清
+title: "[Docs] "
+labels: ["docs", "triage"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: 涉及的文档
+      description: 文件路径或网页链接
+      placeholder: "例：docs/13-settings-tutorial-help.md"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 内容有误（与程序实际行为不符）
+        - 表述不清 / 容易误解
+        - 缺少说明（有功能但没写文档）
+        - 示例代码或命令无法运行
+        - 链接失效
+        - 错别字 / 排版问题
+        - 翻译问题
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: 问题描述
+      description: 现在写的是什么？应该是什么？为什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 你建议的修改
+      description: 可以直接给出改写后的段落，我们非常欢迎
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: 参与意愿
+      options:
+        - label: 我愿意直接提交这个修改的 PR

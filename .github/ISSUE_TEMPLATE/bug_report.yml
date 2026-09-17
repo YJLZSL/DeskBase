@@ -1,0 +1,134 @@
+name: 缺陷报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间报告问题。**请先搜索已有 Issue**，避免重复。
+
+        > ⚠️ 安全问题请**不要**在这里报告。请按 [SECURITY.md](../blob/main/SECURITY.md) 的私密渠道提交。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过已有 Issue，确认这不是重复问题
+          required: true
+        - label: 我已经在最新版本上复现过该问题
+          required: true
+        - label: 这**不是**安全问题（安全问题走 SECURITY.md 的私密渠道）
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: DeskBase 版本
+      description: 在「关于」页面可以看到，或填写便携版所在目录的版本文件内容
+      placeholder: "例：1.0.0 / 便携版 2026-09-01 构建"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: 使用的版本形态
+      options:
+        - 安装版
+        - 便携版（绿色版）
+        - 自行构建的开发版
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (deb/rpm)
+        - Linux (AppImage)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - 其他（请在下方说明）
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本与架构
+      placeholder: "例：Windows 11 24H2 (26100.1742) / x64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么？你期望发生什么？
+      placeholder: |
+        实际结果：
+        期望结果：
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请写得足够精确，让没有参与开发的人也能照着复现
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 输入 ...
+        4. 观察到 ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: 复现概率
+      options:
+        - 每次都能复现（100%）
+        - 经常出现（>50%）
+        - 偶尔出现（<50%）
+        - 只出现过一次
+        - 还没能稳定复现
+    validations:
+      required: true
+
+  - type: input
+    id: data-scale
+    attributes:
+      label: 涉及的数据规模（若相关）
+      description: 数据量常影响表现，请尽量提供
+      placeholder: "例：约 8 万行、12 个字段、库文件 40 MB"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与错误信息
+      description: |
+        请粘贴相关日志。日志位置可在「设置 → 高级 → 日志」中打开。
+        **粘贴前请务必删除其中的隐私内容**（路径中的用户名、文件名、数据内容等）。
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、录屏、相关 Issue 链接、你已尝试过的排查方法
+
+  - type: checkboxes
+    id: privacy-check
+    attributes:
+      label: 隐私自查
+      options:
+        - label: 我已确认粘贴的日志与截图中不包含我的个人隐私数据
+          required: true

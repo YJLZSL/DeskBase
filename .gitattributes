@@ -1,0 +1,114 @@
+# ============================================================
+# DeskBase (桌库) — Git 属性
+# 目的：统一换行符、标注二进制、规范文本 diff、声明归档导出规则
+# ============================================================
+
+# ---------- 默认：仓库内文本一律以 LF 归一化 ----------
+* text=auto eol=lf
+
+# ---------- 明确的文本类型 ----------
+*.md        text eol=lf
+*.markdown  text eol=lf
+*.txt       text eol=lf
+*.json      text eol=lf
+*.jsonc     text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.toml      text eol=lf
+*.ini       text eol=lf
+*.cfg       text eol=lf
+*.sql       text eol=lf
+*.csv       text eol=lf
+*.tsv       text eol=lf
+*.css       text eol=lf
+*.scss      text eol=lf
+*.html      text eol=lf
+*.svg       text eol=lf
+*.xml       text eol=lf
+
+# ---------- 源码 ----------
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.vue   text eol=lf
+*.svelte text eol=lf
+*.rs    text eol=lf
+*.go    text eol=lf
+*.py    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+*.cc    text eol=lf
+*.hpp   text eol=lf
+*.cs    text eol=lf
+*.java  text eol=lf
+*.kt    text eol=lf
+*.swift text eol=lf
+*.dart  text eol=lf
+
+# ---------- Windows 平台脚本保留 CRLF ----------
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# ---------- 必须保持原样的 shell 脚本 ----------
+*.sh    text eol=lf
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+
+# ---------- 锁文件：合并时保留双方、不自动解决 ----------
+package-lock.json   -diff merge=binary linguist-generated=true
+pnpm-lock.yaml      -diff merge=binary linguist-generated=true
+yarn.lock           -diff merge=binary linguist-generated=true
+Cargo.lock          -diff merge=binary linguist-generated=true
+poetry.lock         -diff merge=binary linguist-generated=true
+go.sum              -diff merge=binary linguist-generated=true
+
+# ---------- 二进制资源 ----------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.avif      binary
+*.ico       binary
+*.icns      binary
+*.bmp       binary
+*.tiff      binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.otf       binary
+*.eot       binary
+*.pdf       binary
+*.zip       binary
+*.7z        binary
+*.gz        binary
+*.tar       binary
+*.exe       binary
+*.dll       binary
+*.so        binary
+*.dylib     binary
+*.node      binary
+*.wasm      binary
+*.gguf      binary
+*.onnx      binary
+*.sqlite    binary
+*.db        binary
+
+# ---------- 归档导出：排除开发噪音，减小 export 体积 ----------
+# 使用 `git archive` 打包发布源码时应忽略的内容
+.gitignore      export-ignore
+.gitattributes  export-ignore
+.github/        export-ignore
+local-docs/     export-ignore
+CONTRIBUTING.md export-ignore
+CODE_OF_CONDUCT.md export-ignore
+
+# ---------- 语言统计修正 ----------
+docs/**         linguist-documentation
+*.md            linguist-documentation=false
+LICENSE         linguist-documentation
+local-docs/**   linguist-vendored
