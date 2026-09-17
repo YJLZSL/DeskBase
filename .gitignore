@@ -22,6 +22,9 @@ notes/
 .workbuddy/*.local.*
 .workbuddy/logs/
 
+# ZCode 的计划模式产物：属于本地 agent 状态，和上面的 memory 同类，不入库
+.zcode/
+
 # ---------- 构建产物 ----------
 dist/
 build/
