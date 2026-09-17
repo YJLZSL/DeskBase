@@ -33,6 +33,8 @@ const TARGETS = [
   path.join(ROOT, 'app', 'ui', 'motion.css'),
   path.join(ROOT, 'app', 'ui', 'components.css'),
   path.join(ROOT, 'app', 'ui', 'palette.css'),
+  path.join(ROOT, 'app', 'ui', 'grid.css'),
+  path.join(ROOT, 'app', 'ui', 'sql.css'),
 ];
 
 /** 布局属性：动画它们会触发布局重算 */

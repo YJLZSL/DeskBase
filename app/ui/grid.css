@@ -1,0 +1,717 @@
+/* ============================================================
+   DeskBase 数据网格 · 样式
+   ============================================================
+   配套 app/ui/grid.js。规格来源：docs/18（视觉与动效）、
+   docs/06 §5（数据编辑与校验）、docs/06 §7（性能设计）。
+
+   ## 为什么单独一份文件
+   与 components.css 同样的理由：网格的改动被"数据密度与滚动性能"驱动，
+   而 theme.css 被"十个主题的观感"驱动。两者节奏不同，混在一起会互相污染。
+   本文件只认 token，不写死任何色值，也不去改 theme.css 里的任何类。
+
+   ## 动效三条铁律（违反会被 scripts/check-motion.cjs 拦下）
+   1. 只动 transform / opacity。transition / animation 里绝不出现
+      width / height / top / left / margin / padding / gap —— 网格里
+      每一次滚动都在动上百个格子，动布局属性等于每帧重算整屏几何。
+      列宽变化（拖拽）确实会改 width，但它是**静止的几何**，没有任何
+      过渡挂在它上面。
+   2. 没有任何循环动画（没有 animation-iteration-count: infinite）。
+      骨架屏微光由 components.css 负责，网格自己不放任何常驻动画。
+   3. 时长一律走 token。动效档位调到「关」时 --dur-* 自己变成 1ms，
+      本文件的所有过渡随之瞬间完成，不需要为「关」写任何特例。
+
+   ## 与性能有关的几个刻意的写法
+   · 行高固定，且与 JS 共用同一个 token（--row-h）：JS 用它算行位置，
+     CSS 用它定行高，两处读同一个变量就不会"算的和画的对不上"。
+   · 行用 translateY 整体位移（.dbgrid-rows），不逐行改 top —— 只走合成层。
+   · 单元格不设 border-top/bottom（只有右边线 + 行下边线），
+     让一屏 20 行只需 20 个横向描边，而不是 20×N 个。
+   · .dbgrid-rows 用 contain: layout style 把重排范围关在网格里：
+     滚动时外层的页面布局不该被重新计算。
+   ============================================================ */
+
+.dbgrid {
+  /* 尺寸由调用方决定（工具区/卡片给高度）；这里只保证"填满 + 不撑破" */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--card);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  line-height: 1.5;
+}
+
+/* 拖列宽期间：整个网格锁光标与选区。用类而不是行内样式，
+   是因为"拖到哪里都会变"这件事必须由一个状态表达。 */
+.dbgrid.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* ---------- 工具条 ---------- */
+.dbgrid-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--card);
+}
+
+.dbgrid-bar-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.dbgrid-info {
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  /* 行数是会变的数字，等宽才不会让右边的按钮跟着左右跳 */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dbgrid-selinfo {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.dbgrid-foot {
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  white-space: nowrap;
+}
+
+.dbgrid-badge,
+.dbgrid-more {
+  flex: none;
+}
+
+[data-theme="brutal"] .dbgrid-more {
+  /* 粗野主题的按钮有硬阴影，工具条里这么小的按钮会显得很吵 */
+  box-shadow: none;
+}
+
+/* ---------- 滚动容器 ---------- */
+.dbgrid-main {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.dbgrid-scroll {
+  flex: 1;
+  min-height: 0;
+  /* 唯一的滚动容器：横向与纵向都在这里。
+     表头是它的子元素，所以表头天然跟着横向滚；纵向靠 sticky 钉住。
+     这样只需要一个滚动条、一套坐标系，不需要 JS 去同步两个容器的位置。 */
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* 内容宽度 = 所有列宽之和（JS 写内联 width），列少时至少铺满一屏 */
+.dbgrid-inner {
+  position: relative;
+  min-width: 100%;
+}
+
+/* ---------- 表头 ---------- */
+/* sticky 的既是"标题行"也是"筛选行"：它们同属一个块，
+   所以一起钉在顶上，也一起跟着横向滚动。 */
+.dbgrid-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--card);
+  border-bottom: var(--line-w) solid var(--line-strong);
+}
+
+.dbgrid-hrow,
+.dbgrid-frow {
+  display: flex;
+  align-items: stretch;
+}
+
+.dbgrid-frow {
+  align-items: center;
+  height: calc(var(--row-h, 34px) - 6px);
+  border-top: var(--line-w) solid var(--line);
+}
+
+.dbgrid-th {
+  position: relative; /* 列宽把手绝对定位在右边缘 */
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-h, 34px);
+  padding: 0 var(--sp-2);
+  border-right: var(--line-w) solid var(--line);
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: var(--fs-aux);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.dbgrid-th:hover {
+  background: color-mix(in srgb, var(--line) 34%, var(--card));
+}
+
+.dbgrid-th-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 类型角标：比字段名更弱，只是让人确认"这列是数字还是文本" */
+.dbgrid-th-type {
+  flex: none;
+  color: var(--ink-3);
+  font-family: var(--font-code);
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+.dbgrid-fill {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-right: none;
+}
+
+.dbgrid-cell.dbgrid-fill,
+.dbgrid-th.dbgrid-fill,
+.dbgrid-fcell.dbgrid-fill {
+  border-right: none;
+}
+
+/* 排序角标：两个方向的三角靠 transform 转，不动几何。
+   未排序时只是 opacity: 0 —— 位置一直占着，排序时不会引起列内重排。 */
+.dbgrid-sort {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 5px solid currentColor;
+  opacity: 0;
+  transform: rotate(0deg);
+  transition: opacity var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-standard);
+}
+
+.dbgrid-th[data-sort] .dbgrid-sort {
+  opacity: 0.85;
+}
+
+.dbgrid-th[data-sort="desc"] .dbgrid-sort {
+  transform: rotate(180deg);
+}
+
+/* 列宽把手：命中区比"看得见的线"宽得多（9px vs 2px）。
+   视觉提示由伪元素承担，只过渡它的 opacity。 */
+.dbgrid-rz {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 4;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.dbgrid-rz::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 18%;
+  bottom: 18%;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.dbgrid-rz:hover::after {
+  opacity: 1;
+}
+
+/* ---------- 筛选行 ---------- */
+.dbgrid-fcell {
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 2px var(--sp-1);
+  border-right: var(--line-w) solid var(--line);
+}
+
+.dbgrid-filter {
+  width: 100%;
+  min-width: 0;
+  height: calc(var(--row-h, 34px) - 12px);
+  padding: 0 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-aux);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.dbgrid-filter::placeholder {
+  color: var(--ink-3);
+}
+
+.dbgrid-filter:hover {
+  background: color-mix(in srgb, var(--line) 30%, transparent);
+}
+
+.dbgrid-filter:focus {
+  /* outline 而不是 border：焦点不该改变几何 */
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--card);
+}
+
+.dbgrid-filter::-webkit-search-cancel-button {
+  filter: grayscale(1) opacity(0.5);
+}
+
+/* ---------- 表体 ---------- */
+/* body 的高度就是"行数 × 行高"（JS 写内联 height）——
+   它是滚动条能拖多长的唯一依据，行本身并不都渲染出来。 */
+.dbgrid-body {
+  position: relative;
+  width: 100%;
+}
+
+.dbgrid-rows {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  /* 位置整体由 translateY 表达（JS 每帧只写这一个值） */
+  will-change: transform;
+  /* 把重排范围关在网格内部：滚动时不要让外层页面参与重算 */
+  contain: layout style;
+}
+
+.dbgrid-row {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: var(--row-h, 34px);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--card);
+}
+
+/* 斑马纹按"数据行号"给（JS 写 data-parity），不是 nth-child ——
+   虚拟滚动里 DOM 顺序和视觉行号不是一回事，用 nth-child 会闪。 */
+.dbgrid-row[data-parity="odd"] {
+  background: color-mix(in srgb, var(--line) 22%, var(--card));
+}
+
+.dbgrid-row:hover {
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+}
+
+.dbgrid-row[data-sel="true"] {
+  background: var(--accent-soft);
+}
+
+.dbgrid-row[data-sel="true"] .dbgrid-cell {
+  color: var(--accent);
+}
+
+.dbgrid-cell {
+  position: relative; /* 就地编辑的输入框以它为准绝对定位 */
+  display: flex;
+  flex: none;
+  align-items: center;
+  min-width: 0;
+  padding: 0 var(--sp-2);
+  border-right: var(--line-w) solid var(--line);
+  overflow: hidden;
+}
+
+.dbgrid-txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数字列右对齐 + 等宽数字：列不会因为数字位数不同而抖动（docs/18 6.2） */
+.dbgrid-cell.is-num {
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- NULL 与空串 ----------
+   两者在屏幕上都是"什么都没有"，业务含义却完全不同（见 grid.js 头部）。
+   NULL 给一个灰色的占位词，空串就真的是空的 —— 但空串的格子会带上
+   title，鼠标停一下就知道它是哪一种。 */
+.dbgrid-null {
+  color: var(--ink-3);
+  font-style: italic;
+  font-size: var(--fs-aux);
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+  user-select: none;
+}
+
+/* 键盘光标：outline 不参与布局，格子不会因此挪动 */
+.dbgrid-cell[data-cursor="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 1px;
+}
+
+/* 焦点不在网格里时，光标环弱化但仍可见 —— 用户要能看出"上次停在哪" */
+.dbgrid:not([data-focus="true"]) .dbgrid-cell[data-cursor="true"] {
+  outline-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* ---------- 勾选列 ---------- */
+.dbgrid-ck {
+  justify-content: center;
+  padding: 0;
+}
+
+.dbgrid-check {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.dbgrid-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* ---------- 就地编辑 ---------- */
+/* 编辑控件绝对定位铺满格子：进入/退出编辑都不改变任何格子的几何，
+   所以不会牵动那一行的其它列重排（这正是"编辑时不触发重排"的关键）。 */
+.dbgrid-editwrap {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px;
+  background: var(--card);
+}
+
+.dbgrid-input {
+  flex: 1;
+  min-width: 0;
+  height: calc(var(--row-h, 34px) - 6px);
+  padding: 0 6px;
+  border: var(--line-w) solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.dbgrid-input::placeholder {
+  /* 占位文字是"这一格到底是 NULL 还是空串"的编辑期答案 */
+  color: var(--ink-3);
+}
+
+.dbgrid-input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  outline-offset: 1px;
+}
+
+/* 「设为 NULL」：值有值的时候才出现，把"清成 NULL"变成一次明确的操作，
+   而不是让用户猜"清空输入框算不算 NULL" */
+.dbgrid-nullbtn {
+  flex: none;
+  padding: 0 5px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+
+.dbgrid-nullbtn:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* 布尔列的开关：垂直居中的静态位移，不参与过渡 */
+.dbgrid-switchcell {
+  position: absolute;
+  left: var(--sp-2);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+}
+
+/* 新增行里的输入框铺满格子 */
+.dbgrid-cell.dbgrid-editable {
+  padding: 0 2px;
+}
+
+.dbgrid-cell.dbgrid-editable .dbgrid-input {
+  border-color: var(--line-strong);
+  background: var(--paper);
+}
+
+.dbgrid-cell.dbgrid-editable .dbgrid-input:focus {
+  border-color: var(--accent);
+  background: var(--card);
+}
+
+/* ---------- 表尾「新增」行 ---------- */
+/* 它钉在最后一行下面（JS 写 translateY），永远可见、永远最后。 */
+.dbgrid-newrow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: var(--paper-2);
+  border-top: var(--line-w) dashed var(--line-strong);
+  border-bottom: none;
+}
+
+.dbgrid-newmark {
+  color: var(--ink-3);
+  font-size: var(--fs-group);
+  line-height: 1;
+}
+
+.dbgrid-newhint {
+  justify-content: flex-end;
+  padding-right: var(--sp-3);
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* ---------- 覆盖层：骨架屏 / 空态 / 错误态 ---------- */
+.dbgrid-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-4) var(--sp-3);
+  overflow: hidden;
+  background: var(--card);
+  transition: opacity var(--dur-normal) var(--ease-exit);
+}
+
+/* 交接：内容已经在下面画好了，这一层淡出即"揭示"。
+   淡出期间必须让开鼠标，否则用户会觉得界面卡住了。 */
+.dbgrid-veil[data-state="leaving"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dbgrid-state {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+  color: var(--ink-3);
+}
+
+.dbgrid-state h2 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.dbgrid-state p {
+  margin: 0;
+  max-width: 40ch;
+  font-size: var(--fs-sub);
+  text-wrap: pretty;
+}
+
+.dbgrid-state-hint {
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+}
+
+.dbgrid-state-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  color: var(--ink-3);
+  font-family: var(--font-heading);
+  font-size: var(--fs-sub);
+}
+
+.dbgrid-state-error .dbgrid-state-mark {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.dbgrid-state .btn {
+  margin-top: var(--sp-2);
+}
+
+/* ---------- 长文本 / 模态编辑器 ---------- */
+.dbgrid-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.dbgrid-textarea {
+  width: 100%;
+  min-height: 132px;
+  max-height: 40vh;
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  resize: vertical;
+}
+
+.dbgrid-textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.dbgrid-modal-hint {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  line-height: 1.65;
+}
+
+/* 没有组件库时的就地降级：仍然可用，只是不如模态框 |
+   它浮在格子上，所以给阴影和边界，别和底下的数据糊在一起。 */
+.dbgrid-editwrap.dbgrid-modal-inline {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-2);
+  left: auto;
+  right: 0;
+  top: 0;
+  bottom: auto;
+  width: max(320px, 100%);
+  padding: var(--sp-3);
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: var(--shadow-2);
+}
+
+.dbgrid-modal-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* 复制到剪贴板的临时载体：必须留在文档里且可选，才能被 execCommand 复制 */
+.dbgrid-copybuf {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 10px;
+  height: 10px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ============================================================
+   动效
+   ============================================================
+   网格里只有两处动画，都是"有信息价值"的那种（docs/18 7.1 原则 1）：
+
+   ① 首屏入场：数据刚到时，视口里那十几行轻轻浮上来。
+      **只给首屏可见的行**（JS 只给 idx < 14 的行加这个类），且量有上限。
+      200 行逐项淡入会让滚动直接掉帧 —— 那正是 docs/18 禁止大列表入场动画
+      的原因：入场动画一旦和滚动抢帧，用户看到的是卡顿而不是"精致"。
+   ② 保存失败：格子轻抖两下（幅度 3px，总时长 --dur-slow）。
+      失败必须被看见（docs/18 微交互第 20 条），但抖动只是"指给你看"，
+      真正说清楚原因的是同时弹出的 toast。
+   ============================================================ */
+
+.dbgrid-row.dbgrid-enter {
+  animation: dbgrid-row-in var(--dur-normal) var(--ease-glide) both;
+  animation-delay: calc(var(--dbgrid-i, 0) * var(--stagger));
+}
+
+@keyframes dbgrid-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--mo-slide));
+  }
+}
+
+/* 一次跑完两个来回，不用 iteration（循环动画是禁止的） */
+.dbgrid-cell[data-error="true"] {
+  animation: dbgrid-nope var(--dur-slow) var(--ease-standard) 1 both;
+}
+
+@keyframes dbgrid-nope {
+  0% {
+    transform: translateX(0);
+  }
+  15% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  70% {
+    transform: translateX(-2px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+/* 系统「减少动效」：抖动这类"表现型"动效直接去掉。
+   注意 theme.css 里的全局规则已经把时长压到 1ms，这里额外把动画停掉 ——
+   抖动幅度再短也没有信息价值，它只是一个"注意这里"的引导。 */
+@media (prefers-reduced-motion: reduce) {
+  .dbgrid-cell[data-error="true"],
+  .dbgrid-row.dbgrid-enter {
+    animation: none;
+  }
+}

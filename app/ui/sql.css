@@ -1,0 +1,923 @@
+/* ============================================================
+   DeskBase SQL 编辑器 · 样式（配 sql.js）
+   ============================================================
+   为什么是独立一份文件、类名一律带 dbsql- 前缀：
+     theme.css 是 token 层（十一个主题共用，不许写组件），
+     components.css / palette.css 各自带 dbui- / dp- 前缀。这份文件只服务
+     sql.js，前缀保证两边互不干扰 —— 和它们的规矩是同一条。
+
+   为什么高亮层与输入层必须写在同一组选择器里（见 .dbsql-hl, .dbsql-input）：
+     语法高亮用「textarea 叠在 pre 上」实现（CodeMirror 5 的 input/highlight
+     两层也是这个思路）。两层是**互相独立的盒模型**：字体、行高、内边距、
+     white-space、tab-size、direction 里任何一处不一样，文字就会错位，
+     而且是逐字累积的错法。所以这些"决定文字落点"的属性全部写在一条组内
+     选择器里 —— 改一处等于同时改两层，不存在只改了一半的可能。
+
+   动效：只动 transform / opacity，时长一律走 --dur-* 与 --mo-slide，
+   「关」档由 token 自己变成 1ms，这里不写任何档位特例。
+   结果表格**不做逐行入场动画**：几千行同时起动画比不动还慢，而且毫无信息量。
+   ============================================================ */
+
+/* ============================================================
+   根容器与局部变量
+   ============================================================ */
+.dbsql {
+  /* 编辑区的度量。集中在这里是为了让"两层必须一致"的那些属性只有一个来源 */
+  --dbsql-fs: 13px;
+  --dbsql-lh: 20px;
+  --dbsql-pad-x: 10px;
+  --dbsql-pad-y: 8px;
+  --dbsql-digits: 2; /* 行号位数，JS 按行数更新 */
+  --dbsql-editor-h: 232px; /* 由分隔条拖动改写（不参与过渡，见下） */
+  /* 代码字体：优先 --font-mono（若有），退回项目里的 --font-code / --stack-mono，
+     最后才是通用等宽栈。**绝不能退回比例字体** —— 那样两层即使属性一致，
+     宽度算出来的也会不一样（虽然同一个字体两边一致，但代码会很难看）。 */
+  --dbsql-font: var(--font-mono,
+    var(--font-code, var(--stack-mono, "JetBrains Mono", Consolas, monospace)));
+
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  /* 宿主没给容器高度时 100% 会塌成 0，所以给一个可用的下限：
+     宁可露出滚动条，也不能整块看不见。 */
+  height: 100%;
+  min-height: 420px;
+  min-width: 0;
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+}
+
+/* 所有内部按钮统一继承字体，免得按钮元素自己去拿 UA 的按钮字体 */
+.dbsql button {
+  font: inherit;
+  color: inherit;
+}
+
+.dbsql-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ============================================================
+   工具栏
+   ============================================================ */
+.dbsql-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+  min-width: 0;
+}
+
+.dbsql-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: var(--line-w) solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  font-size: var(--fs-aux);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform var(--dur-instant) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    opacity var(--dur-fast) var(--ease-standard);
+}
+.dbsql-btn:hover:not(:disabled) {
+  background: var(--paper-2);
+  border-color: color-mix(in srgb, var(--line-strong) 60%, var(--ink-3));
+  transform: translateY(calc(var(--mo-lift) * -1));
+}
+.dbsql-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.dbsql-btn:focus-visible {
+  outline: 2px solid var(--focus-bg, var(--accent));
+  outline-offset: 1px;
+}
+.dbsql-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.dbsql-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.dbsql-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
+  border-color: color-mix(in srgb, var(--accent) 88%, #000);
+}
+.dbsql-btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+.dbsql-btn-ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+}
+/* 侧栏开关是"按下状态"按钮：用 aria-pressed 表示，不用另一套类名 */
+.dbsql-btn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong));
+  color: var(--accent);
+}
+
+.dbsql-ico {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dbsql-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbsql-status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--ink-3);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.dbsql-status[data-state="running"] .dbsql-status-dot {
+  background: var(--warning);
+}
+.dbsql-status[data-state="ok"] .dbsql-status-dot {
+  background: var(--success);
+}
+.dbsql-status[data-state="error"] .dbsql-status-dot {
+  background: var(--danger);
+}
+
+.dbsql-hint {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.dbsql-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: var(--line-w) solid var(--line-strong);
+  color: var(--ink-2);
+  background: var(--card);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.dbsql-badge[data-kind="warn"] {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.dbsql-badge[data-kind="danger"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.dbsql-badge[data-kind="calm"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong));
+  color: var(--accent);
+}
+
+/* ============================================================
+   两栏骨架：表名侧栏 + 编辑/结果
+   ============================================================ */
+.dbsql-main {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+.dbsql-side {
+  flex: none;
+  width: 188px;
+  min-width: 0;
+  overflow: hidden;
+  border-right: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+}
+/* 折叠：宽度瞬间归零（**不能动画 width**，那是布局属性、每帧重算几何），
+   只让内容做一次淡出 + 轻微位移给出"收起来了"的因果。 */
+.dbsql-side-inner {
+  display: flex;
+  flex-direction: column;
+  width: 188px;
+  height: 100%;
+  min-height: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard),
+    transform var(--dur-normal) var(--ease-glide);
+}
+.dbsql[data-side="off"] .dbsql-side {
+  width: 0;
+  border-right-width: 0;
+}
+.dbsql[data-side="off"] .dbsql-side-inner {
+  opacity: 0;
+  transform: translateX(-8px);
+  pointer-events: none;
+}
+
+.dbsql-side-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  border-bottom: var(--line-w) solid var(--line);
+  white-space: nowrap;
+}
+.dbsql-side-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-1) var(--sp-1) var(--sp-3);
+}
+
+.dbsql-side-empty {
+  padding: var(--sp-3);
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  line-height: 1.7;
+}
+
+/* 一张表 = 一个可点的小节：表名插表名，字段名插字段名 */
+.dbsql-tbl-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-aux);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.dbsql-tbl-head:hover {
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+}
+.dbsql-tbl-caret {
+  flex: none;
+  width: 10px;
+  color: var(--ink-3);
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+.dbsql-tbl[data-open="true"] .dbsql-tbl-caret {
+  transform: rotate(90deg);
+}
+.dbsql-tbl-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--seal);
+  font-family: var(--dbsql-font);
+}
+.dbsql-tbl-comment {
+  flex: none;
+  max-width: 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-3);
+}
+.dbsql-tbl-cols {
+  display: none;
+  padding: 0 0 var(--sp-1) 0;
+}
+.dbsql-tbl[data-open="true"] .dbsql-tbl-cols {
+  display: block;
+}
+.dbsql-col {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  width: 100%;
+  padding: 2px 6px 2px 20px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-aux);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.dbsql-col:hover {
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+}
+.dbsql-col-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-family: var(--dbsql-font);
+}
+.dbsql-col-type {
+  margin-left: auto;
+  flex: none;
+  color: var(--ink-3);
+  font-size: 11px;
+  text-transform: lowercase;
+}
+
+/* ---------- 编辑区 ---------- */
+.dbsql-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.dbsql-editorbox {
+  display: flex;
+  /* 高度由变量给：拖动分隔条时直接改写它。**这里不加 transition** ——
+     高度是布局属性，过渡它等于每帧重排。 */
+  height: var(--dbsql-editor-h);
+  min-height: 96px;
+  flex: none;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* 行号槽：只跟随纵向滚动（横向不动），所以内容用 transform 平移，
+   槽本身 overflow: hidden。 */
+.dbsql-gutter {
+  flex: none;
+  position: relative;
+  width: calc(var(--dbsql-digits) * 1ch + 16px);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--paper-2) 80%, transparent);
+  border-right: var(--line-w) solid var(--line);
+  color: var(--ink-3);
+  font-family: var(--dbsql-font);
+  font-size: var(--dbsql-fs);
+  line-height: var(--dbsql-lh);
+  user-select: none;
+  cursor: default;
+}
+.dbsql-gutter-inner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--dbsql-pad-y);
+  will-change: transform;
+}
+.dbsql-ln {
+  height: var(--dbsql-lh);
+  line-height: var(--dbsql-lh);
+  padding-right: 7px;
+  text-align: right;
+}
+/* 当前语句覆盖到的行：只改颜色，不动字重 —— 等宽字体的粗体推进宽度
+   不保证和常规一致，改字重会让行号轻微跑位。 */
+.dbsql-ln[data-active="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dbsql-code {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--card);
+}
+/* 聚焦环画在整块代码区的内缘：textarea 自己的 outline 会被
+   .dbsql-code 的 overflow: hidden 裁掉。颜色即时出现，不做过渡。 */
+.dbsql-code:focus-within {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* ============================================================
+   ★ 高亮层 + 输入层：决定文字落点的属性必须成组出现
+   ============================================================
+   下面这条组内选择器里的每一条属性都同时作用于两层。它们任何一个不同，
+   两层的文字就会错开，而且行数越多错得越离谱。改动前请先读文件头的说明。
+   ============================================================ */
+.dbsql-hl,
+.dbsql-input {
+  font-family: var(--dbsql-font);
+  font-size: var(--dbsql-fs);
+  line-height: var(--dbsql-lh);
+  letter-spacing: normal;
+  word-spacing: normal;
+  font-variant-ligatures: none; /* 连字（-> => 等）在两层里的替换规则一旦不同就会错位 */
+  font-kerning: none;
+  font-synthesis: none;
+  tab-size: 2;
+  text-indent: 0;
+  text-transform: none;
+  text-align: left;
+  direction: ltr;
+  white-space: pre; /* 不折行：行号槽才可能与逻辑行 1:1 对齐 */
+  word-break: normal;
+  overflow-wrap: normal;
+  padding: var(--dbsql-pad-y) var(--dbsql-pad-x);
+  border: 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+/* 高亮层在下：只负责显示颜色，文字由 JS 按原样切片渲染（不增删任何字符） */
+.dbsql-hl {
+  position: absolute;
+  inset: 0;
+  overflow: auto; /* 允许程序化滚到和 textarea 相同的偏移 */
+  pointer-events: none;
+  z-index: 0;
+  margin: 0;
+  color: var(--ink);
+  /* 滚动条要藏掉：它占掉的宽度会让本层比输入层窄，
+     两端一起滚到同样的 scrollLeft 时，右边的文字就会差一个滚动条宽度。 */
+  scrollbar-width: none;
+}
+.dbsql-hl::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+.dbsql-hl code {
+  font: inherit;
+  background: none;
+  border-radius: 0;
+  color: inherit;
+  display: block; /* 块级：宽度按最长行算，横向滚动范围才和 textarea 对得上 */
+  min-width: max-content;
+  /* 这两条是给"横向滚动到最右"买的保险：textarea 的滚动条占了 11px 宽，
+     它的内容区比本层窄，于是它的 max scrollLeft 更大。本层只要**滚得比它更远**
+     就不会够不着（永远滚不到那多出来的 8px，因为滚动位置是从 textarea 复制的）。
+     content-box 是必须的 —— border-box 下 padding 会吃掉内容宽度，等于没加。 */
+  box-sizing: content-box;
+  padding: 0 8px 0 0;
+}
+
+/* 输入层在上：文字透明、光标可见。用户看到的是下层的着色文字。 */
+.dbsql-input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: auto;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  outline: none;
+  tab-size: 2;
+}
+/* 选区底色半透明：否则它会盖住下层的高亮文字，选中一段就"看不见字"了 */
+.dbsql-input::selection {
+  background: color-mix(in srgb, var(--selection) 62%, transparent);
+}
+.dbsql-input::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+/* ---------- 语法着色 ----------
+   两条硬规则：
+     1. 类名一律 dbsql-tok- 前缀。**不能复用组件自身的类名** ——
+        `dbsql-col` 是侧栏的字段按钮（display:flex / width:100% / padding），
+        拿它当"字段名"着色类，整段 SQL 会被拆成一行一个词。
+     2. token 只允许改颜色/字重/字体样式。加 padding / border / margin /
+        display 会改变字符推进与行盒，等于把与 textarea 的对齐做废。 */
+.dbsql-tok-kw {
+  color: var(--accent);
+}
+.dbsql-tok-fn {
+  color: var(--accent);
+}
+.dbsql-tok-tbl {
+  color: var(--seal);
+}
+/* 加粗只加在纯 ASCII 词元上（JS 侧按内容加这个类）。
+   中文的"粗体"是浏览器合成的，会把字宽撑大约 1px/字 ——
+   而 textarea 只会画常规体，加了粗的中文会让两层错位。 */
+.dbsql-tok-b {
+  font-weight: 600;
+}
+.dbsql-tok-col {
+  color: var(--ink-2);
+}
+.dbsql-tok-str {
+  color: var(--success);
+}
+.dbsql-tok-num {
+  color: var(--warning);
+}
+.dbsql-tok-com {
+  color: var(--ink-3);
+  font-style: italic;
+}
+.dbsql-tok-qid {
+  color: var(--seal);
+}
+.dbsql-tok-param {
+  color: var(--warning);
+  text-decoration: underline dotted;
+}
+/* 光标所在的那一条：淡底色 + 一条内嵌的左标记。
+   inline 元素上的 background / inset box-shadow 不参与布局，纯视觉。 */
+.dbsql-tok-stmt {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+/* ---------- 分隔条（拖高矮） ---------- */
+.dbsql-split {
+  flex: none;
+  height: 7px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+}
+.dbsql-split::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 1px;
+  background: var(--line);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.dbsql-split:hover::after,
+.dbsql-split[data-drag="true"]::after {
+  background: var(--accent);
+}
+
+/* ============================================================
+   结果 / 历史
+   ============================================================ */
+.dbsql-outwrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  border-top: var(--line-w) solid var(--line);
+}
+
+.dbsql-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+  flex: none;
+  min-height: 30px;
+}
+.dbsql-tab {
+  position: relative;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--fs-aux);
+  padding: 5px 8px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+.dbsql-tab:hover {
+  color: var(--ink);
+}
+.dbsql-tab[aria-selected="true"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* 选中下划线：用伪元素做 scaleX，不做宽度动画 */
+.dbsql-tab::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform var(--dur-normal) var(--ease-glide);
+}
+.dbsql-tab[aria-selected="true"]::after {
+  transform: scaleX(1);
+}
+
+.dbsql-out {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3) var(--sp-3) var(--sp-5);
+  background: var(--card);
+}
+
+.dbsql-empty {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-6) var(--sp-3);
+  color: var(--ink-3);
+  font-size: var(--fs-sub);
+  text-align: center;
+}
+.dbsql-empty p {
+  margin: 0;
+  max-width: 42ch;
+  line-height: 1.75;
+}
+
+/* 单条语句的结果块 */
+.dbsql-result {
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--sp-3);
+  overflow: hidden;
+  background: var(--card);
+}
+.dbsql-res-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: color-mix(in srgb, var(--line) 26%, transparent);
+  border-bottom: var(--line-w) solid var(--line);
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  min-width: 0;
+}
+/* 进场只做这一条小横条的淡入位移：**不动表格本身** ——
+   给几千行的表格加透明度动画会把整张表提成合成层，
+   光栅化与内存的代价都花在最不该花的地方。 */
+.dbsql-res-head,
+.dbsql-result-note {
+  animation: dbsql-in var(--dur-normal) var(--ease-glide) both;
+}
+@keyframes dbsql-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--mo-slide));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.dbsql-res-title {
+  font-family: var(--dbsql-font);
+  font-size: var(--fs-aux);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 42ch;
+}
+.dbsql-res-num {
+  color: var(--ink-3);
+}
+.dbsql-res-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ---------- 结果表格 ----------
+   形态说明：横向滚动由外层容器承担（表格用 max-content 宽度撑开），
+   单元格一律 nowrap + 省略号，完整值放 title。 */
+.dbsql-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--dbsql-font);
+  font-size: var(--fs-aux);
+  width: max-content;
+  min-width: 100%;
+}
+.dbsql-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  white-space: nowrap;
+  padding: 5px 10px;
+  background: var(--paper-2);
+  border-bottom: var(--line-w) solid var(--line-strong);
+  color: var(--ink-2);
+  font-weight: 600;
+}
+.dbsql-table td {
+  padding: 3px 10px;
+  border-bottom: var(--line-w) solid var(--line);
+  white-space: nowrap;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.dbsql-table tr:last-child td {
+  border-bottom: none;
+}
+.dbsql-table .is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dbsql-null {
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+/* ---------- 警告与错误 ---------- */
+.dbsql-result-note {
+  padding: 6px var(--sp-3);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+  color: var(--ink-2);
+  border-top: var(--line-w) solid var(--line);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.dbsql-result-note[data-kind="danger"] {
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--ink);
+}
+
+.dbsql-err {
+  border: var(--line-w) solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-3);
+  animation: dbsql-in var(--dur-normal) var(--ease-glide) both;
+}
+.dbsql-err-guess {
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  margin-bottom: var(--sp-1);
+  line-height: 1.75;
+}
+/* 原始报错原样保留：用户要拿这行字去搜，任何"翻译"都必须留在它外面 */
+.dbsql-err-raw {
+  margin: 0;
+  font-family: var(--dbsql-font);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dbsql-err-loc {
+  margin-top: var(--sp-1);
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+}
+
+/* ---------- 历史 ---------- */
+.dbsql-history {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dbsql-hitem {
+  display: block;
+  width: 100%;
+  border: var(--line-w) solid transparent;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  padding: 6px var(--sp-3);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-instant) var(--ease-standard);
+  animation: dbsql-in var(--dur-normal) var(--ease-glide) both;
+  animation-delay: calc(var(--i, 0) * var(--stagger));
+}
+.dbsql-hitem:hover {
+  background: color-mix(in srgb, var(--line) 45%, transparent);
+}
+.dbsql-hitem:active {
+  transform: scale(0.994);
+}
+.dbsql-hitem[data-failed="true"] .dbsql-hitem-sql {
+  color: var(--ink-3);
+}
+.dbsql-hitem-sql {
+  display: block;
+  font-family: var(--dbsql-font);
+  font-size: var(--fs-aux);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbsql-hitem-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.dbsql-hitem-time {
+  font-variant-numeric: tabular-nums;
+}
+.dbsql-hitem-slow {
+  color: var(--warning);
+}
+.dbsql-hitem-bad {
+  color: var(--danger);
+}
+
+/* ============================================================
+   危险操作确认框里的内容
+   ============================================================
+   这一段渲染在 DeskBaseUI 的弹窗里（不在 .dbsql 里），所以不能带父级前缀。
+   类名仍然是 dbsql-，避免和别的组件撞。
+   ============================================================ */
+.dbsql-danger-why {
+  margin: 0 0 var(--sp-2);
+  line-height: 1.75;
+}
+/* 命中的那个词必须被显式标出来：用户要一眼看到"是哪一句、哪个词"被判成危险 */
+.dbsql-danger-word {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: var(--danger);
+  font-family: var(--dbsql-font);
+  font-weight: 600;
+}
+.dbsql-danger-target {
+  font-family: var(--dbsql-font);
+  color: var(--seal);
+  font-weight: 600;
+}
+.dbsql-danger-sql {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--line) 40%, transparent);
+  font-family: var(--dbsql-font);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 168px;
+  overflow: auto;
+  color: var(--ink-2);
+}
+
+/* ============================================================
+   窄容器：表名侧栏先收起来
+   ============================================================
+   用容器查询而不是视口宽度：这个组件的实际宽度取决于宿主把它放在哪
+   （theme.css 的设置面板就是这么做的）。 */
+.dbsql {
+  container-type: inline-size;
+  container-name: dbsql;
+}
+@container dbsql (max-width: 520px) {
+  .dbsql-side {
+    width: 0;
+    border-right-width: 0;
+  }
+  .dbsql-side-inner {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .dbsql-hint {
+    display: none;
+  }
+}
