@@ -105,6 +105,7 @@
     sql: null, // DeskBaseSql 实例
     sqlDirty: false, // 建过/删过表后 SQL 侧栏过期，下次切到 SQL 页签重挂
     listed: false, // 表列表是否已经拉过（懒加载）
+    listing: null, // 表列表在途的 Promise（并发守卫，见 refreshTables）
     tab: "data",
   };
 
@@ -112,15 +113,23 @@
   // 库表列表
   // ============================================================
   async function refreshTables() {
-    try {
-      state.tables = await call("schema.listTables");
-      state.listed = true;
-      renderTableList();
-      // 表集合变了，SQL 侧栏里的表名单也过期了
-      if (state.sql) state.sqlDirty = true;
-    } catch (e) {
-      toast("读取表列表失败：" + errText(e), "error");
-    }
+    // 并发守卫：快速来回切视图会连着触发几次，"后来居上"的旧响应可能覆盖新的
+    // （列表顺序错位）。在途时直接复用同一个 Promise，不再多发一次 IPC。
+    if (state.listing) return state.listing;
+    state.listing = (async () => {
+      try {
+        state.tables = await call("schema.listTables");
+        state.listed = true;
+        renderTableList();
+        // 表集合变了，SQL 侧栏里的表名单也过期了
+        if (state.sql) state.sqlDirty = true;
+      } catch (e) {
+        toast("读取表列表失败：" + errText(e), "error");
+      } finally {
+        state.listing = null;
+      }
+    })();
+    return state.listing;
   }
 
   function renderTableList() {
@@ -245,9 +254,12 @@
       limit: q.limit,
       filters: filters,
     });
+    // ⚠️ 字段名是 Rust 侧的 snake_case（`Page { has_more, next_cursor }`），
+    // 这里**不能**写成 hasMore —— 写错了不会报错，只会让"加载更多"永远不触发：
+    // 超过一页的表就再也翻不动，而界面看起来一切正常（P1，见 BUG_HUNT-2026-09-18.md）。
     return {
       rows: toRowObject(page),
-      hasMore: page.hasMore,
+      hasMore: !!page.has_more,
       nextCursor: page.next_cursor == null ? null : page.next_cursor,
     };
   }
