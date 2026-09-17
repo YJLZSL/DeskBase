@@ -37,9 +37,11 @@ const ICON_SIZE: u32 = 256;
 
 /// 项目仓库地址。**只在这里定义一次**，界面里的链接与「打开发布页」都用它。
 ///
-/// 目前仓库还没有配置远端（`git remote -v` 为空），所以这里是一个占位值。
-/// 仓库公开时把这一行改成真实地址即可，界面上的「待确认」标记会自动消失。
-const PROJECT_REPO: &str = "https://github.com/deskbase-app/deskbase";
+/// 仓库目前是**私有**的（`YJLZSL/DeskBase`）。私有期间：
+///   · 关于页的「打开项目仓库」会跳到 GitHub 的 404 页（未登录时）
+///   · 「检查更新」的发布页同理
+/// 这是预期的 —— 地址本身是对的，只是还没公开。公开后无需改这一行。
+const PROJECT_REPO: &str = "https://github.com/YJLZSL/DeskBase";
 
 /// 允许用系统浏览器打开的地址。**白名单是硬编码的，前端改不了。**
 ///

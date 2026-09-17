@@ -1,0 +1,160 @@
+# DeskBase · 持续集成
+#
+# 这里的每一条都是**已经在本地跑通的**门禁，不是"计划要加的检查" ——
+# CI 的价值在于它替人记住这些事，所以先有本地的，再有这里的。
+#
+# 为什么不用 build.cjs：那个脚本是为了绕开**本机**四处非标准环境
+# （MSVC 路径写死在 D:\、Windows SDK 版本、libsqlite3-sys 的优化级别、
+#  schannel 的 CRL 吊销检查）。CI 上的 rustup + MSVC 是标准的，直接用 cargo
+# 更简单也更可靠；本机那套逻辑没有理由跟着上云。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # 允许手动触发，方便在不提交的情况下验证环境
+  workflow_dispatch:
+
+# 同一分支上的新推送取消旧的运行 —— 排队等一个已经被取代的构建没有意义
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 警告即错误。项目的标准是**零编译警告**，而"零警告"只有变成硬失败才守得住 ——
+  # 否则它会随着时间慢慢退化回一屏警告，然后所有人都不再看它们。
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ------------------------------------------------------------
+  # Rust：编译 + 全部测试
+  # ------------------------------------------------------------
+  test:
+    name: cargo test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # libsqlite3-sys 会编译 bundled 的 sqlite3.c（约 9 MB 的单体 C 文件）。
+      # 本机 MSVC 14.51 用优化编译它时编译器自己会崩（0xc0000005），
+      # 所以 profile 里把它的 opt-level 关掉了 —— 那一段在 Cargo.toml 里，
+      # 这里不需要重复，只是提一句免得有人以为是 CI 配置漏了。
+      - name: 跑测试
+        working-directory: app
+        run: cargo test --all-targets -- --nocapture
+
+  # ------------------------------------------------------------
+  # 动效合规：只动 transform / opacity、无硬编码时长
+  # ------------------------------------------------------------
+  motion:
+    name: 动效合规
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # 这个脚本靠的是正则解析 CSS 声明，跨平台，不需要浏览器
+      - name: check-motion
+        run: node scripts/check-motion.cjs
+
+  # ------------------------------------------------------------
+  # 主题对比度：11 个主题 × 15 组 WCAG
+  # ------------------------------------------------------------
+  contrast:
+    name: 主题对比度
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: check-contrast
+        run: node scripts/check-contrast.cjs
+
+  # ------------------------------------------------------------
+  # 界面脚本语法 + 资源引用完整性
+  # ------------------------------------------------------------
+  # 资源表那个检查在 assets.rs 的测试里（`首页引用的每个脚本与样式都能被服务`），
+  # 已经由上面的 test 任务覆盖。这里只补 JS 语法 —— 它在 Rust 测试视野之外，
+  # 而一个语法错误会让整个文件静默不执行。
+  ui:
+    name: 界面资源
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 所有界面脚本语法检查
+        shell: bash
+        run: |
+          set -e
+          for f in app/ui/*.js; do
+            echo "--- $f"
+            node --check "$f"
+          done
+
+  # ------------------------------------------------------------
+  # 许可证与红线
+  # ------------------------------------------------------------
+  # 项目红线之一是「不引入与 Apache-2.0 不兼容的代码/资源」。
+  # 这条只有在依赖变更时能被检查出来，而那时候人最容易忽略它。
+  licenses:
+    name: 依赖许可证
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+      - name: 安装 cargo-deny
+        run: cargo install cargo-deny --locked
+      # deny.toml 尚未提交（先在本地把规则定下来再加到 CI 的必跑项）。
+      # 现在这一步是**信息性**的：它只列出依赖的许可证，不阻塞构建。
+      # 等 deny.toml 落地后把 `cargo deny check licenses` 打开。
+      - name: 列出全部依赖许可证（信息性）
+        working-directory: app
+        run: cargo metadata --format-version 1 --no-deps > ${{ runner.temp }}/meta.json; cargo tree --prefix none | Sort-Object -Unique | Select-Object -First 200
+        continue-on-error: true
+
+  # ------------------------------------------------------------
+  # 全绿汇总 —— 把这一条设成分支保护要求的那个检查，
+  # 以后加新任务不用再去改分支保护设置。
+  # ------------------------------------------------------------
+  all-green:
+    name: 全部通过
+    if: always()
+    needs: [test, motion, contrast, ui]
+    runs-on: windows-latest
+    steps:
+      - name: 检查上游结果
+        shell: bash
+        run: |
+          echo "test=${{ needs.test.result }}"
+          echo "motion=${{ needs.motion.result }}"
+          echo "contrast=${{ needs.contrast.result }}"
+          echo "ui=${{ needs.ui.result }}"
+          for r in "${{ needs.test.result }}" "${{ needs.motion.result }}" "${{ needs.contrast.result }}" "${{ needs.ui.result }}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::有任务未通过：$r"
+              exit 1
+            fi
+          done
+          echo "全部门禁通过"
