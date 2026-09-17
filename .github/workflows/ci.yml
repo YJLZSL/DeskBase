@@ -113,26 +113,23 @@ jobs:
           done
 
   # ------------------------------------------------------------
-  # 许可证与红线
+  # 许可证与红线 —— 暂时没做成 CI 任务
   # ------------------------------------------------------------
   # 项目红线之一是「不引入与 Apache-2.0 不兼容的代码/资源」。
-  # 这条只有在依赖变更时能被检查出来，而那时候人最容易忽略它。
-  licenses:
-    name: 依赖许可证
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
-      - name: 安装 cargo-deny
-        run: cargo install cargo-deny --locked
-      # deny.toml 尚未提交（先在本地把规则定下来再加到 CI 的必跑项）。
-      # 现在这一步是**信息性**的：它只列出依赖的许可证，不阻塞构建。
-      # 等 deny.toml 落地后把 `cargo deny check licenses` 打开。
-      - name: 列出全部依赖许可证（信息性）
-        working-directory: app
-        run: cargo metadata --format-version 1 --no-deps > ${{ runner.temp }}/meta.json; cargo tree --prefix none | Sort-Object -Unique | Select-Object -First 200
-        continue-on-error: true
+  # 本来的做法是 `cargo install cargo-deny --locked` + `cargo deny check licenses`，
+  # 第一次真跑之后发现不合适：**那条命令要把 cargo-deny 整个从源码编译一遍**，
+  # 在 windows-latest 上冷缓存要跑好几分钟，而它当时被设成 continue-on-error，
+  # 也就是说**跑半天、不阻塞、只留一段日志**。在私有仓库上这是纯浪费配额。
+  #
+  # 要把它做成真的门禁，需要两样东西，都还没做：
+  #   1. `deny.toml` —— 允许的许可证清单与例外。规则没定下来之前，
+  #      这个检查没有可执行的判据（"许可兼容"是人读出来的判断，不是工具能猜的）
+  #   2. 一个只跑必需检查的调用方式（`cargo deny check licenses` 而不是
+  #      `cargo deny check`，后者会连带跑 advisories/bans/sources，每个都要联网）
+  #
+  # 在那之前，依赖许可证靠**依赖变更时人工核对**：
+  # 每条依赖的理由都写在 `app/Cargo.toml` 的注释里，加依赖时要一并写许可证。
+  # 现在的依赖全部是 Apache-2.0 兼容的，逐条核过（见 CONTEXT_SNAPSHOT 第十轮）。
 
   # ------------------------------------------------------------
   # 全绿汇总 —— 把这一条设成分支保护要求的那个检查，
