@@ -1979,23 +1979,40 @@ pub fn needs_confirm(sql: &str) -> Option<&'static str> {
     }
 }
 
-/// 语句里有没有出现在字符串/注释之外、**括号深度 0** 的 `WHERE`。
+/// 语句里有没有出现在字符串/注释之外、**括号深度 0** 的 `WHERE`，且这个 `WHERE`
+/// 后面跟的是**真正的过滤条件**（而不是 `WHERE 1=1` 这类恒真谓词）。
 ///
-/// 为什么必须看括号深度：`WHERE` 藏在子查询里时，对外层语句**没有**过滤条件 ——
+/// 两道防线（都是踩过的坑，不是风格偏好）：
+///
+/// 1. 只看**顶层** WHERE（括号深度 0）。`WHERE` 藏在子查询里时，对外层语句**没有**
+///    过滤条件 —— 上一版实现只要在语句里找到 WHERE 这个词就算"有条件"，恰好漏掉这一类
+///    （第十二轮交接清单里点名的那条确认漏网）。
+/// 2. 顶层 WHERE 之后若只是恒真谓词（`1`、`true`、`1=1`、`(1=1)`，以及它们用 AND
+///    连接的纯恒真组合），一律当作"没有真正的过滤条件"——`needs_confirm` 据此继续弹
+///    确认，堵住 `DELETE FROM t WHERE 1=1` / `WHERE true` 这类**绕过确认、实则改/删全表**
+///    的写法。判断不了的形态（子查询、派生表）按"需确认"处理，**宁多勿少**。
 ///
 /// ```sql
-/// UPDATE 客户 SET 电话 = (SELECT 1 WHERE 1=1);   -- 外层 UPDATE 仍然改全表
+/// UPDATE 客户 SET 电话 = (SELECT 1 WHERE 1=1);   -- 外层 UPDATE 仍改全表：子查询里的 WHERE 不算
+/// DELETE FROM t WHERE 1=1;                       -- 顶层 WHERE 但恒真：仍改全表，必须弹确认
+/// DELETE FROM t WHERE 1=1 AND a=2;               -- 含真实条件 a=2：这才算真正过滤，不弹确认
 /// ```
-///
-/// 这里唯一一个词面意义的 WHERE 在括号里，它约束的是子查询，不是这条 UPDATE。
-/// 上一版实现只要在语句里找到 WHERE 这个词就算"有条件"，恰好漏掉这一类
-/// （第十二轮交接清单里点名的那条确认漏网）。现在记录每个词的括号深度，
-/// 只有**顶层** WHERE 才算过滤条件。
 fn has_where(sql: &str) -> bool {
+    // 1) 找到顶层 WHERE，取出它后面的谓词
+    let Some(pred) = top_level_where_predicate(sql) else {
+        return false; // 根本没有顶层 WHERE
+    };
+    // 2) 谓词里是否含有"真正的条件"（只要有一个非恒真的合取项就算）
+    eval_predicate(pred) == PredKind::Real
+}
+
+/// 跳过字符串/注释、跟踪括号深度，返回首个**顶层**（深度 0）`WHERE` 之后的谓词子串。
+/// 找不到顶层 WHERE 时返回 `None`（`WHERE` 在子查询里、或在字符串/注释里都算没有）。
+fn top_level_where_predicate(sql: &str) -> Option<&str> {
     let mut rest = sql;
-    let mut tokens: Vec<(String, usize)> = Vec::new();
     let mut depth = 0usize;
     while !rest.is_empty() {
+        // 行注释
         if let Some(r) = rest.strip_prefix("--") {
             rest = match r.find('\n') {
                 Some(i) => &r[i + 1..],
@@ -2003,6 +2020,7 @@ fn has_where(sql: &str) -> bool {
             };
             continue;
         }
+        // 块注释
         if let Some(r) = rest.strip_prefix("/*") {
             rest = match r.find("*/") {
                 Some(i) => &r[i + 2..],
@@ -2011,11 +2029,9 @@ fn has_where(sql: &str) -> bool {
             continue;
         }
         let c = rest.chars().next().unwrap_or(' ');
+        // 引号 / 方括号 / 反引号字符串：整段跳过（字符串里出现 where 1=1 不能当真）
         if c == '\'' || c == '"' || c == '[' || c == '`' {
-            let close = match c {
-                '[' => ']',
-                other => other,
-            };
+            let close = if c == '[' { ']' } else { c };
             let mut it = rest.char_indices();
             it.next();
             let mut end = None;
@@ -2039,7 +2055,7 @@ fn has_where(sql: &str) -> bool {
             };
             continue;
         }
-        // 括号深度：子查询里的关键字与顶层关键字必须分得开（见本函数文档）
+        // 括号深度：子查询里的关键字与顶层关键字必须分得开
         if c == '(' {
             depth += 1;
             rest = &rest[1..];
@@ -2050,18 +2066,327 @@ fn has_where(sql: &str) -> bool {
             rest = &rest[1..];
             continue;
         }
+        // 关键字
         if c.is_ascii_alphabetic() || c == '_' {
             let word: String = rest
                 .chars()
                 .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
                 .collect();
-            rest = &rest[word.len()..];
-            tokens.push((word.to_ascii_uppercase(), depth));
+            let upper = word.to_ascii_uppercase();
+            let after = &rest[word.len()..];
+            if upper == "WHERE" && depth == 0 {
+                // 谓词从 WHERE 词后开始，到语句末尾（DELETE/UPDATE 的 WHERE 都是末子句）
+                return Some(after.trim_start());
+            }
+            rest = after;
             continue;
         }
         rest = &rest[c.len_utf8()..];
     }
-    tokens.iter().any(|(t, d)| t == "WHERE" && *d == 0)
+    None
+}
+
+/// 谓词的分类结果。
+/// - `Real`：含有明确的条件（列名 + 比较/操作符、裸列名、IN/LIKE/IS/BETWEEN …）。
+/// - `Taut`：纯恒真（只有恒真原子 AND 连接）。
+/// - `Unknown`：判断不了（子查询、派生表等），按"需确认"处理。
+#[derive(PartialEq)]
+enum PredKind {
+    Real,
+    Taut,
+    Unknown,
+}
+
+/// 评估一个顶层 WHERE 谓词：其中是否含有"真正的条件"。
+/// 合取（AND）里只要出现一个 Real 项，整条就当 Real；
+/// 全为 Taut 才算 Taut；出现 Unknown 且无 Real 时算 Unknown（宁多勿少）。
+fn eval_predicate(pred: &str) -> PredKind {
+    let conjuncts = split_on_logical(pred, "AND");
+    if conjuncts.is_empty() {
+        return PredKind::Unknown;
+    }
+    let mut any_real = false;
+    let mut any_unknown = false;
+    for conj in conjuncts {
+        match eval_disjunction(conj.trim()) {
+            PredKind::Real => any_real = true,
+            PredKind::Unknown => any_unknown = true,
+            PredKind::Taut => {}
+        }
+    }
+    if any_real {
+        PredKind::Real
+    } else if any_unknown {
+        PredKind::Unknown
+    } else {
+        PredKind::Taut
+    }
+}
+
+/// 析取（OR）：任一析取项为 Taut 则整体 Taut（恒真）；
+/// 否则有 Real 即 Real；否则 Unknown。
+fn eval_disjunction(disj: &str) -> PredKind {
+    let terms = split_on_logical(disj, "OR");
+    if terms.is_empty() {
+        return PredKind::Unknown;
+    }
+    let mut any_taut = false;
+    let mut any_real = false;
+    for t in terms {
+        match classify_atom(t.trim()) {
+            PredKind::Taut => any_taut = true,
+            PredKind::Real => any_real = true,
+            // Unknown 不需要单独记：下面的兜底分支就是它（没有 Taut 也没有 Real → Unknown）
+            PredKind::Unknown => {}
+        }
+    }
+    if any_taut {
+        PredKind::Taut
+    } else if any_real {
+        PredKind::Real
+    } else {
+        PredKind::Unknown
+    }
+}
+
+/// 把一个原子（不含顶层 AND/OR 的谓词片段）分类。
+fn classify_atom(atom: &str) -> PredKind {
+    // 反复剥掉最外层成对的圆括号，再判断
+    let inner = strip_outer_parens(atom);
+    let s = inner.trim();
+    if s.is_empty() {
+        return PredKind::Unknown;
+    }
+    // 直接子查询 / 派生表（`(SELECT …)`、`(WITH …)`）：不在外层做恒真判定，按"需确认"
+    {
+        let head = s.trim_start();
+        if head.starts_with("SELECT") || head.starts_with("WITH") {
+            return PredKind::Unknown;
+        }
+    }
+    // 恒真原子（忽略空白）：1 / true / 1=1 / true=true
+    let compact: String = s.split_whitespace().collect();
+    if compact == "1" || compact.eq_ignore_ascii_case("true") {
+        return PredKind::Taut;
+    }
+    if compact == "1=1" || compact.eq_ignore_ascii_case("true=true") {
+        return PredKind::Taut;
+    }
+    // 含顶层比较操作符或关系关键字 → 真实条件
+    if has_top_level_op_or_relkw(s) {
+        return PredKind::Real;
+    }
+    // 单个裸词（列名，按真值参与过滤）→ 真实条件
+    if !s.contains(char::is_whitespace) {
+        return PredKind::Real;
+    }
+    PredKind::Unknown
+}
+
+/// 剥掉最外层成对的圆括号（可嵌套），返回剩下的部分。
+fn strip_outer_parens(s: &str) -> &str {
+    let mut cur = s.trim();
+    loop {
+        if let Some(stripped) = cur.strip_prefix('(') {
+            if let Some(body) = stripped.strip_suffix(')') {
+                // 校验括号是否真的成对，避免 `(a(b)` 这类误剥
+                if parens_balanced(body) {
+                    cur = body.trim();
+                    continue;
+                }
+            }
+        }
+        return cur;
+    }
+}
+
+/// `s` 里左右圆括号是否成对（用于安全剥外层括号）。
+fn parens_balanced(s: &str) -> bool {
+    let mut d = 0i32;
+    for c in s.chars() {
+        if c == '(' {
+            d += 1;
+        } else if c == ')' {
+            d -= 1;
+            if d < 0 {
+                return false;
+            }
+        }
+    }
+    d == 0
+}
+
+/// `s` 里（跳过字符串/注释、按括号深度）是否出现顶层的比较操作符或关系关键字。
+fn has_top_level_op_or_relkw(s: &str) -> bool {
+    let relkw = ["IN", "LIKE", "IS", "BETWEEN"];
+    let mut rest = s;
+    let mut depth = 0usize;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("--") {
+            rest = match r.find('\n') {
+                Some(i) => &r[i + 1..],
+                None => "",
+            };
+            continue;
+        }
+        if let Some(r) = rest.strip_prefix("/*") {
+            rest = match r.find("*/") {
+                Some(i) => &r[i + 2..],
+                None => "",
+            };
+            continue;
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        if c == '\'' || c == '"' || c == '[' || c == '`' {
+            let close = if c == '[' { ']' } else { c };
+            let mut it = rest.char_indices();
+            it.next();
+            let mut end = None;
+            let mut skip = false;
+            for (i, ch) in it {
+                if skip {
+                    skip = false;
+                    continue;
+                }
+                if ch == close {
+                    end = Some(i + ch.len_utf8());
+                    break;
+                }
+                if ch == c && c != '[' {
+                    skip = true;
+                }
+            }
+            rest = match end {
+                Some(e) => &rest[e..],
+                None => "",
+            };
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+            rest = &rest[1..];
+            continue;
+        }
+        if c == ')' {
+            depth = depth.saturating_sub(1);
+            rest = &rest[1..];
+            continue;
+        }
+        if c == '=' || c == '<' || c == '>' || c == '!' {
+            if depth == 0 {
+                return true;
+            }
+            rest = &rest[1..];
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let word: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if depth == 0 && relkw.contains(&word.to_ascii_uppercase().as_str()) {
+                return true;
+            }
+            rest = &rest[word.len()..];
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    false
+}
+
+/// 按顶层（深度 0）的逻辑关键字切分谓词。`kw` 为 `"AND"` 时会跳过 `BETWEEN … AND …`
+/// 里的那个 AND（它属于 BETWEEN 结构，不是合取分隔符）。
+fn split_on_logical(sql: &str, kw: &str) -> Vec<String> {
+    let kw = kw.to_ascii_uppercase();
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut between_depth: Option<usize> = None; // 期望在哪个深度消耗一个 AND
+    let mut cur = String::new();
+    let mut rest = sql;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("--") {
+            rest = match r.find('\n') {
+                Some(i) => &r[i + 1..],
+                None => "",
+            };
+            continue;
+        }
+        if let Some(r) = rest.strip_prefix("/*") {
+            rest = match r.find("*/") {
+                Some(i) => &r[i + 2..],
+                None => "",
+            };
+            continue;
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        if c == '\'' || c == '"' || c == '[' || c == '`' {
+            let close = if c == '[' { ']' } else { c };
+            let mut it = rest.char_indices();
+            it.next();
+            let mut end = None;
+            let mut skip = false;
+            for (i, ch) in it {
+                if skip {
+                    skip = false;
+                    continue;
+                }
+                if ch == close {
+                    end = Some(i + ch.len_utf8());
+                    break;
+                }
+                if ch == c && c != '[' {
+                    skip = true;
+                }
+            }
+            if let Some(e) = end {
+                cur.push_str(&rest[..e]);
+                rest = &rest[e..];
+            } else {
+                cur.push_str(rest);
+                rest = "";
+            }
+            continue;
+        }
+        if c == '(' {
+            depth += 1;
+            cur.push(c);
+            rest = &rest[1..];
+            continue;
+        }
+        if c == ')' {
+            depth = depth.saturating_sub(1);
+            cur.push(c);
+            rest = &rest[1..];
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let word: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            let upper = word.to_ascii_uppercase();
+            if upper == kw && depth == 0 {
+                // 顶层分隔符：可能是 BETWEEN 的收尾 AND（不切分），否则切分
+                if between_depth == Some(depth) {
+                    between_depth = None;
+                } else {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            } else if upper == "BETWEEN" && kw == "AND" {
+                // 记住：接下来的那个顶层 AND 是 BETWEEN 的收尾，不切分
+                between_depth = Some(depth);
+            }
+            cur.push_str(&word);
+            rest = &rest[word.len()..];
+            continue;
+        }
+        cur.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    parts.push(cur);
+    // 丢完全空白的片段
+    parts.into_iter().filter(|p| !p.trim().is_empty()).collect()
 }
 
 /// 执行一条 SQL。
@@ -3315,6 +3640,69 @@ mod tests {
         assert!(needs_confirm("UPDATE t SET a = 1 /* ( */ WHERE id = 1").is_none());
     }
 
+    #[test]
+    fn 危险语句闸门不认恒真谓词() {
+        // P2 加固：顶层 WHERE 之后若只是恒真谓词，仍当作"没有真正的过滤条件"，
+        // 必须弹确认，堵住 `WHERE 1=1` 这类绕过确认、实则改/删全表的写法。
+        // 恒真的几种写法都要报确认：
+        assert!(
+            needs_confirm("DELETE FROM t WHERE 1=1").is_some(),
+            "WHERE 1=1 必须弹确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE 1 = 1").is_some(),
+            "WHERE 1 = 1 必须弹确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE 1").is_some(),
+            "WHERE 1 必须弹确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE true").is_some(),
+            "WHERE true 必须弹确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE (1=1)").is_some(),
+            "WHERE (1=1) 必须弹确认"
+        );
+        assert!(
+            needs_confirm("UPDATE t SET a=1 WHERE 1=1 AND true").is_some(),
+            "纯恒真 AND 组合必须弹确认"
+        );
+        // 带真实条件就不算恒真：不报确认
+        assert!(
+            needs_confirm("DELETE FROM t WHERE 1=1 AND a=2").is_none(),
+            "WHERE 1=1 AND a=2 含真实条件，不报确认"
+        );
+        assert!(
+            needs_confirm("UPDATE t SET a=1 WHERE id=5 AND 1=1").is_none(),
+            "真实条件在前、恒真在后，不报确认"
+        );
+        // 字符串里的恒真不算：字符串内容不会凭空造出过滤条件
+        assert!(
+            needs_confirm("DELETE FROM t WHERE x = '1=1'").is_none(),
+            "字符串里的 1=1 是字面量比较，算真实过滤"
+        );
+        // 子查询里的恒真不影响外层判定
+        assert!(
+            needs_confirm("DELETE FROM t WHERE (SELECT 1 WHERE 1=1)").is_some(),
+            "子查询里的恒真不替外层兜底，外层无真实过滤要弹确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE id IN (SELECT id FROM x WHERE 1=1)").is_none(),
+            "子查询恒真不影响外层真实过滤"
+        );
+        // BETWEEN … AND … 里的 AND 不是合取分隔符
+        assert!(
+            needs_confirm("DELETE FROM t WHERE a BETWEEN 1 AND 2").is_none(),
+            "BETWEEN 1 AND 2 是真实范围条件，不报确认"
+        );
+        assert!(
+            needs_confirm("DELETE FROM t WHERE 1=1 OR a=2").is_some(),
+            "1=1 OR a=2 整条恒真，要弹确认"
+        );
+    }
+
     // ---------- 筛选分页（page_rows_filtered） ----------
 
     #[test]
@@ -3368,6 +3756,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// 分页应答的字段名是**界面依赖的契约**：Rust 的 snake_case 与 JS 读取的名字必须逐字对上。
+    ///
+    /// 为什么值得专门钉一个测试：v0.2.0-beta.1 出过一个 P1 —— `db.js` 里写成
+    /// `page.hasMore`，而 serde 序列化出来的是 `has_more`，值恒为 `undefined`，
+    /// 于是超过一页的表永远翻不动。**测试全绿、界面自检全绿，只有真的去翻页才会发现。**
+    /// 这里把两头都钉住：改字段名而不改界面，这个测试就会红。
+    #[test]
+    fn 分页应答的字段名与界面读取的名字一致() {
+        // ① Rust 侧序列化出来的键（snake_case，本模块没有 rename_all）
+        let page = Page {
+            rows: vec![vec![Json::from(1)]],
+            columns: vec![ROWID_COLUMN.to_string()],
+            has_more: true,
+            next_cursor: Some("x".to_string()),
+        };
+        let obj = serde_json::to_value(&page)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        for k in ["rows", "columns", "has_more", "next_cursor"] {
+            assert!(obj.contains_key(k), "分页应答缺少字段 {k}：界面会读到 undefined");
+        }
+        assert!(
+            !obj.contains_key("hasMore"),
+            "分页应答不该出现驼峰字段 —— 界面要的是 has_more"
+        );
+
+        // ② 界面侧必须按这些名字读（源码级核对，防止再写错）
+        let js = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/db.js"),
+        )
+        .expect("读不到 app/ui/db.js —— 这个测试要核对界面读取的字段名");
+        for name in ["has_more", "next_cursor"] {
+            assert!(
+                js.contains(&format!("page.{name}")),
+                "app/ui/db.js 里没有 `page.{name}`：字段名对不上时不会报错，只会静默拿到 \
+                 undefined（这个坑已经踩过一次，见 BUG_HUNT-2026-09-18.md P1-1）"
+            );
+        }
     }
 
     #[test]
