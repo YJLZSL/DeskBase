@@ -789,6 +789,121 @@
   });
 
   // ============================================================
+  // 格式转换
+  // ============================================================
+  /** 渲染转换计划。**重点是"会丢什么"** —— 那是这一步存在的全部理由。 */
+  function renderConvertPlan(p) {
+    const box = $("#convert-plan");
+    box.textContent = "";
+    box.hidden = false;
+
+    const h = document.createElement("h4");
+    h.style.cssText = "margin:var(--sp-4) 0 var(--sp-2);font-size:var(--fs-sub)";
+    h.textContent = `${p.srcName || "原文件"} → ${p.dstName || "新文件"}`;
+    box.appendChild(h);
+
+    const sum = document.createElement("p");
+    sum.className = "muted";
+    sum.style.margin = "0 0 var(--sp-2)";
+    sum.textContent = p.summary || "";
+    box.appendChild(sum);
+
+    // 少表 / 少公式单独用醒目样式：这两种最容易被忽略，而代价最大
+    if (p.sheetsLost || p.formulasLost) {
+      const d = document.createElement("div");
+      d.className = "warn-box";
+      const t = document.createElement("b");
+      const bits = [];
+      if (p.sheetsLost) bits.push(`丢掉 ${p.sheetsLost} 张工作表`);
+      if (p.formulasLost) bits.push(`${p.formulasLost} 个公式会变成静态值（以后改数不会重算）`);
+      t.textContent = "⚠ " + bits.join("；");
+      d.appendChild(t);
+      box.appendChild(d);
+    }
+
+    // 其余丢失项逐条列出 —— "可能丢格式"这种话没有信息量，必须给数量
+    for (const l of (p.losses || []).slice(0, 8)) {
+      if (l.kind === "sheets" || l.kind === "formulas") continue;
+      const d = document.createElement("div");
+      d.className = "warn-box";
+      const t = document.createElement("b");
+      t.textContent = `⚠ ${l.detail}`;
+      d.appendChild(t);
+      box.appendChild(d);
+    }
+
+    if (p.warnings && p.warnings.length) {
+      const ul = document.createElement("ul");
+      ul.className = "muted";
+      ul.style.cssText = "margin:var(--sp-2) 0 0;padding-left:1.2em";
+      p.warnings.slice(0, 6).forEach((w) => {
+        const li = document.createElement("li");
+        li.textContent = w;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+
+    const row = document.createElement("div");
+    row.className = "link-row";
+    row.style.marginTop = "var(--sp-3)";
+    const go = document.createElement("button");
+    go.className = "btn";
+    go.textContent = "开始转换";
+    const cancel = document.createElement("button");
+    cancel.className = "btn btn-ghost";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", () => { box.hidden = true; });
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      go.textContent = "转换中…";
+      try {
+        const r = await call("convert.run", { planId: p.planId });
+        toast(r.summary || "转换完成");
+        box.hidden = true;
+      } catch (e) {
+        toast("转换失败：" + e.message, "error");
+        go.disabled = false;
+        go.textContent = "开始转换";
+      }
+    });
+    row.appendChild(go);
+    row.appendChild(cancel);
+    box.appendChild(row);
+  }
+
+  $("#btn-convert").addEventListener("click", async () => {
+    try {
+      const r = await call("convert.pickAndPlan");
+      if (r.cancelled) return;
+      renderConvertPlan(r);
+    } catch (e) {
+      toast("无法生成转换计划：" + e.message, "error");
+    }
+  });
+
+  // ============================================================
+  // 截图
+  // ============================================================
+  $("#btn-screenshot").addEventListener("click", async () => {
+    const btn = $("#btn-screenshot");
+    btn.disabled = true;
+    btn.textContent = "抓取中…";
+    try {
+      const r = await call("capture.screen");
+      toast(`已截图 ${r.width}×${r.height}`);
+      const reveal = $("#btn-reveal-shot");
+      reveal.hidden = false;
+      reveal.onclick = () => call("xlsx.revealExport", { path: r.path }).catch((e) => toast(e.message, "error"));
+    } catch (e) {
+      toast("截图失败：" + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "截取当前屏幕";
+    }
+  });
+
+  // ============================================================
   // 命令面板（P2）
   // ============================================================
   // 面板自己接管 Ctrl+K。这里只负责"有哪些命令" —— 面板不认识业务，
@@ -824,6 +939,20 @@
       {
         id: "data.reveal", title: "在资源管理器里打开导出目录", group: "数据", py: "dakaidaochumulu",
         run: () => $("#btn-reveal-export").click(),
+      },
+      {
+        id: "data.convert", title: "格式转换（表格 / 图片 / 文本）", group: "数据", py: "geshizhuanhuan",
+        run: () => {
+          showView("settings");
+          $("#btn-convert").click();
+        },
+      },
+      {
+        id: "data.screenshot", title: "截取当前屏幕", group: "数据", py: "jiequshiping",
+        run: () => {
+          showView("settings");
+          $("#btn-screenshot").click();
+        },
       },
     ];
 

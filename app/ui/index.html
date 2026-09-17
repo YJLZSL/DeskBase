@@ -264,6 +264,38 @@
           </div>
 
           <div class="card">
+            <h3>格式转换</h3>
+            <div class="field">
+              <span>表格 / 图片 / 文本互转</span>
+              <div class="link-row">
+                <button class="btn" id="btn-convert">选择文件…</button>
+              </div>
+              <div class="hint">
+                支持 .xlsx ↔ .csv / .tsv、.png ↔ .jpg / .bmp / .webp，
+                以及 GBK / UTF-8 / UTF-16 之间的文本重编码。
+                <b>只读原文件，结果永远写成新文件</b>，已有文件一律不覆盖。
+              </div>
+            </div>
+            <div id="convert-plan" hidden></div>
+          </div>
+
+          <div class="card">
+            <h3>截图</h3>
+            <div class="field">
+              <span>屏幕截图</span>
+              <div class="link-row">
+                <button class="btn" id="btn-screenshot">截取当前屏幕</button>
+                <button class="btn btn-ghost" id="btn-reveal-shot" hidden>打开所在文件夹</button>
+              </div>
+              <div class="hint" id="shot-hint">
+                按物理像素抓取主显示器，存成 PNG 放到数据目录的 exports/ 下。
+                高 DPI 屏（125% / 150%）下会抓到完整分辨率，不是被拉伸过的模糊图。
+                <b>截图内容只存在本机</b>，不上传、不记录。
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
             <h3>关于</h3>
             <div class="about-head">
               <img src="brand/icon-128.png" alt="DeskBase 图标" width="56" height="56" />

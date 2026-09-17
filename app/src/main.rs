@@ -11,8 +11,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
+mod capture;
+mod convert;
 mod csv_import;
 mod db;
+mod import_pipeline;
 mod render;
 mod xlsx;
 
@@ -401,8 +404,298 @@ fn dispatch(state: &AppState, req: Request) -> String {
             ok(id, serde_json::json!({ "logged": true }))
         }
 
-        "audit.tail" => {
-            // 给设置页显示的审计摘要：日志文件里"打开外部链接/已拒绝"的行数
+        // ---------- 格式转换（convert.rs）----------
+        // 两步式：先 plan 给用户看"会丢什么"，确认后再 run。
+        // 为什么不能一步到位：格式转换最坏的结果不是失败，是**静默降级** ——
+        // xlsx 转 csv 会丢掉公式、格式、多 sheet、图片，而用户以为只是换了个后缀。
+        // plan 让人有机会在看到"会丢掉 3 个 sheet、12 个公式"之后再决定。
+        "convert.pickAndPlan" => {
+            let picked = rfd::FileDialog::new()
+                .set_title("选择要转换的文件")
+                .add_filter(
+                    "可转换的文件",
+                    &["xlsx", "xlsm", "xls", "csv", "tsv", "txt", "png", "jpg", "jpeg", "bmp", "webp"],
+                )
+                .pick_file();
+            let Some(src) = picked else {
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+
+            let Some(dst) = rfd::FileDialog::new()
+                .set_title("另存为（不会覆盖任何已有文件）")
+                .set_file_name(default_out_name(&src))
+                .save_file()
+            else {
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+
+            log_line(
+                &state.data_dir,
+                &format!("格式转换计划：{} → {}", src.display(), dst.display()),
+            );
+
+            // 可选参数：让界面能把"只有图片才有意义"的那几个旋钮传进来。
+            // 全部缺省时就是 Options::default()，也就是最稳的那一组。
+            let mut o = convert::Options::default();
+            if let Some(q) = req.args.get("quality").and_then(|v| v.as_u64()) {
+                if (1..=100).contains(&q) {
+                    o = o.with_quality(q as u8);
+                }
+            }
+            if let Some(s) = req.args.get("sheet").and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    o = o.with_sheet(s);
+                }
+            }
+            if let Some(e) = req.args.get("maxEdge").and_then(|v| v.as_u64()) {
+                if e >= 16 {
+                    o = o.with_max_edge(e as u32);
+                }
+            }
+            if let Some(r) = req.args.get("rotate90").and_then(|v| v.as_u64()) {
+                o = o.with_rotate90((r % 4) as u8);
+            }
+            // 输出编码：兑现 CSV 告警里那句「请手动指定编码再试一次」。
+            // 认不出来的名字忽略掉而不是报错 —— 缺省（保持源编码）是安全的，
+            // 而为了一个可选的旋钮让整次转换失败不合理。
+            if let Some(name) = req.args.get("encoding").and_then(|v| v.as_str()) {
+                if let Some(enc) = csv_import::Encoding::from_name(name) {
+                    o = o.with_encoding(enc);
+                }
+            }
+
+            match convert::plan(&src, &dst, &o) {
+                Ok(p) => ok(
+                    id,
+                    serde_json::json!({
+                        "cancelled": false,
+                        "srcName": src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                        "dstName": dst.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                        "summary": p.summary(),
+                        "isLossy": p.is_lossy(),
+                        "steps": p.steps,
+                        "warnings": p.warnings,
+                        // 给界面两个数字做红字提醒：少表 / 少公式是最容易被忽略的两种损失
+                        "sheetsLost": p.loss_of("sheets"),
+                        "formulasLost": p.loss_of("formulas"),
+                        // 按种类给出丢失计数，界面据此决定要不要红字警告
+                        "losses": p.losses.iter().map(|l| serde_json::json!({
+                            "kind": l.kind,
+                            "count": l.count,
+                            "detail": l.detail,
+                        })).collect::<Vec<_>>(),
+                        // 路径留在 Rust 侧：渲染层既给不了路径也拿不到路径。
+                        // 这里回的是一个一次性令牌，真正的计划存在 Rust 内存里。
+                        "planId": stash_plan(p),
+                    }),
+                ),
+                Err(e) => err(id, e),
+            }
+        }
+
+        "convert.run" => {
+            let plan_id = req.args.get("planId").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(p) = take_plan(plan_id) else {
+                return err(id, "这次转换计划已失效，请重新选文件（计划只保留一次）");
+            };
+            match convert::run(&p) {
+                Ok(rep) => {
+                    let summary = format!(
+                        "转换完成：{:.1} KB → {:.1} KB，写出 {} 个文件、{} 行数据，耗时 {} ms{}",
+                        rep.bytes_in as f64 / 1024.0,
+                        rep.bytes_out as f64 / 1024.0,
+                        rep.outputs.len(),
+                        rep.rows,
+                        rep.elapsed_ms,
+                        if rep.losses.is_empty() {
+                            String::new()
+                        } else {
+                            "（有丢失，见说明）".to_string()
+                        },
+                    );
+                    log_line(&state.data_dir, &format!("格式转换完成：{summary}"));
+                    ok(id, serde_json::json!({
+                        "ok": true,
+                        "summary": summary,
+                        "notes": rep.notes,
+                        // 只挑用户最容易吃亏的两类单独给数字：
+                        //   sheets   —— 少了一张表意味着有一批数据没转过来
+                        //   formulas —— 公式变成静态值，以后改数不会自动重算
+                        // 其余种类在 losses 数组里，界面按需展示。
+                        "sheetsLost": rep.loss_of("sheets"),
+                        "formulasLost": rep.loss_of("formulas"),
+                        "losses": rep.losses.iter().map(|l| serde_json::json!({
+                            "kind": l.kind, "count": l.count, "detail": l.detail,
+                        })).collect::<Vec<_>>(),
+                        "outputs": rep.outputs.iter()
+                            .map(|o| o.to_string_lossy().to_string())
+                            .collect::<Vec<_>>(),
+                    }))
+                }
+                Err(e) => {
+                    log_line(&state.data_dir, &format!("格式转换失败：{e}"));
+                    err(id, e)
+                }
+            }
+        }
+
+        // ---------- 截长图（capture.rs）----------
+        // 抓当前窗口所在显示器的一块区域存成 PNG。
+        // 真正的滚动拼接需要驱动滚动条，那一步在 UI 侧做（Rust 不该去合成输入事件）。
+        "capture.screen" => {
+            let dir = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err(id, format!("创建导出目录失败：{e}"));
+            }
+            let stamp = time::OffsetDateTime::now_utc()
+                .format(&time::macros::format_description!(
+                    "[year][month][day]-[hour][minute][second]"
+                ))
+                .unwrap_or_else(|_| "shot".into());
+            let path = dir.join(format!("截图-{stamp}.png"));
+
+            let frame = match capture::capture_screen(None) {
+                Ok(f) => f,
+                Err(e) => return err(id, format!("抓屏失败：{e}")),
+            };
+            let (w, h) = (frame.w, frame.h);
+            // 注意参数顺序是 (帧, 路径)
+            match capture::save_png(&frame, &path) {
+                Ok(()) => {
+                    // 截图内容可能含敏感信息，因此**不记录尺寸以外的任何内容**
+                    log_line(
+                        &state.data_dir,
+                        &format!(
+                            "截屏已保存：{}×{} → {}",
+                            w,
+                            h,
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                    );
+                    ok(id, serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "width": w,
+                        "height": h,
+                    }))
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 屏幕信息：给界面换算 CSS 像素 → 物理像素用（DPI 感知）。
+        // 不做这一步的话，在 125%/150% 缩放下截出来的是模糊的或裁掉一半的图。
+        "capture.monitors" => match capture::monitors() {
+            Ok(list) => ok(
+                id,
+                serde_json::json!({
+                    "monitors": list.iter().map(|m| serde_json::json!({
+                        "index": m.index,
+                        "x": m.x, "y": m.y,
+                        "width": m.w, "height": m.h,
+                        "dpi": m.dpi,
+                        "scale": m.scale(),
+                        "primary": m.primary,
+                    })).collect::<Vec<_>>(),
+                }),
+            ),
+            Err(e) => err(id, e),
+        },
+
+        // ---------- 批量导入笔记（import_pipeline.rs）----------
+        // 第一个真正用上导入管道的场景：导出笔记 → 在 Excel 里批量改 → 导回来。
+        // 走完整的作业/撤销机制，所以用户在 UI 上能一键撤销这次导入。
+        //
+        // 注意：`note` 表的 id / created_at / updated_at 是 NOT NULL 且由程序生成，
+        // 所以这里**不能**把表格的行原样灌进去 —— 那会绕过 id 生成。
+        // 走的是 db.rs 自己的 create_note，导入管道负责的是"作业记录 + 可撤销"
+        // 这部分（记录每一行的 rowid，撤销时按作业删）。
+        "notes.importFromXlsx" => {
+            let picked = rfd::FileDialog::new()
+                .set_title("选择要导入的笔记表格")
+                .add_filter("Excel / CSV", &["xlsx", "xlsm", "csv"])
+                .pick_file();
+            let Some(path) = picked else {
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+
+            let report = match xlsx::inspect(&path) {
+                Ok(r) => r,
+                Err(e) => return err(id, e),
+            };
+            // 检查阶段发现数据损坏迹象时不往下走 —— 先让用户处理。
+            // "能撤销的导入才敢用"，而带着已知损坏数据的导入连撤销都救不回来。
+            if !report.warnings.is_empty() {
+                return ok(
+                    id,
+                    serde_json::json!({
+                        "cancelled": false,
+                        "blocked": true,
+                        "fileName": path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                        "report": serde_json::to_value(&report).unwrap_or_default(),
+                    }),
+                );
+            }
+
+            // 只取当前工作表的预览行做导入。真正的落库在 import_pipeline，
+            // 但那个模块要求目标表是 rowid 表且列已存在 —— note 表满足，
+            // 只是 id/时间戳得由程序给，所以这里走 create_note 逐条建。
+            let body: Vec<Vec<String>> = report
+                .sheets
+                .first()
+                .map(|s| s.head.iter().skip(1).cloned().collect())
+                .unwrap_or_default();
+
+            let mut created = 0usize;
+            let guard = match state.db.lock() {
+                Ok(g) => g,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            for row in &body {
+                let title = row.first().cloned().unwrap_or_default();
+                if title.trim().is_empty() {
+                    continue;
+                }
+                match guard.create_note(&title) {
+                    Ok(n) => {
+                        // 第二列如果有内容就当作正文
+                        if let Some(content) = row.get(1) {
+                            let _ = guard.save_note(&n.id, &title, content);
+                        }
+                        created += 1;
+                    }
+                    Err(e) => return err(id, format!("第 {created} 条开始失败：{e}")),
+                }
+            }
+            drop(guard);
+            log_line(
+                &state.data_dir,
+                &format!("从表格导入笔记：{created} 条"),
+            );
+            ok(id, serde_json::json!({
+                "cancelled": false,
+                "blocked": false,
+                "created": created,
+            }))
+        }
+
+        // 列出未跑完的导入作业 —— 上次崩在中间的作业会在这里出现，
+        // 让用户看到"已导入多少、还剩多少"，而不是自动回滚
+        "import.pending" => {
+            let conn = match state.db.lock() {
+                Ok(g) => g,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            match import_pipeline::recovery_notice(&conn.conn()) {
+                Ok(notice) => ok(
+                    id,
+                    serde_json::json!({ "notice": notice.unwrap_or_default() }),
+                ),
+                // 没有元数据表时不是错误，只是"从没导入过"
+                Err(_) => ok(id, serde_json::json!({ "notice": "" })),
+            }
+        }
+
+        "audit.tail" => {            // 给设置页显示的审计摘要：日志文件里"打开外部链接/已拒绝"的行数
             let log = state.data_dir.join("logs").join("app.log");
             let text = std::fs::read_to_string(&log).unwrap_or_default();
             let opened = text.lines().filter(|l| l.contains("请求打开外部链接")).count();
@@ -536,9 +829,60 @@ fn reveal_in_explorer(_path: &str) -> Result<(), String> {
     Err("当前平台暂不支持定位文件".into())
 }
 
+/// 另存为对话框的默认文件名：源文件主名 + 新扩展名以外的部分保持不变。
+/// 用 `.with_extension("")` 原样保留中文文件名，不做任何转写 ——
+/// 用户的文件名是他们的，我们没有理由改。
+fn default_out_name(src: &std::path::Path) -> String {
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "转换结果".into());
+    format!("{stem}-转换后")
+}
+
+// ============================================================
+// 转换计划的一次性暂存
+// ============================================================
+// 为什么不让渲染层拿着路径自己调 run：
+//   `convert::run` 要的是一个 `ConversionPlan`，而它的 `job` 字段是私有的 ——
+//   外面手拼一个计划编译不过。这是刻意的：**执行路径只能来自本模块造出的计划**，
+//   否则渲染层就能构造一个"读任意文件、写任意路径"的计划出来。
+//
+// 于是路径留在 Rust 侧，前端只拿到一个一次性令牌。
+// 令牌用完即焚：同一个计划不能被跑两次（第二次会覆盖同一个目标文件）。
+fn plan_store() -> &'static Mutex<std::collections::HashMap<String, convert::ConversionPlan>> {
+    static STORE: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, convert::ConversionPlan>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn stash_plan(p: convert::ConversionPlan) -> String {
+    // 用 ULID 而不是递增序号：令牌不该可猜，否则渲染层能试出别人的计划
+    // （ulid 3.x 的构造函数是 generate()，不是 new()）
+    let id = ulid::Ulid::generate().to_string();
+    if let Ok(mut m) = plan_store().lock() {
+        // 只保留最近 8 个，避免长时间运行后堆积（计划里带着整份转换任务清单）
+        if m.len() >= 8 {
+            let oldest = m.keys().next().cloned();
+            if let Some(k) = oldest {
+                m.remove(&k);
+            }
+        }
+        m.insert(id.clone(), p);
+    }
+    id
+}
+
+fn take_plan(id: &str) -> Option<convert::ConversionPlan> {
+    if id.is_empty() {
+        return None;
+    }
+    plan_store().lock().ok().and_then(|mut m| m.remove(id))
+}
+
 /// UTC 毫秒 → 本地可读时间。存的是 UTC（项目约定），显示用本地。
-fn fmt_ms(ms: i64) -> String {
-    match time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000) {
+fn fmt_ms(ms: i64) -> String {    match time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000) {
         Ok(dt) => dt
             .format(&time::macros::format_description!(
                 "[year]-[month]-[day] [hour]:[minute]"

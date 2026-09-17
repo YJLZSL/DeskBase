@@ -213,6 +213,12 @@
   align-items: center;
   gap: var(--sp-3);
   width: 100%;
+  /* ⚠️ 这一行是必须的，不是可选的：`.dp-hi` 是 position:absolute，
+     而**绝对定位元素会盖在同层级的静态元素之上** —— 少了这个 relative，
+     高亮矩形正好压住选中那一行的文字，于是"结果列表有行、但行是空白的"。
+     组标题之所以看着正常，是因为高亮只有一行高，够不到它。（踩过）
+     relative 让每行自己也成为定位元素，按 DOM 顺序（.dp-hi 在前）排在高亮之上。 */
+  position: relative;
   /* 固定行高：滑动高亮才能只用位移对齐（同 .nav-item 的理由）。
      行高本身不是动画属性，改它不违反约束。 */
   height: var(--row-h, 34px);

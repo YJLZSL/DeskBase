@@ -137,6 +137,16 @@ impl Db {
 
     // ---------- 笔记 ----------
 
+    /// 只读借用底层连接。
+    ///
+    /// 为什么需要它：`import_pipeline` 的恢复查询（`pending_jobs` /
+    /// `recovery_notice`）只读元数据表，不该为了它们在本模块里再包一层。
+    /// **刻意只给 `&Connection`** —— 想要 `&mut` 就得让 `Db` 自己开口子，
+    /// 而那意味着任何人都能绕过 `note` 表的 id / 时间戳规则。
+    pub fn conn(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     pub fn list_notes(&self) -> Result<Vec<NoteSummary>> {
         let mut stmt = self
             .conn

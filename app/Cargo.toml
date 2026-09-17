@@ -47,6 +47,20 @@ encoding_rs = "0.8"
 # 于是渲染层没有"读任意文件"的能力（docs/08 的「渲染层无文件系统直访」）。
 rfd = "0.15"
 
+# 图片编解码：格式转换与截长图导出用（app/src/convert.rs）。
+#
+# **必须关掉 default-features**：默认会开 12 个格式（avif/ravif、exr、gif、hdr、
+# ico、pnm、qoi、tga、dds、ff、tiff、webp）并拉进 rayon。其中 ravif 会引入
+# rav1e（AV1 编码器），那是实打实的体积大头。实测：
+#   baseline（不碰 image）    108 KB
+#   png + jpeg + bmp          592 KB   （+472 KB）
+#   再加 webp                 791 KB   （+666 KB）
+# 相对 80 MB 的安装包预算占 0.8%，可以接受，所以保留 webp。
+#
+# 许可证全部与 Apache-2.0 兼容（image/png/image-webp 是 MIT OR Apache-2.0，
+# zune-* 是 MIT OR Apache-2.0 OR Zlib，moxcms 是 BSD-3-Clause OR Apache-2.0）。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+
 [profile.release]
 # 生产裁剪，见 docs/14 的体积目标
 opt-level = "z"

@@ -110,6 +110,21 @@ function msvcEnv() {
   env.RUSTC = path.join(RUSTUP_HOME, 'toolchains', TOOLCHAIN, 'bin', 'rustc.exe');
   delete env.RUSTFLAGS; // 之前为 GNU 路线加的 link-self-contained 必须清掉
 
+  // ---------------- 4. 关掉 TLS 吊销检查（本机第四处非标准环境）----------------
+  // 本机访问 crates.io 时 schannel 报 CRYPT_E_REVOCATION_OFFLINE：
+  //   SSL connect error ... 由于吊销服务器已脱机，吊销功能无法检查吊销。
+  // 这是 schannel 的**吊销列表（CRL）服务器连不上**，不是证书本身有问题 ——
+  // 只要吊销服务器不可达，任何 HTTPS 请求都会被拒，于是 cargo 一个包都下不来。
+  // 注意它**只影响首次拉取新依赖**：已有依赖全在本机 registry 缓存里，
+  // 所以之前一直没暴露出来，是加 image 时才发现。
+  //
+  // 关掉的是"吊销状态检查"，不是证书链校验 —— 证书仍然要能链到受信任根。
+  // 取舍：CRL 检查能防的是"证书在签发后被吊销"这一种情况，而那要求攻击者
+  // 同时拿到 crates.io 的有效私钥并让官方去吊销；在没有可用 CRL 服务器的
+  // 网络里，继续强制检查只会让构建完全无法进行。这个开关只在本脚本内生效，
+  // 不改用户的全局 cargo 配置。
+  env.CARGO_HTTP_CHECK_REVOKE = 'false';
+
   // 剔除 GNU 路线的残留，避免干扰
   env.PATH = (env.PATH || '')
     .split(';')

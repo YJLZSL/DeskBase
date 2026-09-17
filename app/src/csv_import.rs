@@ -87,6 +87,32 @@ impl Encoding {
             Encoding::Unknown => "未知",
         }
     }
+
+    /// 从界面传来的名字解析回来。
+    ///
+    /// 为什么需要：告警文案里写着「请在导入界面手动指定编码（UTF-8 或 GB18030）
+    /// 再试一次」—— 那句话本来是一张空头支票，因为没有任何入口能让用户指定。
+    /// 这个函数就是那张支票的兑现端。
+    ///
+    /// 大小写与连字符都不敏感（用户可能写 `utf-8`、`UTF8`、`GBK`）；
+    /// **`GBK` 归到 `Gb18030`** —— 后者是前者的超集，简体场景下用它解码
+    /// 能多看几个字（生僻字、emoji），而不会有任何损失。
+    pub fn from_name(s: &str) -> Option<Encoding> {
+        let t: String = s
+            .trim()
+            .chars()
+            .filter(|c| *c != '-' && *c != '_' && *c != ' ')
+            .flat_map(|c| c.to_uppercase())
+            .collect();
+        match t.as_str() {
+            "UTF8" => Some(Encoding::Utf8),
+            "UTF8BOM" => Some(Encoding::Utf8Bom),
+            "GB18030" | "GBK" | "GB2312" | "CP936" => Some(Encoding::Gb18030),
+            "UTF16LE" => Some(Encoding::Utf16Le),
+            "UTF16BE" => Some(Encoding::Utf16Be),
+            _ => None,
+        }
+    }
 }
 
 /// 探测编码。顺序很重要，每一步都在排除一种可能性：
@@ -1007,11 +1033,36 @@ mod tests {
 
     #[test]
     fn 编码探测_合法utf8的中文() {
-        // 中文 UTF-8 字节 → 严格校验必然通过
-        let s = "姓名,金额\n张三,100\n";
+        // 严格 UTF-8 校验能确认合法 UTF-8 —— 哪怕全是中文，也不该被误判成 GBK
+        let s = "订单号,客户,金额\nA001,张三,1200.50\n";
         assert_eq!(detect_encoding(s.as_bytes()), Encoding::Utf8);
+        // 中文 UTF-8 字节 → 严格校验必然通过
+        let s2 = "姓名,金额\n张三,100\n";
+        assert_eq!(detect_encoding(s2.as_bytes()), Encoding::Utf8);
         // 纯 ASCII：两种解释结果相同，判成 UTF-8 即可
         assert_eq!(detect_encoding(b"id,name\n1,x\n"), Encoding::Utf8);
+    }
+
+    #[test]
+    fn 编码名字的解析_大小写与别名都要认() {
+        // 用户在界面上可能写这些写法中的任何一种
+        for s in ["UTF-8", "utf8", "Utf_8", "utf-8"] {
+            assert_eq!(Encoding::from_name(s), Some(Encoding::Utf8), "{s}");
+        }
+        // GBK / GB2312 / CP936 都归到 GB18030：后者是超集，解码结果只会更好
+        for s in ["GBK", "gbk", "GB18030", "gb2312", "CP936", "cp-936"] {
+            assert_eq!(
+                Encoding::from_name(s),
+                Some(Encoding::Gb18030),
+                "{s} 应当归到 GB18030"
+            );
+        }
+        assert_eq!(Encoding::from_name("UTF-16LE"), Some(Encoding::Utf16Le));
+        assert_eq!(Encoding::from_name("utf16be"), Some(Encoding::Utf16Be));
+        // 认不出来的返回 None，调用方据此保持缺省而不是报错
+        assert_eq!(Encoding::from_name("big5"), None);
+        assert_eq!(Encoding::from_name(""), None);
+        assert_eq!(Encoding::from_name("   "), None);
     }
 
     #[test]
