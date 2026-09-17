@@ -111,6 +111,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0008](0008-portable-first-user-level-install.md) | 便携版优先，安装版采用用户级安装 | 已接受 | 2026-09-17 |
 | [0009](0009-dual-ui-mode.md) | 采用简洁 / 高级双界面模式 | 已接受 | 2026-09-17 |
 | [0010](0010-desktop-shell-selection-pending.md) | 桌面外壳技术选型 | 提议 | 2026-09-17 |
+| [0011](0011-visual-system-and-theme-strategy.md) | 采用「宣纸为默认 + 多主题可切换 + token 驱动」的视觉系统策略 | 已接受 | 2026-09-17 |
 
 ---
 

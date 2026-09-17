@@ -19,6 +19,7 @@
 2. [08 · 隐私与安全](08-privacy-security.md) — 我的数据会不会外流
 3. [09 · 本地 AI](09-local-ai.md) — AI 会不会偷看我的东西
 4. [12 · 安装与卸载](12-installer-and-uninstaller.md) — 装了能不能干净卸掉
+5. [18 · 视觉、质感、字体与动效](18-visual-and-motion-design.md) — 界面长什么样、字体能不能换
 
 ### 💻 我是开发者，想参与贡献
 
@@ -29,6 +30,7 @@
 5. [adr/](adr/) — 已定的架构决策
 6. [14 · 性能指标](14-performance-budget.md) — 什么算达标
 7. [18 · 视觉、质感、字体与动效设计系统](18-visual-and-motion-design.md) — 主题/质感/字体/动效的实现规范与验收
+8. [19 · 测试策略](19-test-strategy.md) — 冒烟门禁、压力测试、缺陷分级与排查规范
 
 ### 📢 我是社区/潜在用户，想评估项目成熟度
 
@@ -60,6 +62,8 @@
 | 15 | [开源治理与插件生态](15-open-source-governance.md) | 许可证、社区、插件权限模型 |
 | 16 | [路线图、风险与验收](16-roadmap-risks-acceptance.md) | 分阶段推进与达标判据 |
 | 17 | [技术选型建议](17-tech-selection.md) | 只给候选与取舍，不绑定 |
+| 18 | [视觉、质感、字体与动效设计系统](18-visual-and-motion-design.md) | 主题体系、宣纸质感、字体导入、动效与微交互 |
+| 19 | [测试策略](19-test-strategy.md) | 冒烟、压力、破坏性测试与缺陷排查 |
 | 99 | [术语表](99-glossary.md) | 全项目名词统一解释 |
 | — | [ADR 目录](adr/) | 架构决策记录 |
 
