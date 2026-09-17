@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="xuan">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DeskBase 桌库</title>
+<style>
+/*{{THEME_CSS}}*/
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ================= 侧边栏 ================= -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">库</div>
+      <div class="brand-text">桌库</div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item" data-target="workbench"><span class="dot"></span>工作台</button>
+      <button class="nav-item" data-target="notes" aria-current="true"><span class="dot"></span>笔记</button>
+      <button class="nav-item" data-target="database"><span class="dot"></span>数据库</button>
+      <button class="nav-item" data-target="settings"><span class="dot"></span>设置</button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div id="save-state" class="save-state"></div>
+      <dl>
+        <dt>版本</dt><dd id="about-version">—</dd>
+      </dl>
+    </div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main class="main">
+    <header class="topbar">
+      <h1 id="page-title">笔记</h1>
+      <div class="spacer"></div>
+      <button class="btn btn-ghost" id="btn-delete-note">删除</button>
+      <button class="btn btn-primary" id="btn-new-note">新建</button>
+    </header>
+
+    <div class="content">
+
+      <!-- ---------- 工作台 ---------- -->
+      <section class="view" data-view="workbench">
+        <div class="card">
+          <h3>说明</h3>
+          <p style="margin:0;color:var(--ink-2);font-size:var(--fs-sub)">
+            工作台尚未实现。当前版本只打通了「外壳 + 存储 + 界面」这条垂直切片，
+            用来验证架构可行。完整规划见 <code>local-docs/handoff/DEVELOPMENT_PLAN.md</code>。
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------- 笔记 ---------- -->
+      <section class="view" data-view="notes" data-active="true">
+        <div class="notes">
+          <div class="note-list" id="note-list"></div>
+          <div class="editor">
+            <div class="editor-head">
+              <input class="title-input" id="note-title" placeholder="标题" />
+            </div>
+            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------- 数据库 ---------- -->
+      <section class="view" data-view="database">
+        <div class="card">
+          <h3>数据库</h3>
+          <p style="margin:0 0 var(--sp-3);color:var(--ink-2);font-size:var(--fs-sub)">
+            存储引擎已经就绪（单文件 SQLite，WAL + 每次提交 fsync）。
+            「笔记」模块就是它的第一个使用者。可视化建表、查询向导等尚未实现。
+          </p>
+          <dl class="kv">
+            <dt>引擎</dt><dd>SQLite（bundled，自带源码编译）</dd>
+            <dt>持久性</dt><dd>WAL + synchronous=FULL</dd>
+            <dt>数据文件</dt><dd id="about-datadir">—</dd>
+            <dt>现有笔记</dt><dd id="about-count">—</dd>
+          </dl>
+        </div>
+      </section>
+
+      <!-- ---------- 设置 ---------- -->
+      <section class="view" data-view="settings">
+        <div class="card">
+          <h3>外观</h3>
+          <div class="field">
+            <label for="theme-select">主题</label>
+            <select id="theme-select" class="btn" style="width:160px">
+              <option value="xuan">宣纸（默认）</option>
+              <option value="yemo">夜墨</option>
+            </select>
+            <div class="hint">宣纸是产品默认。夜墨是它的暗色对应，用于夜间。</div>
+          </div>
+          <div class="field">
+            <span>质感强度</span>
+            <span style="color:var(--ink-3)">轻</span>
+            <div class="hint">纸纹的明显程度。当前固定为「轻」，四档可调尚未实现。</div>
+          </div>
+          <div class="field">
+            <span>字体</span>
+            <span style="color:var(--ink-3)">标题宋体系 / 正文黑体系 / 代码等宽</span>
+            <div class="hint">三槽位与字体导入尚未实现，当前使用系统字体栈。</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:var(--sp-4)">
+          <h3>关于</h3>
+          <dl class="kv">
+            <dt>名称</dt><dd>DeskBase 桌库</dd>
+            <dt>版本</dt><dd id="about-version-2">—</dd>
+            <dt>许可证</dt><dd>Apache License 2.0</dd>
+            <dt>数据位置</dt><dd id="about-datadir-2">—</dd>
+          </dl>
+          <p style="margin:var(--sp-3) 0 0;color:var(--ink-2);font-size:var(--fs-sub)">
+            默认不联网、无遥测、无账号。数据全部存在你的电脑上。
+          </p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" data-show="false"></div>
+
+<script>
+/*{{APP_JS}}*/
+</script>
+</body>
+</html>
