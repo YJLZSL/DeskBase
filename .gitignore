@@ -40,6 +40,11 @@ x64/
 *.pdb
 *.ilk
 
+# UI 预览文件：由 scripts/make-preview.cjs 生成，内联了字体（约 1.5 MB）。
+# 它是给人临时看一眼设计的产物，不是源码 —— 入库会让每次界面改动都产生
+# 兆字节级的 diff。需要时跑一次脚本即可：node scripts/make-preview.cjs
+app/ui/preview.html
+
 # ---------- 依赖目录 ----------
 node_modules/
 bower_components/

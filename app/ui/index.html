@@ -4,9 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DeskBase 桌库</title>
-<style>
-/*{{THEME_CSS}}*/
-</style>
+<!-- 相对引用即可：整页从 deskbase://localhost/ 加载，
+     CSS / JS / 字体都在同一个 origin 下（见 app/src/assets.rs） -->
+<link rel="stylesheet" href="theme.css" />
+<!-- 尚无应用图标（P0-13 选型未定）。用空 data URI 显式声明"没有图标"，
+     避免 WebView 去要 /favicon.ico 然后落一条 404 噪音到日志里。 -->
+<link rel="icon" href="data:," />
 </head>
 <body>
 
@@ -103,9 +106,23 @@
             <div class="hint">纸纹的明显程度。当前固定为「轻」，四档可调尚未实现。</div>
           </div>
           <div class="field">
-            <span>字体</span>
-            <span style="color:var(--ink-3)">标题宋体系 / 正文黑体系 / 代码等宽</span>
-            <div class="hint">三槽位与字体导入尚未实现，当前使用系统字体栈。</div>
+            <label for="heading-select">标题字体</label>
+            <select id="heading-select" class="btn" style="width:200px">
+              <option value="display">得意黑（内置，默认）</option>
+              <option value="serif">宋体系（系统）</option>
+            </select>
+            <div class="hint">
+              标题、模块名与大号数字所用的字体。内置的是「得意黑」（SIL OFL 1.1，
+              1.10 MB，随程序分发，不联网下载）。
+            </div>
+          </div>
+          <div class="field">
+            <span>正文 / 代码</span>
+            <span style="color:var(--ink-3)">系统字体栈</span>
+            <div class="hint">
+              正文走系统黑体（微软雅黑等），代码走系统等宽字体 —— 正文用字量最大，
+              内嵌中文字库得不偿失。自定义字体导入（.ttf / .otf / .woff2）尚未实现。
+            </div>
           </div>
         </div>
 
@@ -129,8 +146,6 @@
 
 <div class="toast" id="toast" data-show="false"></div>
 
-<script>
-/*{{APP_JS}}*/
-</script>
+<script src="app.js"></script>
 </body>
 </html>

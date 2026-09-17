@@ -10,6 +10,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod assets;
 mod db;
 
 use std::path::PathBuf;
@@ -94,10 +95,20 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .expect("创建窗口失败");
 
-    // 把三份 UI 资源合成一个 HTML，避免额外的资源协议层
-    let html = include_str!("../ui/index.html")
-        .replace("/*{{THEME_CSS}}*/", include_str!("../ui/theme.css"))
-        .replace("/*{{APP_JS}}*/", include_str!("../ui/app.js"));
+    // UI 资源（HTML / CSS / JS / 字体）不再拼成一个大字符串，改为通过
+    // `deskbase://localhost/...` 按路径取（见 assets.rs）。这样才能装二进制资源。
+    let asset_log_dir = data_dir.clone();
+    let asset_handler = move |_id: &str, req: wry::http::Request<Vec<u8>>| {
+        let path = req.uri().path().to_string();
+        let resp = assets::handle(req);
+        if resp.status() != wry::http::StatusCode::OK {
+            log_line(
+                &asset_log_dir,
+                &format!("资源未命中：{path} → {}", resp.status().as_u16()),
+            );
+        }
+        resp
+    };
 
     let ipc_state = Arc::clone(&state);
     let ipc_handler = move |req: wry::http::Request<String>| {
@@ -114,7 +125,8 @@ fn main() -> wry::Result<()> {
     };
 
     let webview = WebViewBuilder::new()
-        .with_html(html)
+        .with_custom_protocol(assets::SCHEME.to_string(), asset_handler)
+        .with_url(assets::INDEX_URL)
         .with_ipc_handler(ipc_handler)
         .build(&window)?;
 

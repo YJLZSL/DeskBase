@@ -248,6 +248,38 @@
   }
   themeSel.addEventListener("change", () => applyTheme(themeSel.value));
 
+  // ---------- 标题字体 ----------
+  // display = 内置的得意黑（默认）；serif = 退回系统宋体系。
+  // 走 CSS 变量切换，不重新加载任何资源，所以是即时的（见 theme.css 的 [data-heading] 规则）
+  const headingSel = $("#heading-select");
+  function applyHeadingFont(name) {
+    if (name === "serif") document.documentElement.dataset.heading = "serif";
+    else delete document.documentElement.dataset.heading;
+    try {
+      localStorage.setItem("deskbase.heading", name);
+    } catch (e) {}
+  }
+  headingSel.addEventListener("change", () => applyHeadingFont(headingSel.value));
+
+  // 内置字体到底加载成功没有 —— 这是对「自定义协议 + 内嵌字体」整条链路的运行时自检。
+  // docs/18 5.5 要求：加载失败必须能看出来，而不是悄悄回退。
+  async function checkEmbeddedFont() {
+    const hint = document.querySelector("#heading-select")?.closest(".field")?.querySelector(".hint");
+    if (!hint || !document.fonts) return;
+    try {
+      await document.fonts.load('400 16px "Smiley Sans Oblique"', "桌库");
+      if (document.fonts.check('400 16px "Smiley Sans Oblique"')) {
+        hint.dataset.fontState = "ok";
+      } else {
+        hint.dataset.fontState = "failed";
+        hint.textContent += "（内置字体未能加载，标题已回退到系统字体）";
+      }
+    } catch (e) {
+      hint.dataset.fontState = "failed";
+      hint.textContent += "（内置字体加载出错：" + e.message + "）";
+    }
+  }
+
   // ---------- 启动 ----------
   async function boot() {
     // 恢复主题
@@ -257,6 +289,15 @@
     } catch (e) {}
     themeSel.value = saved;
     applyTheme(saved);
+
+    // 恢复标题字体
+    let savedHeading = "display";
+    try {
+      savedHeading = localStorage.getItem("deskbase.heading") || "display";
+    } catch (e) {}
+    headingSel.value = savedHeading;
+    applyHeadingFont(savedHeading);
+    checkEmbeddedFont();
 
     try {
       const info = await call("app.info");

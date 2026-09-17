@@ -10,6 +10,33 @@
      4. 动效只动 transform / opacity
    ============================================================ */
 
+/* ============================================================
+   内嵌字体
+   ============================================================
+   得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
+   来源与校验见 tools/fonts/fetch-fonts.cjs，许可原文见 app/ui/fonts/OFL-smiley-sans.txt。
+
+   为什么只内嵌这一个：
+     - 它是三个候选里唯一官方直接提供 WOFF2 的（1.10 MB，其余两个要自建子集化工具链）
+     - 单字重、约 8300 个汉字覆盖，UI 用字基本够
+     - 体积代价 1.10 MB，相对 ≤80 MB 的安装包目标可以忽略
+
+   要不要给「正文」也内嵌一个？不要。正文用字量最大，中文正文黑体子集化后
+   仍是数 MB 级，而 Windows 自带的微软雅黑在正文尺寸上已经足够好。
+   正文继续走系统栈，详见 docs/18 第五节。
+   ============================================================ */
+@font-face {
+  font-family: "Smiley Sans Oblique";
+  src: url("fonts/smiley-sans-oblique.woff2") format("woff2");
+  /* 字体内部记录的就是 Regular（它是「斜体设计」而不是「斜体样式」），
+     所以这里必须写 normal —— 写成 oblique 会导致常规正文永远用不上它。 */
+  font-style: normal;
+  font-weight: 400;
+  /* swap：先用回退字体渲染，字体到位后再替换。
+     宁可短暂不一致，也不要出现「无文字」状态（docs/18 5.5）。 */
+  font-display: swap;
+}
+
 :root {
   /* ---------- 尺度：8px 基准网格 ---------- */
   --sp-1: 4px;
@@ -36,13 +63,21 @@
   --lh-body: 1.7;      /* 中文正文必须 ≥ 1.7 */
   --lh-tight: 1.45;
 
-  /* ---------- 字体三槽位 ---------- */
-  --font-heading: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
+  /* ---------- 字体三槽位（docs/18 5.1） ---------- */
+  /* 三个体系先各自命名，槽位再指向它们，这样换槽位不用重复写整条回退链 */
+  --stack-display: "Smiley Sans Oblique", var(--stack-serif);
+  --stack-serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
     "STSong", "SimSun", Georgia, serif;
-  --font-body: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+  --stack-sans: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
     "Noto Sans CJK SC", "Source Han Sans SC", "Hiragino Sans GB", sans-serif;
-  --font-code: "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
+  --stack-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
+
+  /* 标题槽位默认用内置的得意黑。想换回纯系统宋体系：
+     设置 → 外观 → 标题字体 → 「宋体系（系统）」，对应下面的 [data-heading] 规则。 */
+  --font-heading: var(--stack-display);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
 
   /* ---------- 动效 token ---------- */
   --dur-instant: 80ms;
@@ -55,6 +90,12 @@
 
   /* ---------- 质感强度（默认「轻」）---------- */
   --texture-opacity: 0.025;
+}
+
+/* 标题槽位预设：不用内置字体，退回系统宋体系。
+   纯 CSS 开关，不重新加载任何东西，因此切换是即时的。 */
+[data-heading="serif"] {
+  --font-heading: var(--stack-serif);
 }
 
 /* ============================================================
