@@ -3,7 +3,7 @@
 - **状态**：提议
 - **日期**：2026-09-17
 - **决策者**：待定（依赖 ADR-0010 桌面外壳选型，L3 决策）
-- **相关**：[11 · 安全与资源优化专项](../11-security-and-resource-optimization.md)、[12 · 安装与卸载体验](../12-installer-and-uninstaller.md)、[0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md)、[0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection-pending.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)、[local-docs/reference/15-installer-research](../reference/15-installer-research.md)
+- **相关**：[11 · 安全与资源优化专项](../11-security-and-resource-optimization.md)、[12 · 安装与卸载体验](../12-installer-and-uninstaller.md)、[0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md)、[0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)、[`poc/`（基准脚本可复现）](../reference/15-installer-research.md)
 
 ---
 
@@ -11,7 +11,7 @@
 
 DeskBase 是本地优先、隐私优先的办公工具箱 + 内置轻量 SQL 数据库，Apache-2.0 开源，处于 M0 阶段。
 
-项目发起人 在 2026-09-17 明确变更需求：**v0.1.0 必须同时提供便携版与 Windows 安装版（exe）**。此前「安装版推迟到 v0.4.0」的计划作废。
+项目发起人在 2026-09-17 明确变更需求：**v0.1.0 必须同时提供便携版与 Windows 安装版（exe）**。此前「安装版推迟到 v0.4.0」的计划作废。
 
 已确定的约束（来自既有 ADR 与文档）：
 
@@ -19,9 +19,16 @@ DeskBase 是本地优先、隐私优先的办公工具箱 + 内置轻量 SQL 数
 - docs/12：安装向导需 13 步、完全自绘品牌界面（亮/暗主题、高 DPI、屏幕阅读器、中英文）；卸载界面同为自绘品牌界面；支持静默安装（且不偷偷开启默认关闭的选项）；卸载双模式 + 残留检查报告。
 - docs/11：仅写最小注册表（约 12 值，仅用于卸载）；卸载后残留必须为 0。
 - docs/14：Windows 安装包 ≤ 80 MB，便携版解压后 ≤ 220 MB。
-- ADR-0010（提议中，未定稿）：桌面外壳在「系统 WebView / 自带运行时 / 原生 UI」三选一，安装器方案依赖此选型。
+- ADR-0010（**现已接受**）：桌面外壳在「系统 WebView / 自带运行时 / 原生 UI」三选一，安装器方案依赖此选型。
+  → 该选型已定：**Rust + 系统 WebView2，Windows 优先**。本 ADR 依赖的前提已满足，
+  下面的方案分析按此结论读。
 
-本机工具链现状（主代理实测）：Node.js ✅、Python ✅；Rust/NSIS/Inno/WiX/Windows SDK 均 ❌ 未装。任何方案需说明额外工具链成本。
+工具链现状（**决策当时**的实测，2026-09-17）：Node.js ✅、Python ❌；
+Rust / NSIS / Inno / WiX / Windows SDK 均 ❌ 未装。任何方案需说明额外工具链成本。
+
+> ⚠️ 上面这一行说的是**决策当时**的环境，不是现在。Rust 与 MSVC 工具链
+> 现在都已就位（项目本身就在 MSVC 下构建），下面各方案的工具链成本
+> 需要按当前情况重新核对。
 
 ---
 
@@ -128,6 +135,6 @@ DeskBase 是本地优先、隐私优先的办公工具箱 + 内置轻量 SQL 数
 - [11 · 安全与资源优化专项](../11-security-and-resource-optimization.md) — 落点清单、最小注册表、卸载设计
 - [12 · 安装与卸载体验](../12-installer-and-uninstaller.md) — 13 步向导与自绘界面硬要求
 - [0008 · 便携版优先，安装版用户级安装](0008-portable-first-user-level-install.md) — 用户级 HKCU 决策
-- [0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection-pending.md) — 安装器依赖的选型
+- [0010 · 桌面外壳技术选型（提议中）](0010-desktop-shell-selection.md) — 安装器依赖的选型
 - [14 · 性能优化与量化指标](../14-performance-budget.md) — 体积与残留预算
-- [local-docs/reference/15-installer-research](../reference/15-installer-research.md) — 本 ADR 的完整调研与方案比对
+- [`poc/`（基准脚本可复现）](../reference/15-installer-research.md) — 本 ADR 的完整调研与方案比对

@@ -3,7 +3,7 @@
 - **状态**：**已接受**
 - **日期**：2026-09-17
 - **决策者**：项目发起人
-- **相关**：[17 · 技术选型建议](../17-tech-selection.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)、`local-docs/reference/11-poc-results.md`
+- **相关**：[17 · 技术选型建议](../17-tech-selection.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)
 
 ---
 
@@ -46,7 +46,7 @@ Rust 得以切到官方支持的 MSVC 工具链（详见 ADR 的 D-025 记录）
 
 ## 实测数据（PoC-A）
 
-**原始数据与测量方法见 `local-docs/reference/11-poc-results.md`。**
+**原始数据与测量方法可由 `poc/` 下的基准脚本复现。**
 
 ### 被测对象
 
@@ -164,7 +164,7 @@ Rust 得以切到官方支持的 MSVC 工具链（详见 ADR 的 D-025 记录）
 
 ## 参考
 
-- `local-docs/reference/11-poc-results.md` — 完整实测数据与 7 个工具链障碍记录
+- 完整实测数据与 7 个工具链障碍记录 —— 可由 `poc/` 下的基准脚本复现
 - `poc/rust-webview-shell/` — PoC-A 源码
 - `docs/14-performance-budget.md` — 指标定义（内存目标需按本 ADR 更新）
 - `docs/adr/0015-distribution-and-installer-strategy.md` — 安装器策略

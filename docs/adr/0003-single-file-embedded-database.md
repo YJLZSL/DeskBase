@@ -69,7 +69,7 @@
 - 加密可能需要在应用层实现，带来额外性能开销
 
 ### 中性
-- 引擎选择本身成为一项需要 PoC 的决策（见 [ADR-0010](0010-desktop-shell-selection-pending.md) 同类流程）
+- 引擎选择本身成为一项需要 PoC 的决策（见 [ADR-0010](0010-desktop-shell-selection.md) 同类流程）
 
 ---
 

@@ -110,7 +110,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0007](0007-ai-local-first.md) | AI 默认本地推理，外部服务逐次授权 | 已接受 | 2026-09-17 |
 | [0008](0008-portable-first-user-level-install.md) | 便携版优先，安装版采用用户级安装 | 已接受 | 2026-09-17 |
 | [0009](0009-dual-ui-mode.md) | 采用简洁 / 高级双界面模式 | 已接受 | 2026-09-17 |
-| [0010](0010-desktop-shell-selection-pending.md) | 桌面外壳技术选型 | 提议 | 2026-09-17 |
+| [0010](0010-desktop-shell-selection.md) | 桌面外壳技术选型 | 已接受 | 2026-09-17 |
 | [0011](0011-visual-system-and-theme-strategy.md) | 采用「宣纸为默认 + 多主题可切换 + token 驱动」的视觉系统策略 | 已接受 | 2026-09-17 |
 | [0015](0015-distribution-and-installer-strategy.md) | 分发形态与安装器方案（便携版 + 自建安装器优先） | 提议 | 2026-09-17 |
 | [0012](0012-metadata-storage-and-id-scheme.md) | 元数据与主数据的存储划分及 ID 方案 | 已接受 | 2026-09-17 |
@@ -131,7 +131,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | D5 | 加密实现路径 | M4 |
 | D6 | 本地 AI 运行时 | M5 |
 | D7 | OCR 引擎 | M1 |
-| D8 | 安装器方案 | M8 | 已提交 ADR-0015（提议，待 ADR-0010 定稿后转已接受）|
+| D8 | 安装器方案 | M8 | 已提交 ADR-0015（提议）|
 | D10 | 数据模型 v1 | M0 |
 | D11 | 备份实现方式 | M3 |
 | D12 | 远程访问协议 | M6 |

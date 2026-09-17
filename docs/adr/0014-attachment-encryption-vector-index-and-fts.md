@@ -3,7 +3,7 @@
 - **状态**：已接受
 - **日期**：2026-09-17
 - **决策者**：核心维护者
-- **相关**：[04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) 第八节问题 3、5、7、8、[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md) 第四节、[05 · 网络访问默认关闭](0005-network-closed-by-default.md)、[11 · 视觉系统策略](0011-visual-system-and-theme-strategy.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)
+- **相关**：04 · 数据模型参考设计（内部调研资料，未随仓库分发） 第八节问题 3、5、7、8、[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md) 第四节、[05 · 网络访问默认关闭](0005-network-closed-by-default.md)、[11 · 视觉系统策略](0011-visual-system-and-theme-strategy.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[14 · 性能优化与量化指标](../14-performance-budget.md)
 
 ---
 
@@ -154,7 +154,7 @@
 
 ## 参考
 
-- [04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) — `meta_attachment`、`meta_attachment_ref`、`ai_vector_map`、`meta_column`、第八节问题 3/5/7/8
+- 04 · 数据模型参考设计（内部调研资料，未随仓库分发） — `meta_attachment`、`meta_attachment_ref`、`ai_vector_map`、`meta_column`、第八节问题 3/5/7/8
 - [08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md) — 附件加密、数据分级 S0–S3、密钥不进备份
 - [05 · 网络访问默认关闭](0005-network-closed-by-default.md) — AI 离线可用
 - [11 · 视觉系统策略](0011-visual-system-and-theme-strategy.md) — 不内嵌中文字库

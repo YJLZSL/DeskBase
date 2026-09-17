@@ -455,5 +455,5 @@
 - [07 · 备份、恢复与断电保护](07-backup-recovery-dr.md) — 崩溃一致性与恢复要求
 - [16 · 路线图、风险与验收](16-roadmap-risks-acceptance.md) — 验收标准与发布门禁
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — 贡献者的测试要求
-- `local-docs/reference/07-acceptance-test-cases.md` — 约 150 条验收用例（详细版）
-- `local-docs/reference/06-performance-test-methodology.md` — 性能测法与环境准备
+- 约 150 条验收用例（详细版，内部调研资料，未随仓库分发）
+- 性能测法与环境准备（内部调研资料，未随仓库分发）

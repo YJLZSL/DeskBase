@@ -1,7 +1,7 @@
 # 崩溃一致性强杀循环骨架（tests/crash）
 
 > 对应任务 **P0-08**，对应规范 **`docs/19-test-strategy.md` 第 5.1 节 F01** 与
-> 设计文档 **`local-docs/reference/13-crash-test-and-corpus.md`** 第四节。
+> 设计文档第四节（内部调研资料，未随仓库分发）。
 > 配套语料库见 **`testdata/`**。
 
 ## 一、作用

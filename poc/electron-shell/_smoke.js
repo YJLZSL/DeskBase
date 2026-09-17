@@ -4,7 +4,7 @@ const path = require('path');
 const APP = '<仓库根目录>/poc/electron-shell';
 const E = path.join(APP, 'node_modules', 'electron', 'dist', 'electron.exe');
 const OUT = path.join(APP, 'out', 'coldstart.json');
-const LOG = 'C:/Users/you/AppData/Local/Temp/poc_electron_stderr.log';
+const LOG = require('path').join(require('os').tmpdir(), 'poc_electron_stderr.log');
 try { fs.unlinkSync(OUT); } catch (e) {}
 const se = Date.now();
 const c = spawn(E, ['.'], { cwd: APP, env: Object.assign({}, process.env, { SPAWN_EPOCH: String(se) }), stdio: ['ignore', 'inherit', 'inherit'] });

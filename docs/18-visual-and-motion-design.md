@@ -397,7 +397,7 @@ themes/<theme-id>/
 
 **内嵌字体会不会拖慢启动**
 
-不会。`@font-face` 用 `font-display: swap` —— 先用回退字体渲染，字体到位后再替换（`docs/18` 5.5 要求"不得出现无文字状态"）。字体由 WebView 异步拉取与解码，不占启动主路径。实测口径见 `local-docs/reference/11-poc-results.md`。
+不会。`@font-face` 用 `font-display: swap` —— 先用回退字体渲染，字体到位后再替换（`docs/18` 5.5 要求"不得出现无文字状态"）。字体由 WebView 异步拉取与解码，不占启动主路径。实测口径可由 `poc/` 下的基准脚本复现。
 
 ### 5.3 内置字体预设
 
@@ -937,4 +937,4 @@ themes/<theme-id>/
 - [14 · 性能优化与量化指标](14-performance-budget.md) — 帧率与包体积指标
 - [05 · 办公工具箱详细设计](05-office-toolbox.md) — 截图与 OCR 的交互细节
 - [99 · 术语表](99-glossary.md) — 术语统一
-- `local-docs/reference/08-naming-and-copy-guide.md` — 文案规范展开
+- 文案规范展开（内部调研资料，未随仓库分发）

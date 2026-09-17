@@ -12,5 +12,5 @@ try {
 } catch (err) {
   out.push('require(electron) threw: ' + err.message);
 }
-fs.writeFileSync('C:/Users/you/AppData/Local/Temp/poc_probe.log', out.join('\n') + '\n');
+fs.writeFileSync(require('path').join(require('os').tmpdir(), 'poc_probe.log'), out.join('\n') + '\n');
 process.exit(0);

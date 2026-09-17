@@ -96,10 +96,10 @@
 ## 三、内存
 
 > **⚠️ 目标已于 2026-09-17 修订。** 原目标「空闲 ≤ 180 MB」被 PoC 实测证明不可达，
-> 原因是外壳选型（系统 WebView2，见 [ADR-0010](adr/0010-desktop-shell-selection-pending.md)）
+> 原因是外壳选型（系统 WebView2，见 [ADR-0010](adr/0010-desktop-shell-selection.md)）
 > 的**架构成本**：空页即 359.9 MB 起，无法通过业务优化消除。
 >
-> 修订依据与实测数据见 `local-docs/reference/11-poc-results.md`。
+> 修订依据与实测数据可由 `poc/` 下的基准脚本复现。
 >
 > **测量要求**：测内存必须做 **PID 差分**——先记基线 PID，只统计启动后新增的进程。
 > WebView2 的 `msedgewebview2.exe` 被多个应用共享，按进程名统计会同时导致严重低估与严重高估。

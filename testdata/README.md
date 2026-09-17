@@ -1,7 +1,7 @@
 # 脏数据语料库（testdata）
 
 > 对应任务 **P0-11**，对应规范 **`docs/19-test-strategy.md` 第 4.8 节（输入压力 / 脏数据）**。
-> 配套设计文档见 **`local-docs/reference/13-crash-test-and-corpus.md`**。
+> 配套设计文档见 **（内部调研资料，未随仓库分发）**。
 
 ## 一、用途
 
@@ -30,7 +30,7 @@ node generate-corpus.mjs --out /tmp/deskbase-corpus
 生成过程：先清空 `output/` 再重建，因此**可重复运行、幂等**。
 
 > 执行命令的 Node 版本要求 ≥ 18（用到 `String.prototype` 码点字面量等语法）。
-> 本机验证使用：`C:\Users\项目发起人\node.exe`。
+> 需要 Node.js ≥ 18（或项目自带的 `scripts/*.cjs` 所依赖的等价版本）。
 
 ## 三、输出结构
 

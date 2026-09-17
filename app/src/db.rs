@@ -38,7 +38,7 @@ pub struct Db {
 }
 
 fn now_ms() -> i64 {
-    // 用系统时间换算 UTC 毫秒。项目约定所有时间存 UTC 毫秒（见 local-docs/reference/04）
+    // 用系统时间换算 UTC 毫秒。项目约定所有时间存 UTC 毫秒（内部调研资料，未随仓库分发）
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

@@ -3,7 +3,7 @@
 - **状态**：已接受
 - **日期**：2026-09-17
 - **决策者**：核心维护者
-- **相关**：[04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) 第八节问题 2、4、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md) 第四节、[14 · 性能优化与量化指标](../14-performance-budget.md) 第八节
+- **相关**：04 · 数据模型参考设计（内部调研资料，未随仓库分发） 第八节问题 2、4、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md) 第四节、[14 · 性能优化与量化指标](../14-performance-budget.md) 第八节
 
 ---
 
@@ -115,6 +115,6 @@
 
 ## 参考
 
-- [04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) — `log_version`、`meta_recycle_bin`、软删除列
+- 04 · 数据模型参考设计（内部调研资料，未随仓库分发） — `log_version`、`meta_recycle_bin`、软删除列
 - [07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md) — 分层历史、回收站能力、保留策略
 - [14 · 性能优化与量化指标](../14-performance-budget.md) — 查询/备份性能目标

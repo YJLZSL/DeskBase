@@ -3,7 +3,7 @@
 - **状态**：已接受
 - **日期**：2026-09-17
 - **决策者**：核心维护者
-- **相关**：[04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) 第八节问题 1、6、[03 · 单文件嵌入式数据库](0003-single-file-embedded-database.md)、[06 · 单主端 + 远程访问](0006-single-primary-remote-access.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md)
+- **相关**：04 · 数据模型参考设计（内部调研资料，未随仓库分发） 第八节问题 1、6、[03 · 单文件嵌入式数据库](0003-single-file-embedded-database.md)、[06 · 单主端 + 远程访问](0006-single-primary-remote-access.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md)
 
 ---
 
@@ -113,6 +113,6 @@
 - [06 · 单主端 + 远程访问](0006-single-primary-remote-access.md) — 冲突场景有限
 - [07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md) — 一键全量导出、整目录搬迁
 - [08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md) — 库级/字段级加密
-- [04 · 数据模型参考设计](../local-docs/reference/04-data-model-reference.md) — 命名空间约定、主键约定、原则 #4
+- 04 · 数据模型参考设计（内部调研资料，未随仓库分发） — 命名空间约定、主键约定、原则 #4
 
 > **发现的张力（供后续修订关注）**：`04-data-model-reference.md` 第五节「用户数据表约定」写明「若用户未指定，自动添加自增整型主键」，与第一节设计原则 #4「ID 采用不透明标识，便于未来多端合并」存在表述张力。本 ADR 的界定是：系统/跨实体引用实体用 ULID；用户自建表主键由用户决定（默认自增 INTEGER），因单主端架构（ADR-0006）下用户表无需跨端合并主键，二者不冲突。若未来引入多桌面同步，用户表主键策略需重新评估。

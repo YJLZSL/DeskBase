@@ -24,14 +24,89 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// ---------------- 环境配置 ----------------
-// 若你的安装位置不同，改这几行即可
-const VC_VARS = 'D:\\VisualStudio\\VC\\Auxiliary\\Build\\vcvars64.bat';
-const SDK_ROOT = 'D:\\Windows Kits\\10';
-const SDK_VER = '10.0.26100.0';
-const RUSTUP_HOME = process.env.RUSTUP_HOME || 'C:\\Users\\you\\.rustup';
-const CARGO_HOME = process.env.CARGO_HOME || 'C:\\Users\\you\\.cargo';
+// ---------------- 环境配置（自动探测，可用环境变量覆盖）----------------
+//
+// 这几项**刻意不写死路径**。写死之后这个脚本只能在一台机器上跑 ——
+// 别人 clone 下来第一步就卡住，而"能不能构建"是公开仓库最基本的要求。
+// 每一项都按「环境变量 → 常见安装位置 → 报错并给出可操作的提示」三级回退。
 const TOOLCHAIN = 'stable-x86_64-pc-windows-msvc';
+
+/** 在候选列表里找第一个存在的路径 */
+function firstExisting(cands) {
+  for (const c of cands) if (c && fs.existsSync(c)) return c;
+  return null;
+}
+
+/** 找 vcvars64.bat：先问 vswhere（VS 官方的定位工具），再扫常见目录 */
+function findVcVars() {
+  if (process.env.DESKBASE_VCVARS) return process.env.DESKBASE_VCVARS;
+
+  const vswhere = path.join(
+    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+    'Microsoft Visual Studio', 'Installer', 'vswhere.exe'
+  );
+  if (fs.existsSync(vswhere)) {
+    const r = spawnSync(vswhere, [
+      '-latest', '-products', '*',
+      '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+      '-property', 'installationPath',
+    ], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const base = (r.stdout || '').trim().split('\n')[0].trim();
+    if (base) {
+      const p = path.join(base, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
+      if (fs.existsSync(p)) return p;
+    }
+  }
+
+  const roots = [
+    'C:\\Program Files\\Microsoft Visual Studio',
+    'C:\\Program Files (x86)\\Microsoft Visual Studio',
+    'D:\\Program Files\\Microsoft Visual Studio',
+    'D:\\Microsoft Visual Studio',
+  ];
+  const editions = ['2022', '2026', '2019', 'Community', 'Professional', 'Enterprise', 'BuildTools'];
+  const cands = [];
+  for (const r of roots) {
+    for (const e of editions) {
+      cands.push(path.join(r, e, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat'));
+      cands.push(path.join(r, e, 'BuildTools', 'VC', 'Auxiliary', 'Build', 'vcvars64.bat'));
+    }
+  }
+  return firstExisting(cands);
+}
+
+/** 找 Windows SDK 根目录 */
+function findSdkRoot() {
+  if (process.env.DESKBASE_SDK_ROOT) return process.env.DESKBASE_SDK_ROOT;
+  return firstExisting([
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Windows Kits', '10'),
+    'C:\\Program Files (x86)\\Windows Kits\\10',
+    'D:\\Windows Kits\\10',
+  ]);
+}
+
+/** SDK 版本目录：取 Lib 下版本号最大的那个，不写死 */
+function findSdkVer(sdkRoot) {
+  if (process.env.DESKBASE_SDK_VER) return process.env.DESKBASE_SDK_VER;
+  if (!sdkRoot) return null;
+  const lib = path.join(sdkRoot, 'Lib');
+  if (!fs.existsSync(lib)) return null;
+  const vers = fs.readdirSync(lib)
+    .filter((d) => /^\d+\.\d+\.\d+\.\d+$/.test(d))
+    .sort((a, b) => {
+      const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+      for (let i = 0; i < 4; i++) if (pa[i] !== pb[i]) return pb[i] - pa[i];
+      return 0;
+    });
+  return vers[0] || null;
+}
+
+const VC_VARS = findVcVars();
+const SDK_ROOT = findSdkRoot();
+const SDK_VER = findSdkVer(SDK_ROOT);
+// rustup 默认装在 %USERPROFILE%\.rustup —— 用 os.homedir() 而不是写死用户名
+const RUSTUP_HOME = process.env.RUSTUP_HOME || path.join(os.homedir(), '.rustup');
+const CARGO_HOME = process.env.CARGO_HOME || path.join(os.homedir(), '.cargo');
 
 const ROOT = path.resolve(__dirname, '..');
 const APP_DIR = path.join(ROOT, 'app');
@@ -49,11 +124,14 @@ const MODE = has('--test') ? 'test' : has('--check') ? 'check' : has('--debug') 
 
 // ---------------- 1. 捕获 MSVC 环境 ----------------
 function msvcEnv() {
-  if (!fs.existsSync(VC_VARS)) {
+  if (!VC_VARS) {
     die(
-      `找不到 vcvars64.bat: ${VC_VARS}\n` +
-        `  请安装 Visual Studio 或 Build Tools 的「使用 C++ 的桌面开发」工作负载，\n` +
-        `  或修改本脚本顶部的 VC_VARS。`
+      `找不到 vcvars64.bat（Visual Studio 的 C++ 编译环境）。\n\n` +
+        `  需要装 Visual Studio 2022（或更新）或独立的 Build Tools，并勾选\n` +
+        `  「使用 C++ 的桌面开发」工作负载 —— 只要这一个，不用装 IDE。\n` +
+        `    https://visualstudio.microsoft.com/downloads/  →  Build Tools for Visual Studio\n\n` +
+        `  已经装了但还是找不到？用环境变量直接指定：\n` +
+        `    set DESKBASE_VCVARS=D:\\你的路径\\VC\\Auxiliary\\Build\\vcvars64.bat`
     );
   }
 
@@ -84,23 +162,30 @@ function msvcEnv() {
   log(`  MSVC 环境：捕获 ${n} 个变量`);
 
   // ---------------- 2. 补 Windows SDK ----------------
-  const libs = [
-    path.join(SDK_ROOT, 'Lib', SDK_VER, 'ucrt', 'x64'),
-    path.join(SDK_ROOT, 'Lib', SDK_VER, 'um', 'x64'),
-  ].filter((d) => fs.existsSync(d));
-  const incs = ['ucrt', 'shared', 'um', 'winrt', 'cppwinrt']
-    .map((s) => path.join(SDK_ROOT, 'Include', SDK_VER, s))
-    .filter((d) => fs.existsSync(d));
-
-  if (!libs.length) {
-    log(`  ⚠ 未找到 Windows SDK 的 Lib 目录（${SDK_ROOT}\\Lib\\${SDK_VER}）`);
-    log('    如果链接时报 LNK1181，请检查 SDK 安装位置并修改本脚本的 SDK_ROOT / SDK_VER');
+  // SDK 通常由 vcvars64.bat 自己配好；这里补一遍是为了兜住"装了多个 SDK 版本、
+  // 环境变量指向的不是我们要的那个"这种情况。探测不到就跳过，不当作致命错误。
+  if (!SDK_ROOT || !SDK_VER) {
+    log('  Windows SDK：未探测到独立安装，沿用 vcvars64.bat 配置的环境');
+    log('    （若链接时报 LNK1181，用 DESKBASE_SDK_ROOT 与 DESKBASE_SDK_VER 指定）');
   } else {
-    env.LIB = [...libs, env.LIB || ''].filter(Boolean).join(';');
-    env.INCLUDE = [...incs, env.INCLUDE || ''].filter(Boolean).join(';');
-    const sdkBin = path.join(SDK_ROOT, 'bin', SDK_VER, 'x64');
-    if (fs.existsSync(sdkBin)) env.PATH = sdkBin + ';' + (env.PATH || '');
-    log(`  Windows SDK：LIB ${libs.length} 项、INCLUDE ${incs.length} 项`);
+    const libs = [
+      path.join(SDK_ROOT, 'Lib', SDK_VER, 'ucrt', 'x64'),
+      path.join(SDK_ROOT, 'Lib', SDK_VER, 'um', 'x64'),
+    ].filter((d) => fs.existsSync(d));
+    const incs = ['ucrt', 'shared', 'um', 'winrt', 'cppwinrt']
+      .map((s) => path.join(SDK_ROOT, 'Include', SDK_VER, s))
+      .filter((d) => fs.existsSync(d));
+
+    if (!libs.length) {
+      log(`  ⚠ 未找到 Windows SDK 的 Lib 目录（${SDK_ROOT}\\Lib\\${SDK_VER}）`);
+      log('    如果链接时报 LNK1181，请检查 SDK 安装位置');
+    } else {
+      env.LIB = [...libs, env.LIB || ''].filter(Boolean).join(';');
+      env.INCLUDE = [...incs, env.INCLUDE || ''].filter(Boolean).join(';');
+      const sdkBin = path.join(SDK_ROOT, 'bin', SDK_VER, 'x64');
+      if (fs.existsSync(sdkBin)) env.PATH = sdkBin + ';' + (env.PATH || '');
+      log(`  Windows SDK：${SDK_VER}，LIB ${libs.length} 项、INCLUDE ${incs.length} 项`);
+    }
   }
 
   // ---------------- 3. 指定 MSVC 工具链 ----------------

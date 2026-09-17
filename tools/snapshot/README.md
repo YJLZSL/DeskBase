@@ -13,13 +13,13 @@
 
 ## 运行环境
 
-- Node.js ≥ 16（本机使用 `C:\Users\项目发起人\node.exe`）
+- Node.js ≥ 18
 - 仅支持 Windows 采集（注册表 / 任务 / 服务依赖系统命令）。在非 Windows 上 `take` 会失败并记入错误。
 
 调用示例：
 
 ```bat
-set NODE=C:\Users\项目发起人\node.exe
+set NODE=node
 %NODE% tools/snapshot/snapshot.mjs help
 ```
 
