@@ -2,6 +2,10 @@
 
 # DeskBase · 桌库
 
+[![CI](https://github.com/YJLZSL/DeskBase/actions/workflows/ci.yml/badge.svg)](https://github.com/YJLZSL/DeskBase/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#-项目状态早期-alpha)
+
 **本地优先 · 隐私优先的办公工具箱，内置人人可上手的 SQL 数据库能力**
 
 把笔记、表格、看板、截图、待办和一个小而快的数据库，装进同一张桌面。
