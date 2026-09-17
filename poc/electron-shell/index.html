@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>DeskBase Electron PoC</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 -apple-system, "Segoe UI", sans-serif; }
+  #scroller { height: 640px; overflow: auto; border: 1px solid #999; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+  th, td { border-bottom: 1px solid #e2e2e2; padding: 2px 8px; height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  thead th { position: sticky; top: 0; background: #f5f5f5; }
+  .col-i { width: 60px; }
+  .col-n { width: 140px; }
+  #hud { position: fixed; right: 12px; bottom: 12px; background: rgba(0,0,0,.8); color: #0f0; padding: 6px 10px; font: 12px monospace; border-radius: 4px; display: none; }
+</style>
+</head>
+<body>
+  <div id="scroller">
+    <table id="t">
+      <thead><tr><th class="col-i">#</th><th class="col-n">名称</th><th>值</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div id="hud"></div>
+
+<script>
+(function () {
+  // 渲染 10 000 行固定行高表格（万一帧率测试用，冷启动也用同一页面）
+  const tbody = document.querySelector('#t tbody');
+  const N = 10000;
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < N; i++) {
+    const tr = document.createElement('tr');
+    const td1 = document.createElement('td'); td1.textContent = i;
+    const td2 = document.createElement('td'); td2.textContent = '项目 ' + i;
+    const td3 = document.createElement('td'); td3.textContent = (Math.random() * 1000).toFixed(2);
+    tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+    frag.appendChild(tr);
+  }
+  tbody.appendChild(frag);
+
+  const params = new URLSearchParams(location.search);
+  const hud = document.querySelector('#hud');
+
+  if (params.has('fps')) {
+    // (c) FPS 测试：匀速滚动 30 秒，记录帧间隔序列
+    runFps();
+  } else {
+    // (a) 冷启动：双 rAF 确保首帧已绘制，回报渲染侧墙钟
+    window.addEventListener('load', function () {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          window.bench.firstFrame();
+        });
+      });
+    });
+  }
+
+  function runFps() {
+    hud.style.display = 'block';
+    const scroller = document.querySelector('#scroller');
+    const DURATION = 30000;
+    const start = performance.now();
+    let prev = start;
+    let frames = 0;
+    const gaps = []; // 每帧间隔(ms)
+
+    function loop(now) {
+      // 匀速滚动：每帧 +8px，到底回顶
+      scroller.scrollTop += 8;
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1) {
+        scroller.scrollTop = 0;
+      }
+      const gap = now - prev;
+      prev = now;
+      if (gap > 0 && gap < 1000) gaps.push(gap); // 忽略挂起导致的异常大间隔
+      frames++;
+      const elapsed = now - start;
+      if (elapsed < DURATION) {
+        hud.textContent = 'FPS 测试中 ' + (elapsed / 1000).toFixed(1) + 's';
+        requestAnimationFrame(loop);
+      } else {
+        finish();
+      }
+    }
+
+    function finish() {
+      const total = performance.now() - start;
+      const fpsArr = gaps.map(function (g) { return 1000 / g; });
+      fpsArr.sort(function (a, b) { return a - b; });
+      const avgFps = frames / (total / 1000);
+      const minFps = fpsArr.length ? fpsArr[0] : 0;
+      const p1Idx = Math.max(0, Math.floor(fpsArr.length * 0.01));
+      const p1Fps = fpsArr.length ? fpsArr[p1Idx] : 0;
+      const below50 = fpsArr.filter(function (x) { return x < 50; }).length;
+      const belowRatio = fpsArr.length ? below50 / fpsArr.length : 0;
+      hud.textContent = 'FPS 完成';
+      window.bench.fpsResult({
+        totalMs: total,
+        frames: frames,
+        avgFps: +avgFps.toFixed(2),
+        minFps: +minFps.toFixed(2),
+        p1Fps: +p1Fps.toFixed(2),
+        below50Ratio: +belowRatio.toFixed(4),
+        samples: fpsArr.length,
+      });
+    }
+
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>

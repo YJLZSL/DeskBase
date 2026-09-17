@@ -1,0 +1,15 @@
+{
+  "name": "deskbase-electron-shell-poc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeskBase 桌面外壳选型 PoC —— 自带运行时方案（Electron）",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:fps": "electron . --fps"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "devDependenciesNote": "如需打包体积测量再安装 @electron/packager / electron-builder"
+}
