@@ -24,6 +24,22 @@ ulid = "3"
 # 时间：UTC 毫秒时间戳是项目的存储约定
 time = { version = "0.3", features = ["formatting", "macros"] }
 
+# Excel：读用 calamine、写用 rust_xlsxwriter。
+# 两者都是 MIT/Apache-2.0，都能在 Windows 上跑，且不需要 Office。
+# 为什么是这两个而不是 umya-spreadsheet：后者是唯一"读+改+写"的，但有已知的
+# 转义不对称 bug（issue #143 / #167，会把含 & 的 sheet 名与公式写坏），
+# 而且内存占用高一个量级。本模块的策略是**只读原文件、只写新文件，绝不改原件** ——
+# 这样两个单向库就够，且用户的原件永远安全。
+calamine = { version = "0.36", features = ["chrono"] }
+rust_xlsxwriter = "0.99"
+
+# 原生文件选择框（导入 Excel、选备份目录等）。
+# 为什么必须是原生对话框而不是 <input type="file">：WebView2 里后者只给
+# `C:\fakepath\x.xlsx` 这种假路径，拿不到真实路径，Rust 侧无法打开文件。
+# 更重要的是：**路径只在 Rust 侧流转** —— 前端既不能提供路径也不能拿到路径，
+# 于是渲染层没有"读任意文件"的能力（docs/08 的「渲染层无文件系统直访」）。
+rfd = "0.15"
+
 [profile.release]
 # 生产裁剪，见 docs/14 的体积目标
 opt-level = "z"

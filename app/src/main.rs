@@ -13,6 +13,7 @@
 mod assets;
 mod db;
 mod render;
+mod xlsx;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -238,6 +239,123 @@ fn dispatch(state: &AppState, req: Request) -> String {
             }
         }
 
+        // ---------- Excel 导出 ----------
+        // 导出永远写到 <数据目录>/exports/ 下的**新文件**，绝不覆盖任何已有文件。
+        // 这是 xlsx 模块的核心策略：只读原文件、只写新文件。
+        "xlsx.exportNotes" => {
+            let notes = match state.db.lock() {
+                Ok(d) => match d.list_notes() {
+                    Ok(v) => v,
+                    Err(e) => return err(id, e),
+                },
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+
+            let stamp = time::OffsetDateTime::now_utc()
+                .format(&time::macros::format_description!(
+                    "[year][month][day]-[hour][minute][second]"
+                ))
+                .unwrap_or_else(|_| "export".into());
+            let dir = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err(id, format!("创建导出目录失败：{e}"));
+            }
+            let path = dir.join(format!("笔记-{stamp}.xlsx"));
+
+            let sheet = xlsx::Sheet {
+                name: "笔记".into(),
+                headers: vec![
+                    "标题".into(),
+                    "最后修改".into(),
+                    "字符数".into(),
+                    "正文".into(),
+                ],
+                rows: notes
+                    .iter()
+                    .map(|n| {
+                        vec![
+                            n.title.clone(),
+                            fmt_ms(n.updated_at),
+                            n.excerpt.chars().count().to_string(),
+                            n.excerpt.clone(),
+                        ]
+                    })
+                    .collect(),
+            };
+
+            match xlsx::write(&path, &[sheet]) {
+                Ok(()) => {
+                    log_line(&state.data_dir, &format!("导出笔记为 Excel：{} 条", notes.len()));
+                    ok(
+                        id,
+                        serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "count": notes.len(),
+                        }),
+                    )
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 在资源管理器里定位导出的文件。路径由 Rust 侧拼出，前端改不了。
+        "xlsx.revealExport" => {
+            let p = req.args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let exports = state.data_dir.join("exports");
+            // 只允许定位到导出目录里的文件 —— 不接受任意路径
+            let ok_path = std::path::Path::new(p)
+                .canonicalize()
+                .ok()
+                .zip(exports.canonicalize().ok())
+                .map(|(a, b)| a.starts_with(&b))
+                .unwrap_or(false);
+            if !ok_path {
+                return err(id, "只能定位到导出目录里的文件");
+            }
+            match reveal_in_explorer(p) {
+                Ok(()) => ok(id, serde_json::json!({})),
+                Err(e) => err(id, e),
+            }
+        }
+
+        // ---------- Excel 导入 ----------
+        // **路径只在 Rust 侧流转**：原生对话框在这里打开，得到的路径直接交给
+        // xlsx::inspect，返回给前端的只有解析结果（表头预览与告警），没有路径。
+        // 于是渲染层拿不到"读任意文件"的能力。
+        "xlsx.pickAndInspect" => {
+            let picked = rfd::FileDialog::new()
+                .set_title("选择要导入的表格文件")
+                .add_filter("Excel / CSV", &["xlsx", "xlsm", "xls", "xlsb", "csv"])
+                .pick_file();
+
+            let Some(path) = picked else {
+                // 用户取消：不是错误，前端据此不做提示
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+            log_line(
+                &state.data_dir,
+                &format!("用户选择导入文件：{}", path.display()),
+            );
+            match xlsx::inspect(&path) {
+                Ok(mut report) => {
+                    // 文件名给前端显示（只是名字，不是路径）
+                    if let Ok(v) = serde_json::to_value(&report) {
+                        return ok(
+                            id,
+                            serde_json::json!({
+                                "cancelled": false,
+                                "fileName": path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                                "report": v,
+                            }),
+                        );
+                    }
+                    report.warnings.clear();
+                    ok(id, serde_json::json!({ "cancelled": false }))
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
         "audit.tail" => {
             // 给设置页显示的审计摘要：日志文件里"打开外部链接/已拒绝"的行数
             let log = state.data_dir.join("logs").join("app.log");
@@ -348,6 +466,40 @@ fn open_in_browser(url: &str) -> Result<(), String> {
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+}
+
+/// 在资源管理器里选中一个文件。
+///
+/// 与 `open_in_browser` 一样是**显式的用户动作**，且路径只允许来自导出目录
+/// （调用方已做前缀校验）。不引入任何网络行为。
+#[cfg(target_os = "windows")]
+fn reveal_in_explorer(path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        // explorer /select 在找不到窗口时也会返回成功，这里只处理启动失败
+        .map_err(|e| format!("打开资源管理器失败：{e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn reveal_in_explorer(_path: &str) -> Result<(), String> {
+    Err("当前平台暂不支持定位文件".into())
+}
+
+/// UTC 毫秒 → 本地可读时间。存的是 UTC（项目约定），显示用本地。
+fn fmt_ms(ms: i64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000) {
+        Ok(dt) => dt
+            .format(&time::macros::format_description!(
+                "[year]-[month]-[day] [hour]:[minute]"
+            ))
+            .unwrap_or_else(|_| String::new()),
+        Err(_) => String::new(),
     }
 }
 

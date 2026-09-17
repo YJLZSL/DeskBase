@@ -1605,6 +1605,42 @@ code {
   }
 }
 
+/* ---------- 导入检查结果 ---------- */
+.preview-table {
+  border-collapse: collapse;
+  font-size: var(--fs-aux);
+  font-family: var(--font-code);
+  margin: 0 0 var(--sp-3);
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+.preview-table td {
+  border: var(--line-w) solid var(--line);
+  padding: 3px 8px;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-2);
+}
+
+/* 告警框：导入里最重要的输出，必须显眼但不能吓人（黄而不是红 —— 它是提示不是失败） */
+.warn-box {
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.warn-box b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 /* ---------- 关于 ---------- */
 .about-head {
   display: flex;

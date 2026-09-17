@@ -231,6 +231,33 @@
           </div>
 
           <div class="card">
+            <h3>数据</h3>
+            <div class="field">
+              <span>导出为 Excel</span>
+              <div class="link-row">
+                <button class="btn" id="btn-export-xlsx">导出全部笔记</button>
+                <button class="btn btn-ghost" id="btn-reveal-export" hidden>打开所在文件夹</button>
+              </div>
+              <div class="hint">
+                按当前数据生成一个新的 .xlsx，**写到数据目录的 exports/ 下**，不会覆盖任何已有文件。
+                长编号（订单号、身份证）按文本写入，不会被 Excel 变成科学计数法。
+              </div>
+            </div>
+            <div class="field">
+              <span>导入表格</span>
+              <div class="link-row">
+                <button class="btn" id="btn-import-xlsx">选择文件…</button>
+              </div>
+              <div class="hint">
+                支持 .xlsx / .xlsm / .xls / .csv。**只读，不改你的文件。**
+                导入前会先检查那些会静默毁数据的坑（Excel 的 15 位精度截断、1904 日期系统、
+                HTML 伪装成 Excel、合并单元格），并把发现的问题逐条列出来。
+              </div>
+            </div>
+            <div id="import-report" hidden></div>
+          </div>
+
+          <div class="card">
             <h3>关于</h3>
             <div class="about-head">
               <img src="brand/icon-128.png" alt="DeskBase 图标" width="56" height="56" />

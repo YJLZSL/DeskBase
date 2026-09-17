@@ -660,6 +660,107 @@
   }
 
   // ============================================================
+  // Excel 导出 / 导入
+  // ============================================================
+  const btnExport = $("#btn-export-xlsx");
+  const btnReveal = $("#btn-reveal-export");
+  let lastExportPath = "";
+
+  btnExport.addEventListener("click", async () => {
+    btnExport.disabled = true;
+    const old = btnExport.textContent;
+    btnExport.textContent = "导出中…";
+    try {
+      const r = await call("xlsx.exportNotes");
+      lastExportPath = r.path || "";
+      btnReveal.hidden = false;
+      toast(`已导出 ${r.count} 条笔记`);
+    } catch (e) {
+      toast("导出失败：" + e.message, "error");
+    } finally {
+      btnExport.disabled = false;
+      btnExport.textContent = old;
+    }
+  });
+
+  btnReveal.addEventListener("click", async () => {
+    try {
+      await call("xlsx.revealExport", { path: lastExportPath });
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  });
+
+  /** 导入检查结果渲染。**只显示，不自动导入** —— 让用户先看清问题再决定。 */
+  function renderImportReport(name, report) {
+    const box = $("#import-report");
+    box.textContent = "";
+    box.hidden = false;
+
+    const h = document.createElement("h4");
+    h.style.cssText = "margin:var(--sp-4) 0 var(--sp-2);font-size:var(--fs-sub)";
+    h.textContent = `检查结果 · ${name}`;
+    box.appendChild(h);
+
+    for (const s of report.sheets || []) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.style.margin = "0 0 var(--sp-2)";
+      p.textContent = `工作表「${s.name}」 ${s.rows} 行 × ${s.cols} 列`;
+      box.appendChild(p);
+
+      // 前几行预览：让用户自己确认表头在哪一行 —— 不猜
+      if (s.head && s.head.length) {
+        const t = document.createElement("table");
+        t.className = "preview-table";
+        s.head.slice(0, 4).forEach((row, i) => {
+          const tr = document.createElement("tr");
+          row.slice(0, 8).forEach((c) => {
+            const td = document.createElement("td");
+            td.textContent = c;
+            if (i === 0) td.style.fontWeight = "600";
+            tr.appendChild(td);
+          });
+          t.appendChild(tr);
+        });
+        box.appendChild(t);
+      }
+    }
+
+    // 告警：这是整个导入流程里最重要的部分
+    const warns = report.warnings || [];
+    if (!warns.length) {
+      const okp = document.createElement("p");
+      okp.className = "muted";
+      okp.style.color = "var(--success)";
+      okp.textContent = "没有发现已知的数据损坏迹象。";
+      box.appendChild(okp);
+      return;
+    }
+    for (const w of warns) {
+      const d = document.createElement("div");
+      d.className = "warn-box";
+      const t = document.createElement("b");
+      t.textContent = `⚠ ${w.advice}`;
+      d.appendChild(t);
+      if (w.samples && w.samples.length) {
+        const s = document.createElement("div");
+        s.className = "muted";
+        s.style.marginTop = "4px";
+        s.textContent = "样例：" + w.samples.slice(0, 5).join(" / ");
+        d.appendChild(s);
+      }
+      box.appendChild(d);
+    }
+  }
+
+  $("#btn-import-xlsx").addEventListener("click", async () => {
+    const r = await call("xlsx.pickAndInspect");
+    if (r.cancelled) return;   // 用户取消，不提示
+    renderImportReport(r.fileName || "", r.report || {});
+  });
+
+  // ============================================================
   // 启动
   // ============================================================
   async function boot() {
