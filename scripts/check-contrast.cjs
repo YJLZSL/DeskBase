@@ -153,4 +153,4 @@ if (failures) {
   console.error(`✗ 共 ${failures} 项未通过`);
   process.exit(1);
 }
-console.log('✔ 全部通过（9 个主题的 token 齐全，对比度全部达标）');
+console.log(`✔ 全部通过（${THEMES.length} 个主题的 token 齐全，对比度全部达标）`);

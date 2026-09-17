@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DeskBase 桌库 · 应用图标（小尺寸版，16 / 20 / 24 / 32px）
+  ============================================================
+  这不是把 icon.svg 缩小，而是**另一套几何**。四处刻意的差别，
+  都是为了让它在任务栏和文件列表里站得住：
+
+    1. **铺得更满**：两张纸从画布的 59% 放大到 79%。16px 下纸宽因此有 12.6px
+       而不是 9.4px —— 这是"能认出是两张纸"和"糊成一块"的分界。
+    2. **靛青改实色**，纸白改纯白。渐变在 16px 下只是脏；这两个纯色
+       在亮色任务栏与暗色任务栏上都保持同样的对比。
+    3. **去掉两道灰条，只留朱砂**。36px 高的灰条缩到 16px 是 0.56px，
+       它不是"淡"，是会变成半透明的脏点。宁可不要。
+    4. **圆角全部加大**。小尺寸下锐角会掉像素，圆角更耐缩放。
+
+  分界线在 tools/icon/build-icons.cjs 的 SMALL_MAX（=32）。
+  改其中一套时请把两套一起看一眼。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"
+     width="32" height="32" role="img" aria-label="DeskBase 桌库">
+  <title>DeskBase 桌库</title>
+
+  <!-- 暖米底（比大尺寸版略深，避免在浅色任务栏上糊掉） -->
+  <rect x="16" y="16" width="992" height="992" rx="200" fill="#E7DCC4"/>
+  <rect x="17.5" y="17.5" width="989" height="989" rx="198.5"
+        fill="none" stroke="#5A4A2E" stroke-opacity="0.18" stroke-width="5"/>
+
+  <!-- 后面那张：靛青实色 -->
+  <g transform="rotate(-8 512 512)">
+    <rect x="126" y="212" width="768" height="768" rx="150" fill="#2E4A6B"/>
+  </g>
+
+  <!-- 前面那张：纯白 -->
+  <rect x="188" y="148" width="768" height="768" rx="150" fill="#FFFFFF"/>
+
+  <!-- 只留朱砂一道 -->
+  <rect x="300" y="336" width="440" height="96" rx="48" fill="#A63A2E"/>
+</svg>

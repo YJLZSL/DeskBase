@@ -79,6 +79,23 @@
     return null;
   }
 
+  /** 从 localStorage 恢复一个下拉的值，并**校验它仍然是合法选项**。
+   *
+   *  为什么必须校验：给 <select> 赋一个不在 options 里的值时，浏览器不会报错，
+   *  它只是悄悄退回第一个选项 —— 于是界面显示的和实际生效的就不是一回事。
+   *  这个坑真踩过：旧版本存过 qingci / songyan 这些主题 id，主题表换掉之后
+   *  设置页显示「跟随系统」，而 CSS 拿到的是一个已经不存在的主题名。 */
+  function restoreSelect(sel, key, fallback) {
+    const valid = Array.from(sel.options).map((o) => o.value);
+    let v = store(key) || fallback;
+    if (!valid.includes(v)) {
+      v = fallback;
+      store(key, v);   // 顺手把无效值清掉，下次不再出现
+    }
+    sel.value = v;
+    return v;
+  }
+
   /** 有 View Transition API 就用它做整屏交叉淡入（切主题最怕"啪"地闪一下），
    *  没有就退回直接执行 —— 不影响正确性。 */
   function withTransition(fn) {
@@ -87,6 +104,14 @@
     } else {
       fn();
     }
+  }
+
+  /** 主题切换时只允许颜色类属性过渡。
+   *  不加这一步，一切换就有几百个元素同时开始做位移/缩放动画 —— 又卡又乱。 */
+  function applyThemeSmoothly(fn) {
+    root.classList.add("theme-switching");
+    withTransition(fn);
+    setTimeout(() => root.classList.remove("theme-switching"), 260);
   }
 
   // ============================================================
@@ -113,8 +138,74 @@
 
   const themeSel = $("#theme-select");
   themeSel.addEventListener("change", () => {
-    withTransition(() => applyTheme(themeSel.value));
+    applyThemeSmoothly(() => applyTheme(themeSel.value));
   });
+
+  // ============================================================
+  // 自适应：侧栏档位 + 笔记单栏/双栏
+  // ============================================================
+  // 调研结论：必须区分「窗口变窄导致的自动折叠」与「用户手动折叠」。
+  // 窗口变宽时只恢复前者，不要把用户自己关掉的面板强行打开。
+  const NARROW = 720;       // 低于这个宽度侧栏变覆盖抽屉
+  const COMPACT = 1024;     // 低于这个宽度侧栏默认收成图标条
+
+  let sidebarPref = store("deskbase.sidebar") || "auto";   // auto | full | rail
+  const sidebarBtn = $("#btn-sidebar");
+
+  function isNarrow() {
+    return window.innerWidth < NARROW;
+  }
+
+  function applySidebar() {
+    if (isNarrow()) {
+      // 窄屏：侧栏是覆盖抽屉，默认收起；按钮负责开合
+      if (root.dataset.sidebar !== "open") root.dataset.sidebar = "hidden";
+      sidebarBtn.title = root.dataset.sidebar === "open" ? "收起侧栏" : "展开侧栏";
+      return;
+    }
+    delete root.dataset.sidebar;
+    if (root.dataset.sidebarOpen === "1") return;
+    if (sidebarPref === "rail") root.dataset.sidebar = "rail";
+    else if (sidebarPref === "full") root.dataset.sidebar = "full";
+    else root.dataset.sidebar = window.innerWidth < COMPACT ? "rail" : "full";
+    sidebarBtn.title = root.dataset.sidebar === "rail" ? "展开侧栏" : "收起侧栏";
+  }
+
+  sidebarBtn.addEventListener("click", () => {
+    const app = document.querySelector(".app");
+    if (isNarrow()) {
+      root.dataset.sidebar = root.dataset.sidebar === "open" ? "hidden" : "open";
+      sidebarBtn.title = root.dataset.sidebar === "open" ? "收起侧栏" : "展开侧栏";
+      return;
+    }
+    // 宽屏：在 完整 / 图标条 之间切，并记住用户的选择
+    const now = root.dataset.sidebar === "rail" ? "full" : "rail";
+    sidebarPref = now;
+    store("deskbase.sidebar", now);
+    // 侧栏宽度变化会让内容区重排；限定范围，别让整页跟着重算
+    app.classList.add("is-animating-layout");
+    root.dataset.sidebar = now;
+    sidebarBtn.title = now === "rail" ? "展开侧栏" : "收起侧栏";
+    setTimeout(() => {
+      app.classList.remove("is-animating-layout");
+      movePill(document.querySelector('.nav-item[aria-current="true"]'));
+    }, 260);
+  });
+
+  // 点击抽屉外的区域收起抽屉（窄屏）
+  document.querySelector(".content").addEventListener("click", () => {
+    if (isNarrow() && root.dataset.sidebar === "open") {
+      root.dataset.sidebar = "hidden";
+    }
+  });
+
+  // 笔记面板：窄屏时是单栏，列表 ⇄ 编辑之间切
+  const notesEl = $("#notes");
+  function setPane(which) {
+    if (!notesEl) return;
+    notesEl.dataset.pane = which;
+  }
+  $("#btn-pane-back").addEventListener("click", () => setPane("list"));
 
   // ============================================================
   // 质感强度 / 动效档位 / 标题字体
@@ -371,6 +462,8 @@
       dirty = false;
       setSaveState("", "");
       markSelected(id);
+      // 窄屏单栏：打开一条笔记就切到编辑区（返回按钮在编辑区左上）
+      if (window.innerWidth < 720) setPane("editor");
     } catch (e) {
       toast("打开笔记失败：" + e.message, "error");
     }
@@ -494,23 +587,28 @@
     }
   });
 
+  async function refreshAudit() {
+    try {
+      const a = await call("audit.tail");
+      $("#audit-count").textContent = `已打开 ${a.opened} 次 · 已拒绝 ${a.denied} 次`;
+    } catch (e) {
+      /* 审计摘要拿不到不影响任何功能，静默即可 */
+    }
+  }
+
   // ============================================================
   // 启动
   // ============================================================
   async function boot() {
     // 主题（默认宣纸；D-016 决定不让"跟随系统"当默认，保证用户第一眼看到宣纸）
-    const saved = store("deskbase.theme") || "xuan";
-    themeSel.value = saved;
-    applyTheme(saved);
+    applyTheme(restoreSelect(themeSel, "deskbase.theme", "xuan"));
 
     // 质感
-    const tex = store("deskbase.texture") || "light";
-    textureSel.value = tex;
-    root.dataset.texture = tex;
+    root.dataset.texture = restoreSelect(textureSel, "deskbase.texture", "light");
 
     // 动效：默认「标准」；若系统要求减少动效，则降级为「精简」并如实显示
-    let mo = store("deskbase.motion") || "standard";
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches && !store("deskbase.motion")) {
+    let mo = restoreSelect(motionSel, "deskbase.motion", "standard");
+    if (mo === "standard" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       mo = "minimal";
       const hint = $("#motion-hint");
       if (hint) hint.textContent += "（检测到系统「减少动效」，已自动降为「精简」）";
@@ -519,9 +617,7 @@
     root.dataset.motion = mo;
 
     // 标题字体
-    const hd = store("deskbase.heading") || "display";
-    headingSel.value = hd;
-    applyHeading(hd);
+    applyHeading(restoreSelect(headingSel, "deskbase.heading", "display"));
     checkEmbeddedFont();
 
     // 筛选条只建一次
@@ -531,19 +627,61 @@
       const info = await call("app.info");
       $("#about-version").textContent = info.version;
       $("#about-version-2").textContent = info.version;
+      $("#update-current").textContent = info.version;
       $("#about-datadir").textContent = info.dataDir;
       $("#about-datadir-2").textContent = info.dataDir;
       $("#about-count").textContent = String(info.noteCount);
+
+      // 仓库地址与文档链接。地址由 Rust 侧的常量给出，前端只负责显示与打开。
+      const repo = info.repo || "";
+      const repoLink = $("#repo-link");
+      const docsLink = $("#docs-link");
+      repoLink.textContent = repo || "尚未设置";
+      // 占位地址在界面上明说，避免用户点进一个不存在的仓库
+      const isPlaceholder = /deskbase-app\/deskbase$/.test(repo);
+      $("#repo-tbd").hidden = !isPlaceholder;
+      if (isPlaceholder) {
+        $("#repo-hint").textContent =
+          "这是一个占位地址，仓库公开前需要改成真实地址（见 app/src/main.rs 的 PROJECT_REPO）。";
+      }
+      const openLink = async (url) => {
+        try {
+          await call("app.openExternal", { url });
+          refreshAudit();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      };
+      repoLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        openLink(repo);
+      });
+      docsLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        openLink(repo + "/tree/main/docs");
+      });
+      $("#btn-check-update").addEventListener("click", () => openLink(repo + "/releases"));
+      refreshAudit();
     } catch (e) {
       toast("初始化失败：" + e.message, "error");
     }
     await refreshList();
     showView("notes", { keepList: true });
+    applySidebar();
 
-    // 窗口尺寸变化时指示块要跟着走（它靠像素位置定位）
+    // 窗口尺寸变化时：指示块与侧栏档位都要跟着走。
+    // 用 rAF 合并，避免拖动窗口边缘时每一像素都算一次布局
+    let resizeRaf = 0;
     window.addEventListener("resize", () => {
-      movePill(document.querySelector('.nav-item[aria-current="true"]'));
-      moveFilterPill();
+      if (resizeRaf) return;
+      resizeRaf = requestAnimationFrame(() => {
+        resizeRaf = 0;
+        applySidebar();
+        movePill(document.querySelector('.nav-item[aria-current="true"]'));
+        moveFilterPill();
+        // 从窄屏回到宽屏时，把笔记还原成双栏
+        if (window.innerWidth >= 720) setPane("list");
+      });
     });
   }
 

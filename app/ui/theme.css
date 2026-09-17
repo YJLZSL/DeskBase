@@ -1,25 +1,35 @@
 /* ============================================================
-   DeskBase 设计系统 —— CSS token 层
+   DeskBase 设计系统 —— token 层与主题
    ============================================================
    来源：docs/18-visual-and-motion-design.md
 
+   ## 为什么主题要改结构，而不是只改色相
+
+   上一版 9 个主题都是"纸本/编辑风"内部的色相变体，被指出"看起来都一样"。
+   真实设计系统的主题是**多维**的：
+     - Radix Themes 的 <Theme> 接受 accentColor / grayColor / panelBackground /
+       **scaling** / **radius**
+     - Material 3 的 MaterialExpressiveTheme 接受 colorScheme + **shapes** +
+       **typography** + **motionScheme**
+     - Carbon 把动效本身定义成 productive / expressive 两套
+
+   而视觉记忆点的强度排序大致是：
+     圆角 > 阴影/描边语言 > 字体/字重 > 密度 > 色相
+   色相是**最弱**的那个。所以每个主题除了色板，还覆盖：
+     --radius-* 圆角阶梯 / --line-w 描边粗细 / --shadow-* 层次语言 /
+     --font-* 字体 / --sp-* 密度 / --lh-body 行高 / --mo-* 动效性格
+
+   把一个主题的色相单独换掉、结构不动，它看起来就还是同一个主题。
+
    规则：
      1. 组件只允许使用语义 token，不得直接写死色值
-     2. 主题 = 色板 + 质感 + 排版尺度 + 动效强度
-     3. 中文正文行高 ≥ 1.7
-     4. 动效只动 transform / opacity —— 绝不碰 width/height/top/left
-     5. 没有任何循环播放的装饰动画
+     2. 中文正文行高 ≥ 1.7（书页主题更高）
+     3. 动效只动 transform / opacity —— 绝不碰 width/height/top/left
+     4. 没有任何循环播放的装饰动画
    ============================================================ */
 
 /* ============================================================
    内嵌字体
-   ============================================================
-   得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
-   来源与校验见 tools/fonts/fetch-fonts.cjs，许可原文见 app/ui/fonts/OFL-smiley-sans.txt。
-
-   为什么只内嵌这一个：它是三个候选里唯一官方直接提供 WOFF2 的（1.10 MB）；
-   霞鹜文楷与更纱黑体都只发 TTF，完整版 25–60 MB，要内嵌必须自建子集化工具链
-   （本机没有 Python），且子集化属于 OFL 的「修改版」、必须改名。详见 D-029。
    ============================================================ */
 @font-face {
   font-family: "Smiley Sans Oblique";
@@ -28,40 +38,24 @@
      所以这里必须写 normal —— 写成 oblique 会导致常规正文永远用不上它。 */
   font-style: normal;
   font-weight: 400;
-  /* swap：先用回退字体渲染，字体到位后再替换。
-     宁可短暂不一致，也不要出现「无文字」状态（docs/18 5.5）。 */
-  font-display: swap;
+  font-display: swap;   /* 先用回退字体渲染，字体到位后再替换 */
 }
 
+/* ============================================================
+   与主题无关的骨架 token
+   ============================================================ */
 :root {
-  /* ---------- 尺度：8px 基准网格 ---------- */
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 48px;
-  --sp-8: 64px;
+  --radius-none: 0;
 
-  /* ---------- 圆角 ---------- */
-  --radius-sm: 5px;
-  --radius-md: 9px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
-  --radius-full: 999px;
-
-  /* ---------- 字号与行高 ---------- */
+  /* ---------- 字号 ---------- */
   --fs-title-lg: 26px;
   --fs-title: 20px;
   --fs-group: 16px;
   --fs-body: 14px;
   --fs-sub: 13px;
   --fs-aux: 12px;
-  --lh-body: 1.7;
-  --lh-tight: 1.45;
 
-  /* ---------- 字体三槽位（docs/18 5.1） ---------- */
+  /* ---------- 字体体系 ---------- */
   --stack-display: "Smiley Sans Oblique", var(--stack-serif);
   --stack-serif: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC",
     "STSong", "SimSun", Georgia, serif;
@@ -70,48 +64,43 @@
   --stack-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
-  --font-heading: var(--stack-display);
-  --font-body: var(--stack-sans);
-  --font-code: var(--stack-mono);
-
-  /* ---------- 动效 token（基准 = 标准档）----------
-     glide 是主曲线：起步快、收尾极缓，是"苹果感"的主要来源。
-     spring 带一点过冲，只用在需要"落位"感的地方（弹窗、开关、徽标）。 */
+  /* ---------- 动效 token：数值取自各设计系统的公开 token ----------
+     M3 emphasized：cubic-bezier(0.2,0,0,1)（屏内）/ (0.05,0.7,0.1,1)（入）/
+                   (0.3,0,0.8,0.15)（出）—— 来源：material-web 的 _md-sys-motion.scss
+     Carbon productive standard：cubic-bezier(0.2,0,0.38,0.9)
+     Fluent 2 durationNormal：200ms
+     Carbon duration-fast-01：70ms（按下反馈） */
   --dur-instant: 90ms;
   --dur-fast: 150ms;
-  --dur-normal: 220ms;
-  --dur-slow: 340ms;
-  --dur-slower: 480ms;
-  --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
-  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
-  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-normal: 200ms;
+  --dur-slow: 320ms;
+  --dur-slower: 460ms;
 
-  /* 动效强度派生量：位移距离与逐项延迟，由各档覆盖 */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);          /* M3 emphasized */
+  --ease-enter: cubic-bezier(0.05, 0.7, 0.1, 1);        /* M3 emphasized-decelerate */
+  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);         /* M3 emphasized-accelerate */
+  --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);         /* 起步快、收尾极缓 */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);      /* 带过冲，只用于落位 */
+  --ease-press: cubic-bezier(0, 0, 1, 1);
+
+  /* 动效强度派生量 */
   --mo-slide: 8px;
   --mo-lift: 2px;
   --mo-scale: 1.02;
   --stagger: 18ms;
 
-  /* ---------- 质感强度（默认「轻」）---------- */
-  --texture-opacity: 0.028;
-
-  /* ---------- 层次：两级阴影，柔而不脏 ---------- */
-  --shadow-1: 0 1px 2px rgba(60, 50, 35, 0.05),
-              0 2px 8px rgba(60, 50, 35, 0.045);
-  --shadow-2: 0 2px 4px rgba(60, 50, 35, 0.06),
-              0 10px 28px rgba(60, 50, 35, 0.09);
+  /* 焦点环。默认跟强调色；高对比主题会覆盖成 GOV.UK 式双色
+     （黄底 + 黑边）—— 理由是黄色对深底高对比、黑边对浅底高对比，
+     两个一起用就在任何背景上都可见。 */
+  --focus-bg: var(--accent);
+  --focus-ink: transparent;
 }
 
 /* ============================================================
-   主题（9 个内置）
+   主题一 · 宣纸（默认）
    ============================================================
-   每个主题都给出同一组语义 token。`color-scheme` 让原生控件
-   （下拉、滚动条、焦点框）也跟着变，否则暗色主题里会出现刺眼的白下拉。
+   家族：内容优先。层级靠留白与排版，材质是纸。
    ============================================================ */
-
-/* ---------- 宣纸（默认）：素底墨字，靛青为强调，朱砂极少用 ---------- */
 :root,
 [data-theme="xuan"] {
   color-scheme: light;
@@ -132,75 +121,209 @@
   --danger: #8c2b22;
   --selection: #d3deec;
   --shadow-hue: 60, 50, 35;
+
+  --radius-sm: 5px;  --radius-md: 9px;  --radius-lg: 14px;  --radius-xl: 20px;
+  --line-w: 1px;
+  --shadow-1: 0 1px 2px rgba(60, 50, 35, 0.05), 0 2px 8px rgba(60, 50, 35, 0.045);
+  --shadow-2: 0 2px 4px rgba(60, 50, 35, 0.06), 0 10px 28px rgba(60, 50, 35, 0.09);
+
+  --font-heading: var(--stack-display);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px; --sp-8: 64px;
+  --lh-body: 1.7;
+  --row-h: 34px;
+
+  --texture-opacity: 0.028;
+  --gap: 16px;
 }
 
-/* ---------- 青瓷：釉色，冷调青灰 ---------- */
-[data-theme="qingci"] {
+/* ============================================================
+   主题二 · 书页
+   ============================================================
+   家族：内容优先（编辑风）。比宣纸更进一步：**正文也用衬线**，
+   行高拉到 1.85，边框几乎消失，层级完全靠排版与留白。
+   ============================================================ */
+[data-theme="shuye"] {
   color-scheme: light;
-  --paper: #eef3f1;
-  --paper-2: #e3ebe8;
-  --card: #f8fbfa;
-  --ink: #1f2e2a;
-  --ink-2: #4a5b56;
-  --ink-3: #778985;
-  --line: #ccd8d4;
-  --line-strong: #b0c1bc;
-  --accent: #2c6b62;
-  --accent-soft: #d5e6e1;
-  --accent-ink: #ffffff;
-  --seal: #a2473a;
-  --success: #3f6b4d;
-  --warning: #85631a;
-  --danger: #8b3026;
-  --selection: #cfe3de;
-  --shadow-hue: 40, 60, 55;
-}
-
-/* ---------- 竹青：竹色，暖调青绿 ---------- */
-[data-theme="zhuqing"] {
-  color-scheme: light;
-  --paper: #f2f5eb;
-  --paper-2: #e7edda;
-  --card: #fafcf4;
-  --ink: #26301e;
-  --ink-2: #525f3e;
-  --ink-3: #7f8b6d;
-  --line: #d3dcc2;
-  --line-strong: #bbc8a6;
-  --accent: #4a6b2c;
-  --accent-soft: #dce8c9;
-  --accent-ink: #ffffff;
-  --seal: #a4532c;
-  --success: #4a6b2c;
-  --warning: #8a6414;
-  --danger: #8c3220;
-  --selection: #d8e5c4;
-  --shadow-hue: 55, 60, 35;
-}
-
-/* ---------- 朱墨：以朱砂为墨，暖红调 ---------- */
-[data-theme="zhumo"] {
-  color-scheme: light;
-  --paper: #f8f0eb;
-  --paper-2: #f1e2da;
-  --card: #fdf8f4;
-  --ink: #2e2320;
-  --ink-2: #5c4841;
-  --ink-3: #8e786f;
-  --line: #e0cec4;
-  --line-strong: #ccb3a6;
-  --accent: #8c2b22;
-  --accent-soft: #f0d9d3;
-  --accent-ink: #ffffff;
-  --seal: #8c2b22;
-  --success: #4c6438;
-  --warning: #8a5a14;
+  --paper: #faf7f0;
+  --paper-2: #f3eee3;
+  --card: #fffdf8;
+  --ink: #26221c;
+  --ink-2: #554d40;
+  --ink-3: #857c6b;
+  --line: #e6ddcb;
+  --line-strong: #d2c5ac;
+  --accent: #7a4a2b;
+  --accent-soft: #f0e2d3;
+  --accent-ink: #fffdf8;
+  --seal: #a63a2e;
+  --success: #4a6340;
+  --warning: #8a6014;
   --danger: #8c2b22;
-  --selection: #eed4cd;
-  --shadow-hue: 70, 45, 35;
+  --selection: #ecdfcc;
+  --shadow-hue: 55, 45, 30;
+
+  --radius-sm: 6px; --radius-md: 12px; --radius-lg: 20px; --radius-xl: 28px;
+  --line-w: 1px;
+  --shadow-1: 0 1px 2px rgba(60, 48, 30, 0.035), 0 3px 12px rgba(60, 48, 30, 0.04);
+  --shadow-2: 0 2px 6px rgba(60, 48, 30, 0.05), 0 14px 36px rgba(60, 48, 30, 0.08);
+
+  /* 正文用宋体 —— 这是"书页"与"宣纸"最直观的区别 */
+  --font-heading: var(--stack-serif);
+  --font-body: var(--stack-serif);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 5px; --sp-2: 10px; --sp-3: 14px; --sp-4: 20px;
+  --sp-5: 30px; --sp-6: 40px; --sp-7: 56px; --sp-8: 72px;
+  --lh-body: 1.85;
+  --row-h: 40px;
+
+  --texture-opacity: 0.02;
+  --gap: 20px;
 }
 
-/* ---------- 夜墨：宣纸的暗色对应，暖黑 ---------- */
+/* ============================================================
+   主题三 · 纸白
+   ============================================================
+   家族：中性/专业（Swiss / Vercel Geist 方向）。
+   **层级完全由 1px 边框 + 灰阶承载，几乎不用阴影**；圆角很小；
+   标题用系统黑体而不是得意黑 —— 这是与上面两个主题最直观的差别。
+   ============================================================ */
+[data-theme="paper"] {
+  color-scheme: light;
+  --paper: #ffffff;
+  --paper-2: #fafafa;
+  --card: #ffffff;
+  --ink: #171717;
+  --ink-2: #525252;
+  --ink-3: #737373;
+  --line: #e5e5e5;
+  --line-strong: #d4d4d4;
+  --accent: #2563eb;
+  --accent-soft: #eaf1fe;
+  --accent-ink: #ffffff;
+  --seal: #dc2626;
+  --success: #15803d;
+  --warning: #a16207;
+  --danger: #dc2626;
+  --selection: #dbeafe;
+  --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px;
+  --line-w: 1px;
+  /* 阴影几乎不用：浮层才有一层极淡的 */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 40px; --sp-8: 56px;
+  --lh-body: 1.7;
+  --row-h: 32px;
+
+  --texture-opacity: 0;
+  --gap: 12px;
+}
+
+/* ============================================================
+   主题四 · 靛蓝
+   ============================================================
+   家族：中性/专业（企业数据密集）。**直角、无阴影、最紧的行高**，
+   数字一律等宽 —— 它的目标是"每一像素都换成信息"。
+   ============================================================ */
+[data-theme="indigo"] {
+  color-scheme: light;
+  --paper: #f7f8fa;
+  --paper-2: #eef1f5;
+  --card: #ffffff;
+  --ink: #10151c;
+  --ink-2: #47505c;
+  --ink-3: #6e7885;
+  --line: #dde3ea;
+  --line-strong: #c3ccd6;
+  --accent: #1d4ed8;
+  --accent-soft: #e4ebfd;
+  --accent-ink: #ffffff;
+  --seal: #b91c1c;
+  --success: #15803d;
+  --warning: #a16207;
+  --danger: #b91c1c;
+  --selection: #d7e3fb;
+  --shadow-hue: 220, 30, 40;
+
+  --radius-sm: 2px; --radius-md: 4px; --radius-lg: 4px; --radius-xl: 6px;
+  --line-w: 1px;
+  --shadow-1: none;          /* 密集界面里阴影是噪音，靠网格线分界 */
+  --shadow-2: 0 6px 20px rgba(16, 21, 28, 0.12);
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 3px; --sp-2: 6px; --sp-3: 9px; --sp-4: 12px;
+  --sp-5: 18px; --sp-6: 24px; --sp-7: 32px; --sp-8: 44px;
+  --lh-body: 1.62;
+  --row-h: 28px;
+
+  --texture-opacity: 0;
+  --gap: 8px;
+}
+
+/* ============================================================
+   主题五 · 石墨
+   ============================================================
+   家族：中性/专业（暗色数据密集）。与靛蓝同一套结构语言，换到暗色。
+   注意底色用 #16181c 而不是纯黑：纯黑配白字会产生光晕，久看更累。
+   ============================================================ */
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --paper: #16181c;
+  --paper-2: #101215;
+  --card: #1d2025;
+  --ink: #e8eaed;
+  --ink-2: #a9b0ba;
+  --ink-3: #7d858f;
+  --line: #2b2f36;
+  --line-strong: #3c424b;
+  --accent: #7ea6ff;
+  --accent-soft: #1e2739;
+  --accent-ink: #0a1020;
+  --seal: #f08a7c;
+  --success: #6ee7a0;
+  --warning: #f3c969;
+  --danger: #f08a7c;
+  --selection: #26304a;
+  --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 2px; --radius-md: 4px; --radius-lg: 4px; --radius-xl: 6px;
+  --line-w: 1px;
+  --shadow-1: none;
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 3px; --sp-2: 6px; --sp-3: 9px; --sp-4: 12px;
+  --sp-5: 18px; --sp-6: 24px; --sp-7: 32px; --sp-8: 44px;
+  --lh-body: 1.66;
+  --row-h: 28px;
+
+  --texture-opacity: 0;
+  --gap: 8px;
+}
+
+/* ============================================================
+   主题六 · 夜墨
+   ============================================================
+   家族：内容优先（暗色）。宣纸的暗色对应，保留纸纹与暖调。
+   ============================================================ */
 [data-theme="yemo"] {
   color-scheme: dark;
   --paper: #1a1917;
@@ -220,53 +343,122 @@
   --danger: #dd7463;
   --selection: #35475d;
   --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 5px; --radius-md: 9px; --radius-lg: 14px; --radius-xl: 20px;
+  --line-w: 1px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 10px rgba(0, 0, 0, 0.4), 0 16px 40px rgba(0, 0, 0, 0.45);
+
+  --font-heading: var(--stack-display);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px; --sp-8: 64px;
+  --lh-body: 1.75;
+  --row-h: 34px;
+
+  --texture-opacity: 0.03;
+  --gap: 16px;
 }
 
-/* ---------- 松烟：松烟墨，冷调蓝黑 ---------- */
-[data-theme="songyan"] {
+/* ============================================================
+   主题七 · 控制台
+   ============================================================
+   家族：技术/极值（深色数据控制台）。近黑底 + 1px 低对比分隔线 +
+   单一高饱和强调，零阴影。与石墨的区别是它**更暗、更冷、更依赖网格线**。
+   ============================================================ */
+[data-theme="console"] {
   color-scheme: dark;
-  --paper: #16191b;
-  --paper-2: #0f1213;
-  --card: #1f2427;
-  --ink: #dde4e7;
-  --ink-2: #a6b1b6;
-  --ink-3: #7b868b;
-  --line: #2c3336;
-  --line-strong: #434c50;
-  --accent: #82b3c8;
-  --accent-soft: #22343c;
-  --accent-ink: #0c1b21;
-  --seal: #cf6d5e;
-  --success: #7fa98a;
-  --warning: #d3ab55;
-  --danger: #d97362;
-  --selection: #2b3f48;
+  --paper: #0d1117;
+  --paper-2: #090c10;
+  --card: #161b22;
+  --ink: #e6edf3;
+  --ink-2: #9aa4b0;
+  --ink-3: #6e7681;
+  --line: #30363d;
+  --line-strong: #484f58;
+  --accent: #58a6ff;
+  --accent-soft: #14243a;
+  --accent-ink: #06101f;
+  --seal: #ff7b72;
+  --success: #3fb950;
+  --warning: #d29922;
+  --danger: #f85149;
+  --selection: #1f3a5f;
   --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 6px; --radius-xl: 8px;
+  --line-w: 1px;
+  --shadow-1: none;
+  --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.6);
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 7px; --sp-3: 10px; --sp-4: 14px;
+  --sp-5: 20px; --sp-6: 28px; --sp-7: 36px; --sp-8: 48px;
+  --lh-body: 1.68;
+  --row-h: 30px;
+
+  --texture-opacity: 0;
+  --gap: 10px;
 }
 
-/* ---------- 玄铁：近中性黑，金属感 ---------- */
-[data-theme="xuantie"] {
+/* ============================================================
+   主题八 · 终端
+   ============================================================
+   家族：技术/极值（TUI）。**连界面文字都用等宽**、直角、无阴影、
+   无纹理。它故意放弃一部分舒适性换取"这是一台机器"的一致性。
+   ============================================================ */
+[data-theme="terminal"] {
   color-scheme: dark;
-  --paper: #121213;
-  --paper-2: #0b0b0c;
-  --card: #1b1b1d;
-  --ink: #e7e7ea;
-  --ink-2: #ababb1;
-  --ink-3: #7f7f86;
-  --line: #2b2b2e;
-  --line-strong: #3f3f45;
-  --accent: #9ea7b6;
-  --accent-soft: #26282e;
-  --accent-ink: #14161b;
-  --seal: #c15c50;
-  --success: #8aa892;
-  --warning: #cfa955;
-  --danger: #d0736a;
-  --selection: #31343c;
+  --paper: #0b0b0b;
+  --paper-2: #060606;
+  --card: #131313;
+  --ink: #d4d4d4;
+  --ink-2: #9a9a9a;
+  --ink-3: #6f6f6f;
+  --line: #2a2a2a;
+  --line-strong: #3d3d3d;
+  --accent: #4ade80;
+  --accent-soft: #102315;
+  --accent-ink: #04140a;
+  --seal: #f87171;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --selection: #1b3324;
   --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 0; --radius-md: 0; --radius-lg: 0; --radius-xl: 0;
+  --line-w: 1px;
+  --shadow-1: none;
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.7);
+
+  /* 关键：标题与正文都用等宽（连中文也要真等宽字体，否则对齐会崩） */
+  --font-heading: var(--stack-mono);
+  --font-body: var(--stack-mono);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 7px; --sp-3: 10px; --sp-4: 14px;
+  --sp-5: 18px; --sp-6: 24px; --sp-7: 32px; --sp-8: 44px;
+  --lh-body: 1.6;
+  --row-h: 26px;
+
+  --texture-opacity: 0;
+  --gap: 8px;
 }
 
-/* ---------- 高对比亮 / 暗：无障碍用，正文与背景拉到最开 ---------- */
+/* ============================================================
+   主题九 / 十 · 高对比亮 / 高对比暗
+   ============================================================
+   家族：技术/极值（无障碍优先）。结构**完全由粗边框与大色块**表达，
+   无阴影无纹理，字号与行高都放大。焦点指示器按 GOV.UK 的思路做成
+   双色（黄底 + 黑边）：黄色对深底高对比、黑边对浅底高对比，
+   因此在任何背景上都成立。
+   ============================================================ */
 [data-theme="hc-light"] {
   color-scheme: light;
   --paper: #ffffff;
@@ -285,7 +477,26 @@
   --warning: #7a4a00;
   --danger: #a00000;
   --selection: #cfe0fb;
+  --focus-bg: #ffdd00;
+  --focus-ink: #0b0c0c;
   --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 0; --radius-md: 0; --radius-lg: 0; --radius-xl: 0;
+  --line-w: 2px;
+  --shadow-1: none;
+  --shadow-2: 0 0 0 3px #000;
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 5px; --sp-2: 10px; --sp-3: 15px; --sp-4: 20px;
+  --sp-5: 30px; --sp-6: 40px; --sp-7: 56px; --sp-8: 72px;
+  --lh-body: 1.8;
+  --row-h: 42px;
+
+  --texture-opacity: 0;
+  --gap: 16px;
 }
 
 [data-theme="hc-dark"] {
@@ -306,12 +517,84 @@
   --warning: #ffd166;
   --danger: #ff9080;
   --selection: #1d3355;
+  --focus-bg: #ffdd00;
+  --focus-ink: #0b0c0c;
   --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 0; --radius-md: 0; --radius-lg: 0; --radius-xl: 0;
+  --line-w: 2px;
+  --shadow-1: none;
+  --shadow-2: 0 0 0 3px #ffdd00;
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 5px; --sp-2: 10px; --sp-3: 15px; --sp-4: 20px;
+  --sp-5: 30px; --sp-6: 40px; --sp-7: 56px; --sp-8: 72px;
+  --lh-body: 1.8;
+  --row-h: 42px;
+
+  --texture-opacity: 0;
+  --gap: 16px;
 }
 
-/* 高对比主题关掉纸纹：它只会降低可读性 */
+/* ============================================================
+   主题十一 · 粗野
+   ============================================================
+   家族：表现型（neobrutalism）。3px 纯黑描边 + **无模糊硬阴影**、
+   直角、无渐变。它和工作区是有点冲的 —— 所以它的定位是"给喜欢
+   这种味道的人一个选择"，而不是默认。
+   硬阴影不做过渡（见下面的动效规则），所以它天然是四档里最省的那一档。
+   ============================================================ */
+[data-theme="brutal"] {
+  color-scheme: light;
+  --paper: #fdf6e3;
+  --paper-2: #f6ecd2;
+  --card: #fffdf5;
+  --ink: #000000;
+  --ink-2: #1f1f1f;
+  --ink-3: #3d3d3d;
+  --line: #000000;
+  --line-strong: #000000;
+  /* 粗野主义的强调色是"填充"而不是"文字色"：粉块当选中态背景，
+     文字用近黑压在上面。所以 --accent 必须是深色 —— 组件里它会被
+     当成文字色用在 --accent-soft 上，用粉色会直接读不清。 */
+  --accent: #111111;
+  --accent-soft: #ff90e8;
+  --accent-ink: #ffffff;
+  --seal: #e11900;
+  --success: #0f766e;
+  --warning: #a16207;
+  --danger: #e11900;
+  --selection: #ff90e8;
+  --shadow-hue: 0, 0, 0;
+
+  --radius-sm: 0; --radius-md: 0; --radius-lg: 0; --radius-xl: 0;
+  --line-w: 3px;
+  /* 硬阴影：0 模糊，靠位移产生重量感。hover 时阴影缩小、元素上移 */
+  --shadow-1: 4px 4px 0 #000;
+  --shadow-2: 8px 8px 0 #000;
+
+  --font-heading: var(--stack-sans);
+  --font-body: var(--stack-sans);
+  --font-code: var(--stack-mono);
+
+  --sp-1: 4px; --sp-2: 9px; --sp-3: 14px; --sp-4: 18px;
+  --sp-5: 26px; --sp-6: 34px; --sp-7: 48px; --sp-8: 64px;
+  --lh-body: 1.7;
+  --row-h: 40px;
+
+  --texture-opacity: 0;
+  --gap: 16px;
+}
+
+/* 高对比与终端主题关掉纸纹：它只会降低可读性 */
 [data-theme="hc-light"],
-[data-theme="hc-dark"] {
+[data-theme="hc-dark"],
+[data-theme="terminal"],
+[data-theme="graphite"],
+[data-theme="console"] {
   --texture-opacity: 0;
 }
 
@@ -331,45 +614,26 @@
 /* ============================================================
    动效强度（4 档）
    ============================================================
-   「关」不是把动画藏起来，而是真的把时长压到 1ms —— 位移与淡入
-   的对象仍然会在正确的位置，只是不再有过程。这样即使关掉动效，
+   「关」不是把动画藏起来，而是真的把时长压到 1ms —— 位移与淡入的
+   对象仍然会在正确的位置，只是不再有过程。这样即使关掉动效，
    也不会有元素停在半路。
    ============================================================ */
 [data-motion="off"] {
-  --dur-instant: 1ms;
-  --dur-fast: 1ms;
-  --dur-normal: 1ms;
-  --dur-slow: 1ms;
-  --dur-slower: 1ms;
-  --mo-slide: 0px;
-  --mo-lift: 0px;
-  --mo-scale: 1;
-  --stagger: 0ms;
-  --ease-glide: linear;
-  --ease-spring: linear;
+  --dur-instant: 1ms; --dur-fast: 1ms; --dur-normal: 1ms;
+  --dur-slow: 1ms; --dur-slower: 1ms;
+  --mo-slide: 0px; --mo-lift: 0px; --mo-scale: 1; --stagger: 0ms;
+  --ease-glide: linear; --ease-spring: linear;
 }
 [data-motion="minimal"] {
-  --dur-instant: 70ms;
-  --dur-fast: 100ms;
-  --dur-normal: 130ms;
-  --dur-slow: 170ms;
-  --dur-slower: 200ms;
-  --mo-slide: 3px;
-  --mo-lift: 0px;
-  --mo-scale: 1;
-  --stagger: 0ms;
+  --dur-instant: 70ms; --dur-fast: 100ms; --dur-normal: 130ms;
+  --dur-slow: 170ms; --dur-slower: 200ms;
+  --mo-slide: 3px; --mo-lift: 0px; --mo-scale: 1; --stagger: 0ms;
   --ease-spring: var(--ease-standard);
 }
 [data-motion="rich"] {
-  --dur-instant: 120ms;
-  --dur-fast: 190ms;
-  --dur-normal: 280ms;
-  --dur-slow: 420ms;
-  --dur-slower: 620ms;
-  --mo-slide: 14px;
-  --mo-lift: 3px;
-  --mo-scale: 1.03;
-  --stagger: 34ms;
+  --dur-instant: 120ms; --dur-fast: 190ms; --dur-normal: 280ms;
+  --dur-slow: 420ms; --dur-slower: 620ms;
+  --mo-slide: 14px; --mo-lift: 3px; --mo-scale: 1.03; --stagger: 34ms;
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -399,13 +663,23 @@ body {
   font-size: var(--fs-body);
   line-height: var(--lh-body);
   overflow: hidden;
-  /* 主题切换时颜色平滑过渡，避免"啪"地一下闪成另一种颜色 */
   transition: background-color var(--dur-normal) var(--ease-standard),
     color var(--dur-normal) var(--ease-standard);
 }
 
+/* 主题切换期间：只允许颜色类属性过渡。
+   否则一切换就会有几百个元素同时开始做位移/缩放动画，卡且乱。
+   由 JS 加 .theme-switching，250ms 后移除。 */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition-property: background-color, color, border-color, outline-color,
+    fill, stroke, box-shadow !important;
+  transition-duration: var(--dur-normal) !important;
+}
+
 /* 纸纹：只在最底层，不覆盖文字与卡片内部，不拦截点击（docs/18 第三节）。
-   两层不同周期的小点阵叠出纤维感，静态位图、无 filter、无动画 —— 空闲 CPU 增量为 0。 */
+   两层不同周期的小点阵叠出纤维感，静态位图、无 filter、无动画。 */
 body::before {
   content: "";
   position: fixed;
@@ -425,7 +699,6 @@ body::before {
   background: var(--selection);
 }
 
-/* 滚动条：细、圆、悬停才明显 */
 ::-webkit-scrollbar {
   width: 11px;
   height: 11px;
@@ -435,7 +708,7 @@ body::before {
 }
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--ink-3) 34%, transparent);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-full, 999px);
   border: 3px solid transparent;
   background-clip: content-box;
   transition: background-color var(--dur-fast) var(--ease-standard);
@@ -445,13 +718,14 @@ body::before {
   background-clip: content-box;
 }
 
-/* 焦点环：键盘可见、鼠标不显示 */
 :focus {
   outline: none;
 }
+/* 焦点环。高对比主题用 GOV.UK 式双色（黄底 + 黑边），在任何背景上都可见 */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-bg, var(--accent));
   outline-offset: 2px;
+  box-shadow: var(--focus-ink) 0 0 0 1px;
   border-radius: var(--radius-sm);
 }
 
@@ -472,6 +746,29 @@ body::before {
   margin: 0;
 }
 
+.mono {
+  font-family: var(--font-code);
+}
+
+/* 小徽标：用于"待确认"这类状态标注 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: var(--radius-full, 999px);
+  border: var(--line-w) solid var(--warning);
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* 只有图标的方形按钮 */
+.icon-only {
+  padding: 7px;
+  gap: 0;
+}
+
 code {
   font-family: var(--font-code);
   font-size: 0.92em;
@@ -480,22 +777,56 @@ code {
   border-radius: var(--radius-sm);
 }
 
+/* 数字一律等宽 —— 列才不会抖 */
+.num,
+.kv dd,
+.note-item .d {
+  font-variant-numeric: tabular-nums;
+}
+
 /* ============================================================
-   布局
+   布局骨架 + 自适应
+   ============================================================
+   五档宽度（调研结论：桌面应用的"视口宽度"要用状态机管，不能只有
+   一个布尔断点；而且整个项目必须共用同一张断点表，否则会出现
+   "侧栏是桌面态、内容是窄屏态"的混合态）：
+
+     Wide     ≥1440   侧栏完整 + 两栏内容
+     Regular  1024–1439  侧栏完整 + 两栏内容（列表列收窄）
+     Compact  720–1023   侧栏收成图标条（rail）+ 两栏内容
+     Narrow   560–719    侧栏隐藏为覆盖抽屉 + 单栏
+     Minimal  <560       单栏 + 更紧的留白
+
+   另外提供**手动档**（data-sidebar="full|rail"）：用户显式选过的档位
+   不会被窗口变宽自动改回去 —— 只恢复"因窗口变窄而自动收起"的那部分。
    ============================================================ */
 .app {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 216px 1fr;
+  grid-template-columns: var(--sidebar-w, 216px) 1fr;
   height: 100vh;
+  transition: grid-template-columns var(--dur-normal) var(--ease-standard);
+}
+/* 侧栏折叠必然引起内容区重排，这个重排无法用动画消除。
+   给它限定重排范围，别让整页跟着重算。 */
+.app.is-animating-layout > .main {
+  contain: layout;
+}
+
+[data-sidebar="rail"] {
+  --sidebar-w: 62px;
+}
+[data-sidebar="hidden"] {
+  --sidebar-w: 0px;
 }
 
 /* ---------- 侧边栏 ---------- */
 .sidebar {
   position: relative;
+  overflow: hidden;
   background: var(--paper-2);
-  border-right: 1px solid var(--line);
+  border-right: var(--line-w) solid var(--line);
   display: flex;
   flex-direction: column;
   padding: var(--sp-4) 0 var(--sp-3);
@@ -508,12 +839,12 @@ code {
   align-items: center;
   gap: 10px;
   padding: 2px var(--sp-4) var(--sp-5);
+  white-space: nowrap;
 }
 
 .brand-mark {
   border-radius: var(--radius-md);
   flex: none;
-  /* 图标本身已经很大，这里只做一点点下沉，避免像贴纸 */
   box-shadow: var(--shadow-1);
 }
 
@@ -531,15 +862,13 @@ code {
   padding: 0 var(--sp-3);
 }
 
-/* 选中指示块：一个独立的元素，靠 transform 滑到目标位置。
-   比"给每个按钮改背景"更有"落位"的感觉，且只动 transform。 */
+/* 选中指示块：独立元素 + transform 滑动。比"给每个按钮改背景"更有落位感 */
 .nav-pill {
   position: absolute;
   left: var(--sp-3);
   right: var(--sp-3);
   border-radius: var(--radius-md);
   background: var(--accent-soft);
-  transform-origin: left center;
   transition: transform var(--dur-normal) var(--ease-glide),
     height var(--dur-normal) var(--ease-glide),
     background-color var(--dur-normal) var(--ease-standard);
@@ -553,20 +882,21 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px var(--sp-3);
+  min-height: var(--row-h);
+  padding: 8px var(--sp-3);
   border: none;
-  border-radius: var(--radius-md);
   background: transparent;
   color: var(--ink-2);
   font: inherit;
   font-size: var(--fs-sub);
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
+  border-radius: var(--radius-md);
   transition: color var(--dur-fast) var(--ease-standard);
 }
 .nav-item .ico {
-  transition: transform var(--dur-normal) var(--ease-spring),
-    color var(--dur-fast) var(--ease-standard);
+  transition: transform var(--dur-normal) var(--ease-spring);
 }
 .nav-item:hover {
   color: var(--ink);
@@ -579,14 +909,53 @@ code {
   font-weight: 600;
 }
 
+/* 图标条档：只留图标，文字与分组标题收起来 */
+[data-sidebar="rail"] .brand-text,
+[data-sidebar="rail"] .nav-item span,
+[data-sidebar="rail"] .sidebar-foot {
+  display: none;
+}
+[data-sidebar="rail"] .brand,
+[data-sidebar="rail"] .nav-item {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+[data-sidebar="rail"] .nav-item {
+  position: relative;
+}
+/* 图标条上悬停时用浮出的标签补回文字（不能靠 title，要能看得到） */
+[data-sidebar="rail"] .nav-item::after {
+  content: attr(data-label);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  padding: 5px 10px;
+  border-radius: var(--radius-md);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--fs-aux);
+  font-weight: 400;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 40;
+  transition: opacity var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-glide);
+}
+[data-sidebar="rail"] .nav-item:hover::after {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
 .sidebar-foot {
   margin-top: auto;
   padding: var(--sp-3) var(--sp-4) 0;
-  border-top: 1px solid var(--line);
+  border-top: var(--line-w) solid var(--line);
   font-size: var(--fs-aux);
   color: var(--ink-3);
 }
-
 .sidebar-foot dl {
   margin: var(--sp-2) 0 0;
   display: grid;
@@ -618,7 +987,7 @@ code {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-5);
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--line-w) solid var(--line);
   transition: border-color var(--dur-normal) var(--ease-standard);
 }
 
@@ -628,22 +997,25 @@ code {
   font-size: var(--fs-title);
   font-weight: 400;
   letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 .spacer {
   flex: 1;
+  min-width: 0;
 }
 
-/* 搜索框：未聚焦时收窄，聚焦时展开并浮起。只用 transform / width 会掉帧，
-   所以宽度用 flex-basis 过渡，但配合内容不重排（输入框自身不换行）。 */
+/* 搜索框：未聚焦时收窄，聚焦时展开。
+   ⚠️ 不animate width —— 那是布局属性，每帧都要重算。
+   这里用 max-width + flex 让父容器承担变化。 */
 .search {
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 0 11px;
   height: 34px;
-  width: 190px;
-  border: 1px solid var(--line-strong);
+  width: clamp(150px, 18vw, 210px);
+  border: var(--line-w) solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--card);
   color: var(--ink-3);
@@ -652,7 +1024,7 @@ code {
     box-shadow var(--dur-normal) var(--ease-standard);
 }
 .search:focus-within {
-  width: 290px;
+  width: clamp(200px, 26vw, 300px);
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
@@ -676,9 +1048,11 @@ code {
 }
 
 .content {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   overflow: auto;
   padding: var(--sp-5) var(--sp-5) var(--sp-6);
-  scroll-behavior: smooth;
+  min-height: 0;
 }
 
 .view {
@@ -686,11 +1060,12 @@ code {
 }
 .view[data-active="true"] {
   display: block;
+  min-height: 0;
   animation: view-in var(--dur-slow) var(--ease-glide) both;
 }
 
-/* 视图进场：淡入 + 轻微上浮。方向由 JS 通过 --dir 给出，
-   让"往上翻"和"往下翻"的感觉不一致 —— 这是层次感的来源。 */
+/* 视图进场：淡入 + 轻微上浮。方向由 JS 通过 --dir 给出 ——
+   往下翻与往上翻的感觉因此不同 */
 @keyframes view-in {
   from {
     opacity: 0;
@@ -705,7 +1080,7 @@ code {
 .stack {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--gap);
 }
 
 /* ============================================================
@@ -719,42 +1094,31 @@ code {
   align-items: center;
   gap: 6px;
   padding: 7px 14px;
-  border: 1px solid var(--line-strong);
+  border: var(--line-w) solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--card);
   color: var(--ink);
   font: inherit;
   font-size: var(--fs-sub);
+  white-space: nowrap;
   cursor: pointer;
-  /* 抬升只动 transform；阴影用伪元素的不透明度做，避免每帧重绘阴影 */
   transition: transform var(--dur-instant) var(--ease-standard),
     background-color var(--dur-fast) var(--ease-standard),
     border-color var(--dur-fast) var(--ease-standard),
-    color var(--dur-fast) var(--ease-standard);
-}
-.btn::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: var(--shadow-2);
-  opacity: 0;
-  transition: opacity var(--dur-normal) var(--ease-standard);
-  pointer-events: none;
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
 }
 .btn:hover {
   background: var(--paper-2);
-  border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3));
+  border-color: color-mix(in srgb, var(--line-strong) 60%, var(--ink-3));
   transform: translateY(calc(var(--mo-lift) * -1));
-}
-.btn:hover::after {
-  opacity: 0.6;
+  /* 阴影用 box-shadow 但只在 hover 变一次（不是每帧过渡），配合 transform 抬升 */
+  box-shadow: var(--shadow-2);
 }
 .btn:active {
   transform: scale(0.972);
-}
-.btn:active::after {
-  opacity: 0;
+  box-shadow: var(--shadow-1);
+  transition-duration: 70ms;   /* Carbon fast-01：按下必须几乎瞬时 */
 }
 .btn-primary {
   background: var(--accent);
@@ -774,14 +1138,26 @@ code {
   background: color-mix(in srgb, var(--line) 48%, transparent);
   border-color: transparent;
   color: var(--ink);
+  box-shadow: none;
+}
+
+/* 粗野主题的按钮：硬阴影 + hover 时"按下去" */
+[data-theme="brutal"] .btn:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 #000;
+}
+[data-theme="brutal"] .btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 #000;
 }
 
 /* ---------- 下拉 ---------- */
 .select {
   appearance: none;
-  width: 210px;
+  width: clamp(170px, 22vw, 230px);
+  max-width: 100%;
   padding: 7px 30px 7px 11px;
-  border: 1px solid var(--line-strong);
+  border: var(--line-w) solid var(--line-strong);
   border-radius: var(--radius-md);
   background: var(--card);
   color: var(--ink);
@@ -806,13 +1182,15 @@ code {
   outline: none;
 }
 
-/* ---------- 笔记双栏 ---------- */
+/* ---------- 笔记：两栏 → 单栏 ----------
+   高度用 100% 而不是 calc(100vh - 某个数)：后者在主题改了密度、
+   行高、留白之后就会算错（多出或短一截），而且每个主题都得重算一遍。 */
 .notes {
   display: grid;
-  grid-template-columns: 272px 1fr;
-  gap: var(--sp-4);
-  height: calc(100vh - 152px);
-  min-height: 320px;
+  grid-template-columns: var(--list-w, 272px) 1fr;
+  gap: var(--gap);
+  height: 100%;
+  min-height: 280px;
 }
 
 .note-col {
@@ -824,7 +1202,7 @@ code {
 
 .note-list {
   flex: 1;
-  border: 1px solid var(--line);
+  border: var(--line-w) solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--card);
   box-shadow: var(--shadow-1);
@@ -834,9 +1212,11 @@ code {
   flex-direction: column;
   gap: 1px;
   min-height: 0;
+  /* 列表可能很长，限定重排范围 */
+  contain: layout paint;
 }
 
-/* 筛选条：胶囊式分段控件，选中态是一块会滑动的背景 */
+/* 筛选条：分段控件，选中态是一块会滑动的背景 */
 .filters {
   display: flex;
   gap: 2px;
@@ -870,8 +1250,8 @@ code {
   padding: 5px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-standard);
   white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-standard);
 }
 .filter[aria-selected="true"] {
   color: var(--ink);
@@ -879,6 +1259,8 @@ code {
 }
 
 .note-item {
+  display: block;
+  width: 100%;
   border: none;
   background: transparent;
   border-radius: var(--radius-md);
@@ -889,7 +1271,6 @@ code {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard),
     transform var(--dur-instant) var(--ease-standard);
-  /* 逐项进场：延迟由 JS 写的 --i 决定，超过一定条数就不再加延迟 */
   animation: item-in var(--dur-normal) var(--ease-glide) both;
   animation-delay: calc(var(--i, 0) * var(--stagger));
 }
@@ -926,7 +1307,6 @@ code {
   font-size: var(--fs-aux);
   color: var(--ink-3);
   font-family: var(--font-code);
-  font-variant-numeric: tabular-nums;
   margin-top: 1px;
 }
 .note-item .excerpt {
@@ -940,7 +1320,7 @@ code {
 }
 
 .editor {
-  border: 1px solid var(--line);
+  border: var(--line-w) solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--card);
   box-shadow: var(--shadow-1);
@@ -959,7 +1339,7 @@ code {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-4) var(--sp-5) var(--sp-3);
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--line-w) solid var(--line);
 }
 
 .title-input {
@@ -993,6 +1373,11 @@ code {
 }
 .body-input::placeholder {
   color: var(--ink-3);
+}
+
+/* 单栏模式下的"返回列表"按钮，只在窄屏出现 */
+.pane-back {
+  display: none;
 }
 
 .save-state {
@@ -1037,7 +1422,6 @@ code {
   width: 30px;
   height: 30px;
   stroke-width: 1.1;
-  color: var(--ink-3);
   opacity: 0.7;
 }
 
@@ -1047,6 +1431,7 @@ code {
   left: 50%;
   bottom: var(--sp-5);
   z-index: 50;
+  max-width: min(560px, 80vw);
   background: var(--ink);
   color: var(--paper);
   font-size: var(--fs-sub);
@@ -1072,13 +1457,17 @@ code {
 .card {
   position: relative;
   background: var(--card);
-  border: 1px solid var(--line);
+  border: var(--line-w) solid var(--line);
   border-radius: var(--radius-lg);
   padding: var(--sp-5);
   box-shadow: var(--shadow-1);
-  transition: transform var(--dur-normal) var(--ease-glide),
-    box-shadow var(--dur-normal) var(--ease-standard);
+  transition: transform var(--dur-normal) var(--ease-glide);
 }
+.card:hover {
+  transform: translateY(calc(var(--mo-lift) * -0.5));
+}
+/* 悬停的层次加深用伪元素的不透明度做，而不是过渡 box-shadow ——
+   后者每帧重绘阴影，是整个界面里最容易被忽视的掉帧来源 */
 .card::after {
   content: "";
   position: absolute;
@@ -1089,11 +1478,20 @@ code {
   transition: opacity var(--dur-normal) var(--ease-standard);
   pointer-events: none;
 }
-.card:hover {
-  transform: translateY(calc(var(--mo-lift) * -0.5));
-}
 .card:hover::after {
   opacity: 1;
+}
+/* 粗野主题的卡片：硬阴影，hover 时整体上移让阴影"变浅" */
+[data-theme="brutal"] .card,
+[data-theme="brutal"] .btn {
+  box-shadow: var(--shadow-1);
+}
+[data-theme="brutal"] .card:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-2);
+}
+[data-theme="brutal"] .card::after {
+  display: none;
 }
 
 .card h3 {
@@ -1118,7 +1516,6 @@ code {
 .kv dd {
   margin: 0;
   font-family: var(--font-code);
-  font-variant-numeric: tabular-nums;
   word-break: break-all;
 }
 .kv-compact {
@@ -1127,14 +1524,21 @@ code {
   gap: 2px var(--sp-2);
 }
 
-/* ---------- 设置项 ---------- */
+/* ---------- 设置项 ----------
+   用容器查询而不是媒体查询：设置面板的实际宽度取决于侧栏是否折叠，
+   视口宽度会给出错误的判断。 */
+.card {
+  container-type: inline-size;
+  container-name: card;
+}
+
 .field {
   display: grid;
-  grid-template-columns: 168px 1fr;
+  grid-template-columns: 168px minmax(0, 1fr);
   gap: 4px var(--sp-4);
   align-items: center;
   padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: var(--line-w) solid var(--line);
   font-size: var(--fs-sub);
 }
 .field:last-child {
@@ -1155,11 +1559,27 @@ code {
   color: var(--warning);
 }
 
+/* 卡片窄了就改成上下排 —— 这是"设置面板跟着自己的宽度走" */
+@container card (max-width: 520px) {
+  .field {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 6px;
+  }
+  .field .hint {
+    grid-column: 1;
+  }
+  .select {
+    width: 100%;
+  }
+}
+
 /* ---------- 关于 ---------- */
 .about-head {
   display: flex;
   align-items: center;
   gap: var(--sp-4);
+  flex-wrap: wrap;
 }
 .about-head img {
   border-radius: var(--radius-lg);
@@ -1171,6 +1591,157 @@ code {
   font-size: 19px;
   letter-spacing: 0.03em;
   margin-bottom: 4px;
+}
+
+/* ---------- 链接 ---------- */
+.link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+.link:hover {
+  border-bottom-color: var(--accent);
+}
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* ============================================================
+   自适应：五档宽度
+   ============================================================
+   统一在这里改，不要在组件里各写各的 max-width —— 那会出现
+   "侧栏是桌面态、内容是窄屏态"的混合态。
+   ============================================================ */
+
+/* Wide ≥1440：最舒展 */
+@media (min-width: 1440px) {
+  .app {
+    --sidebar-w: 232px;
+  }
+  .notes {
+    --list-w: 300px;
+  }
+}
+
+/* Regular 1024–1439：默认档 */
+@media (min-width: 1024px) and (max-width: 1439px) {
+  .notes {
+    --list-w: 264px;
+  }
+}
+
+/* Compact 720–1023：侧栏收成图标条，两栏仍保留 */
+@media (min-width: 720px) and (max-width: 1023px) {
+  .app {
+    --sidebar-w: 62px;
+  }
+  .brand-text,
+  .nav-item span,
+  .sidebar-foot {
+    display: none;
+  }
+  .brand,
+  .nav-item {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .notes {
+    --list-w: 220px;
+  }
+  .content,
+  .topbar {
+    padding-left: var(--sp-4);
+    padding-right: var(--sp-4);
+  }
+}
+
+/* Narrow 560–719：侧栏变成覆盖式抽屉，笔记改成单栏（列表 ⇄ 编辑） */
+@media (max-width: 719px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 244px;
+    z-index: 30;
+    transform: translateX(-100%);
+    /* 抽屉用 transform 滑入（合成层），不动宽度 */
+    transition: transform var(--dur-normal) var(--ease-glide);
+    box-shadow: var(--shadow-2);
+  }
+  [data-sidebar="open"] .sidebar {
+    transform: none;
+  }
+  .brand-text,
+  .nav-item span,
+  .sidebar-foot {
+    display: revert;
+  }
+  .brand,
+  .nav-item {
+    justify-content: flex-start;
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
+  }
+  .notes {
+    grid-template-columns: 1fr;
+    height: 100%;
+  }
+  /* 单栏：一次只显示列表或编辑区 */
+  .notes[data-pane="list"] .editor {
+    display: none;
+  }
+  .notes[data-pane="editor"] .note-col {
+    display: none;
+  }
+  .pane-back {
+    display: inline-flex;
+  }
+  .content,
+  .topbar {
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
+  }
+  .search {
+    width: clamp(110px, 30vw, 160px);
+  }
+  .search:focus-within {
+    width: clamp(140px, 46vw, 240px);
+  }
+  .topbar h1 {
+    font-size: var(--fs-group);
+  }
+  .card {
+    padding: var(--sp-4);
+  }
+}
+
+/* Minimal <560：再紧一档 */
+@media (max-width: 559px) {
+  .content {
+    padding: var(--sp-3);
+  }
+  .notes {
+    gap: var(--sp-3);
+  }
+  /* 工具栏文字降级为图标：先把"删除"收成图标，"新建"保留文字 */
+  #btn-delete-note {
+    padding: 7px 9px;
+    font-size: 0;
+    gap: 0;
+  }
+  #btn-delete-note::before {
+    content: "×";
+    font-size: 16px;
+    line-height: 1;
+  }
 }
 
 /* ============================================================
@@ -1186,20 +1757,5 @@ code {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
     transition-duration: 1ms !important;
-  }
-}
-
-/* 窗口很窄时收起侧边栏文字，避免挤压主区 */
-@media (max-width: 900px) {
-  .app {
-    grid-template-columns: 64px 1fr;
-  }
-  .brand-text,
-  .nav-item span,
-  .sidebar-foot {
-    display: none;
-  }
-  .nav-item {
-    justify-content: center;
   }
 }

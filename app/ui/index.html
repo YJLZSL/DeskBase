@@ -40,6 +40,13 @@
       <circle cx="9" cy="9" r="5.2"/>
       <path d="M12.9 12.9 17 17"/>
     </symbol>
+    <symbol id="i-panel" viewBox="0 0 20 20">
+      <rect x="2.6" y="3.4" width="14.8" height="13.2" rx="2.2"/>
+      <path d="M7.6 3.6v12.8"/>
+    </symbol>
+    <symbol id="i-back" viewBox="0 0 20 20">
+      <path d="M12.4 5.2 7 10l5.4 4.8"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -53,10 +60,10 @@
 
     <nav class="nav" id="nav">
       <div class="nav-pill" id="nav-pill" aria-hidden="true"></div>
-      <button class="nav-item" data-target="workbench"><svg class="ico"><use href="#i-bench"/></svg><span>工作台</span></button>
-      <button class="nav-item" data-target="notes" aria-current="true"><svg class="ico"><use href="#i-note"/></svg><span>笔记</span></button>
-      <button class="nav-item" data-target="database"><svg class="ico"><use href="#i-db"/></svg><span>数据库</span></button>
-      <button class="nav-item" data-target="settings"><svg class="ico"><use href="#i-gear"/></svg><span>设置</span></button>
+      <button class="nav-item" data-target="workbench" data-label="工作台"><svg class="ico"><use href="#i-bench"/></svg><span>工作台</span></button>
+      <button class="nav-item" data-target="notes" data-label="笔记" aria-current="true"><svg class="ico"><use href="#i-note"/></svg><span>笔记</span></button>
+      <button class="nav-item" data-target="database" data-label="数据库"><svg class="ico"><use href="#i-db"/></svg><span>数据库</span></button>
+      <button class="nav-item" data-target="settings" data-label="设置"><svg class="ico"><use href="#i-gear"/></svg><span>设置</span></button>
     </nav>
 
     <div class="sidebar-foot">
@@ -70,6 +77,10 @@
   <!-- ================= 主区 ================= -->
   <main class="main">
     <header class="topbar">
+      <button class="btn btn-ghost icon-only" id="btn-sidebar"
+              aria-label="收起侧栏" title="收起侧栏">
+        <svg class="ico"><use href="#i-panel"/></svg>
+      </button>
       <h1 id="page-title">笔记</h1>
       <div class="spacer"></div>
       <label class="search" id="search-wrap">
@@ -97,7 +108,7 @@
 
       <!-- ---------- 笔记 ---------- -->
       <section class="view" data-view="notes" data-active="true">
-        <div class="notes">
+        <div class="notes" id="notes" data-pane="list">
           <div class="note-col">
             <div class="filters" id="filters" role="tablist">
               <div class="filter-pill" id="filter-pill" aria-hidden="true"></div>
@@ -106,6 +117,10 @@
           </div>
           <div class="editor">
             <div class="editor-head">
+              <button class="btn btn-ghost icon-only pane-back" id="btn-pane-back"
+                      aria-label="返回列表" title="返回列表">
+                <svg class="ico"><use href="#i-back"/></svg>
+              </button>
               <input class="title-input" id="note-title" placeholder="标题" />
             </div>
             <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。"></textarea>
@@ -144,22 +159,29 @@
                 <optgroup label="跟随系统">
                   <option value="auto">跟随系统（亮 / 暗自动切换）</option>
                 </optgroup>
-                <optgroup label="浅色">
-                  <option value="xuan">宣纸</option>
-                  <option value="qingci">青瓷</option>
-                  <option value="zhuqing">竹青</option>
-                  <option value="zhumo">朱墨</option>
-                  <option value="hc-light">高对比亮</option>
+                <optgroup label="内容优先">
+                  <option value="xuan">宣纸 · 纸底墨字，默认</option>
+                  <option value="shuye">书页 · 宋体正文，行距舒展</option>
+                  <option value="yemo">夜墨 · 宣纸的暗色</option>
                 </optgroup>
-                <optgroup label="深色">
-                  <option value="yemo">夜墨</option>
-                  <option value="songyan">松烟</option>
-                  <option value="xuantie">玄铁</option>
+                <optgroup label="中性 / 专业">
+                  <option value="paper">纸白 · 白底细线，层次靠边框</option>
+                  <option value="indigo">靛蓝 · 直角密排，数据优先</option>
+                  <option value="graphite">石墨 · 上者的暗色</option>
+                </optgroup>
+                <optgroup label="技术 / 极值">
+                  <option value="console">控制台 · 近黑底，单一强调色</option>
+                  <option value="terminal">终端 · 全等宽，直角无阴影</option>
+                  <option value="hc-light">高对比亮</option>
                   <option value="hc-dark">高对比暗</option>
+                </optgroup>
+                <optgroup label="表现型">
+                  <option value="brutal">粗野 · 粗描边硬阴影</option>
                 </optgroup>
               </select>
               <div class="hint" id="theme-hint">
-                共 9 个内置主题。选「跟随系统」会随操作系统的亮暗设置自动切换。
+                11 个内置主题，分成四类。它们不只是换色 —— 圆角、描边、阴影语言、
+                字体、行距与密度都会一起变，所以切换时是整个界面气质的改变。
               </div>
             </div>
 
@@ -220,12 +242,56 @@
                 </dl>
               </div>
             </div>
-            <dl class="kv" style="margin-top:var(--sp-4)">
-              <dt>数据位置</dt><dd id="about-datadir-2">—</dd>
-            </dl>
-            <p class="muted" style="margin:var(--sp-3) 0 0">
-              默认不联网、无遥测、无账号。数据全部存在你的电脑上。
-            </p>
+
+            <div class="field" style="margin-top:var(--sp-3)">
+              <span>仓库地址</span>
+              <div class="link-row">
+                <a class="link" id="repo-link" href="#" role="button">—</a>
+                <span class="badge" id="repo-tbd" hidden>待确认</span>
+              </div>
+              <div class="hint" id="repo-hint">源码、Issue 与发布说明都在这里。</div>
+            </div>
+
+            <div class="field">
+              <span>文档 / 隐私说明</span>
+              <div class="link-row">
+                <a class="link" id="docs-link" href="#" role="button">docs/ 目录</a>
+              </div>
+              <div class="hint">隐私承诺、性能指标、安装卸载设计的原文都在仓库的 docs/ 下。</div>
+            </div>
+
+            <div class="field">
+              <span>数据位置</span>
+              <span class="mono" id="about-datadir-2" style="color:var(--ink-2);font-size:var(--fs-aux)">—</span>
+              <div class="hint">你的全部数据都在这个目录里，删掉即彻底清除。</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>更新</h3>
+            <div class="field">
+              <span>当前版本</span>
+              <span class="mono" id="update-current">—</span>
+              <div class="hint">版本号形如 <code>0.1.0-alpha.1</code>。</div>
+            </div>
+            <div class="field">
+              <span>检查更新</span>
+              <div class="link-row">
+                <button class="btn" id="btn-check-update">打开发布页</button>
+              </div>
+              <div class="hint" id="update-hint">
+                <b>本程序不会自己联网检查更新</b>，这是刻意的：网络默认关闭是产品承诺之一。
+                点这个按钮会用你的系统浏览器打开项目的发布页，由浏览器去取 ——
+                程序本身不发出任何请求。每次打开都会记进审计日志。
+              </div>
+            </div>
+            <div class="field">
+              <span>审计日志</span>
+              <span class="mono" id="audit-count" style="color:var(--ink-2);font-size:var(--fs-aux)">—</span>
+              <div class="hint">
+                全部出站尝试都会记录（包括被拒绝的）。日志就在数据目录的 logs/ 下。
+              </div>
+            </div>
           </div>
         </div>
       </section>

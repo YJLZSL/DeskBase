@@ -24,6 +24,7 @@ const { spawnSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..', '..');
 const BRAND = path.join(ROOT, 'app', 'ui', 'brand');
 const SVG_SRC = path.join(BRAND, 'icon.svg');
+const SVG_SMALL_SRC = path.join(BRAND, 'icon-small.svg');
 const EXE = path.join(ROOT, 'app', 'target', 'release', 'deskbase.exe');
 const NODE = process.execPath;
 
@@ -31,6 +32,12 @@ const NODE = process.execPath;
 const ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 /** 额外单独出的 PNG */
 const PNG_SIZES = [16, 24, 32, 48, 64, 128, 256, 512];
+/**
+ * 小尺寸与大尺寸的分界。≤ 这个值用 `icon-small.svg`（单独绘制的一套几何，
+ * 字形更大、圆角更小、底色更深），> 这个值用 `icon.svg`。
+ * 两个文件都要改的话记得两套一起看 —— 见 app/src/render.rs 的 VARIANTS。
+ */
+const SMALL_MAX = 32;
 
 // ============================================================
 // 最小 PNG 解码器（8 位，colorType 2/6，非隔行）
@@ -197,7 +204,9 @@ function packIco(entries) {
 function main() {
   const argv = process.argv.slice(2);
   const svg = fs.readFileSync(SVG_SRC, 'utf8');
-  console.log('源文件 app/ui/brand/icon.svg  ' + svg.length + ' 字节');
+  const svgSmall = fs.readFileSync(SVG_SMALL_SRC, 'utf8');
+  console.log('源文件 app/ui/brand/icon.svg        ' + svg.length + ' 字节（≥' + (SMALL_MAX + 1) + 'px）');
+  console.log('源文件 app/ui/brand/icon-small.svg  ' + svgSmall.length + ' 字节（≤' + SMALL_MAX + 'px）');
 
   if (argv.includes('--check')) {
     let bad = 0;
@@ -252,12 +261,17 @@ function main() {
     process.exit(1);
   }
 
-  // 收产物、校验、打包
+  // 收产物、校验、打包。每个尺寸选它该用的那套几何。
   let failed = 0;
   const rendered = new Map();
   for (const size of [...new Set([...ICO_SIZES, ...PNG_SIZES])].sort((a, b) => a - b)) {
-    const src = path.join(tmpDir, `icon-${size}.png`);
-    if (!fs.existsSync(src)) { console.log(`  ✗ ${size}px 没有产出`); failed++; continue; }
+    const prefix = size <= SMALL_MAX ? 'icon-small' : 'icon';
+    const src = path.join(tmpDir, `${prefix}-${size}.png`);
+    if (!fs.existsSync(src)) {
+      console.log(`  ✗ ${size}px 没有产出（${prefix}）`);
+      failed++;
+      continue;
+    }
     const img = decodePng(fs.readFileSync(src));
     if (img.width !== size || img.height !== size) {
       console.log(`  ✗ ${size}px 尺寸不对：${img.width}×${img.height}`);
@@ -275,7 +289,7 @@ function main() {
     if (PNG_SIZES.includes(size)) {
       fs.writeFileSync(path.join(BRAND, `icon-${size}.png`), fs.readFileSync(src));
     }
-    console.log(`  ${String(size).padStart(3)}px  ✔`);
+    console.log(`  ${String(size).padStart(3)}px  ✔  ${prefix}`);
   }
   if (failed) {
     console.error(`\n✗ ${failed} 个尺寸有问题，未打包`);

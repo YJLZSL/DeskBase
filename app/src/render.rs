@@ -52,9 +52,13 @@ const PAGE: &str = r#"<!DOCTYPE html>
 <script>
 (function () {
   var SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256, 512];
-  var SVG = {{SVG}};
+  /* 两套几何：小尺寸用单独绘制的一版（见 icon-small.svg 的说明）。
+     这里把两套都渲染出来，交给 tools/icon 去挑，顺便能出对比图。 */
+  var VARIANTS = [
+    { prefix: 'icon',       svg: {{SVG}} },
+    { prefix: 'icon-small', svg: {{SVG_SMALL}} }
+  ];
   var GLYPH = '库';
-  var FONT = '400 286px "Smiley Sans Oblique"';
   var FONT_URL = 'url(data:font/woff2;base64,{{FONT}}) format("woff2")';
 
   function post(cmd, args) {
@@ -74,40 +78,53 @@ const PAGE: &str = r#"<!DOCTYPE html>
     for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
     return btoa(s);
   }
-  function sealScale(size) { return size <= 24 ? 1.38 : 1; }
 
-  /* 按 SVG 里 <g id="db-seal"> 的 transform 逐条复刻，顺序必须一致：
-       translate(512 508) scale(sc) translate(-512 -508) rotate(-3 512 508)  */
-  function drawGlyph(ctx, sc) {
-    ctx.save();
-    ctx.translate(512, 508);
-    ctx.scale(sc, sc);
-    ctx.translate(-512, -508);
-    ctx.translate(512, 508);
-    ctx.rotate(-3 * Math.PI / 180);
-    ctx.translate(-512, -508);
-    ctx.font = FONT;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#FFFDF8';
-    ctx.fillText(GLYPH, 512, 516);
-    ctx.restore();
+  /* 字形的位置/字号/颜色从 SVG 里读 —— 改 icon.svg 不用动 Rust。
+     约定：<text id="db-glyph" x=".." y=".." font-size=".." fill="..">，属性顺序任意。 */
+  function glyphSpec(svg) {
+    var tag = /<text id="db-glyph"[^>]*>/.exec(svg);
+    if (!tag) return null;
+    function attr(n) {
+      var m = new RegExp('\\b' + n + '="([^"]+)"').exec(tag[0]);
+      return m ? m[1] : null;
+    }
+    var x = parseFloat(attr('x')), y = parseFloat(attr('y')), fs = parseFloat(attr('font-size'));
+    if (isNaN(x) || isNaN(y) || isNaN(fs)) return null;
+    return { x: x, y: y, size: fs, color: attr('fill') || '#FFFDF8' };
   }
 
-  async function render(size) {
-    var sc = sealScale(size);
-    // 摘掉 <text>：SVG 当图片渲染时不加载外部字体，留着会画成回退字形
-    var svg = SVG.replace(/<text id="db-glyph"[\s\S]*?<\/text>/, '');
-    if (svg === SVG) throw new Error('icon.svg 里找不到 <text id="db-glyph">，无法摘除');
-    var marker = 'id="db-seal" transform="rotate(-3 512 508)"';
-    if (sc !== 1) {
-      if (svg.indexOf(marker) < 0) throw new Error('icon.svg 里找不到 db-seal 的 transform 标记');
-      svg = svg.replace(marker,
-        'id="db-seal" transform="translate(512 508) scale(' + sc + ') translate(-512 -508) rotate(-3 512 508)"');
+  /* 按 SVG 里 <g id="db-seal"> 的 transform 复刻旋转。
+     约定：印面绕 (512,508) 旋转 -3°；没有该分组时不旋转。 */
+  function drawGlyph(ctx, spec, rotated) {
+    if (rotated) {
+      ctx.transform(1, 0, 0, 1, 512, 508);
+      ctx.transform(1, 0, 0, 1, -512, -508);
+      ctx.rotate(-3 * Math.PI / 180);
+      ctx.transform(1, 0, 0, 1, 512, 508);
+      ctx.transform(1, 0, 0, 1, -512, -508);
     }
+    ctx.font = '400 ' + spec.size + 'px "Smiley Sans Oblique"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = spec.color;
+    ctx.fillText(GLYPH, spec.x, spec.y);
+  }
 
+  function build(variant) {
+    var svg = variant.svg;
+    var spec = glyphSpec(svg);
+    if (svg.indexOf('id="db-glyph"') >= 0 && !spec) {
+      throw new Error(variant.prefix + '：有 db-glyph 但读不到 x / y / font-size');
+    }
+    var rotated = svg.indexOf('db-seal') >= 0;
+    // 摘掉 <text>：SVG 当图片渲染时不加载外部字体，留着会画成回退字形
+    var clean = svg.replace(/<text id="db-glyph"[\s\S]*?<\/text>/, '');
+    return { prefix: variant.prefix, clean: clean, spec: spec, rotated: rotated };
+  }
+
+  async function renderOne(v, size) {
     var img = new Image();
-    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(v.clean);
     await img.decode();
 
     var S = size / 1024;
@@ -117,34 +134,206 @@ const PAGE: &str = r#"<!DOCTYPE html>
     ctx.setTransform(S, 0, 0, S, 0, 0);   // 之后坐标即 SVG 的 1024 空间
     ctx.clearRect(0, 0, 1024, 1024);
     ctx.drawImage(img, 0, 0, 1024, 1024);
-    drawGlyph(ctx, sc);
+    if (v.spec) drawGlyph(ctx, v.spec, v.rotated);
 
     var px = ctx.getImageData(0, 0, size, size).data;
     function alpha(x, y) { return px[(y * size + x) * 4 + 3]; }
     var corners = [alpha(0, 0), alpha(size - 1, 0), alpha(0, size - 1), alpha(size - 1, size - 1)];
     if (corners.some(function (a) { return a > 8; })) {
-      throw new Error(size + 'px 四角不透明（' + corners.join(',') + '）：背景没透明');
+      throw new Error(v.prefix + ' ' + size + 'px 四角不透明（' + corners.join(',') + '）：背景没透明');
     }
-
-    post('render.save', { name: 'icon-' + size + '.png', data: cv.toDataURL('image/png') });
-    if (size === 256) post('render.save', { name: 'icon-rgba-256.bin', data: bytesToBase64(px) });
-    say('  ' + size + 'px  ok');
+    post('render.save', { name: v.prefix + '-' + size + '.png', data: cv.toDataURL('image/png') });
+    if (size === 256 && v.prefix === 'icon') {
+      post('render.save', { name: 'icon-rgba-256.bin', data: bytesToBase64(px) });
+    }
   }
 
   (async function () {
     try {
       say('脚本已启动');
       document.fonts.add(new FontFace('Smiley Sans Oblique', FONT_URL, { weight: '400' }));
-      say('FontFace 已注册，开始加载');
-      await document.fonts.load(FONT, GLYPH);
-      if (!document.fonts.check(FONT, GLYPH)) throw new Error('得意黑没加载成功，印文会不对');
+      await document.fonts.load('400 286px "Smiley Sans Oblique"', GLYPH);
+      if (!document.fonts.check('400 286px "Smiley Sans Oblique"', GLYPH)) {
+        throw new Error('得意黑没加载成功，印文会不对');
+      }
       say('字体就绪');
-      for (var i = 0; i < SIZES.length; i++) await render(SIZES[i]);
-      say('全部完成，共 ' + (SIZES.length + 1) + ' 个文件');
+      var built = VARIANTS.map(build);
+      for (var vi = 0; vi < built.length; vi++) {
+        for (var si = 0; si < SIZES.length; si++) {
+          await renderOne(built[vi], SIZES[si]);
+        }
+        say('  ' + built[vi].prefix + ' 已渲染 ' + SIZES.length + ' 档');
+      }
+      say('全部完成');
       post('render.done');
     } catch (e) {
       post('render.fail', { error: String((e && e.message) || e) });
     }
+  })();
+})();
+</script></body></html>
+"#;
+
+/// 设计对比用页面（`DESKBASE_RENDER_LAB=<目录>` 时走这条）。
+///
+/// 把目录下所有 .svg 按多档尺寸渲染到亮/暗两种背景上，拼成一张对照表。
+/// 用途：图标改版时一次看清"哪个方案在 16px 下还站得住"。
+const PAGE_LAB: &str = r#"<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>icon lab</title>
+<style>html,body{margin:0;background:#8a8a8a;font:12px monospace;color:#111}</style>
+</head><body><pre id="log" style="margin:6px"></pre>
+<script>
+(function () {
+  var CANDS = {{CANDS}};                 // [{name, svg}]
+  var SIZES = [16, 20, 24, 32, 48, 64, 128, 256];
+  var GLYPH = '库';
+  var FONT = '400 286px "Smiley Sans Oblique"';
+  var FONT_URL = 'url(data:font/woff2;base64,{{FONT}}) format("woff2")';
+  var PAD = 16, ROWLABEL = 132;
+
+  function post(cmd, args) {
+    try { window.ipc.postMessage(JSON.stringify({ cmd: cmd, args: args || {} })); } catch (e) {}
+  }
+  function say(s) {
+    document.getElementById('log').textContent += s + "\n";
+    post('render.log', { msg: String(s) });
+  }
+  window.onerror = function (m, src, l) { post('render.fail', { error: 'onerror: ' + m + ' @' + l }); };
+
+  function stripGlyph(svg) {
+    return svg.replace(/<text id="db-glyph"[\s\S]*?<\/text>/, '');
+  }
+  /* 字形的位置与字号从 SVG 里读 —— 改 icon.svg 不需要动 Rust。
+     写法约定：<text id="db-glyph" x=".." y=".." font-size="..">（属性顺序任意） */
+  function glyphSpec(svg) {
+    var tag = /<text id="db-glyph"[^>]*>/.exec(svg);
+    if (!tag) return null;
+    function attr(n) {
+      var m = new RegExp('\\b' + n + '="([-\\d.]+)"').exec(tag[0]);
+      return m ? parseFloat(m[1]) : null;
+    }
+    var x = attr('x'), y = attr('y'), fs = attr('font-size');
+    if (x === null || y === null || fs === null) return null;
+    return { x: x, y: y, size: fs };
+  }
+
+  var GS = glyphSpec(SVG);
+  if (SVG.indexOf('id="db-glyph"') >= 0 && !GS) {
+    throw new Error('icon.svg 里有 db-glyph 但读不到 x / y / font-size');
+  }
+  var GLYPH_COLOR = (function () {
+    var m = /<text id="db-glyph"[^>]*fill="([^"]+)"/.exec(SVG);
+    return m ? m[1] : '#FFFDF8';
+  })();
+
+  /* 按 SVG 里 <g id="db-seal"> 的 transform 逐条复刻。
+     约定：印面整体绕 (512,508) 旋转 -3°，字形用 SVG 里声明的 x/y/font-size。
+     没有 db-seal 分组时（满版底那类设计）就直接按原点画。 */
+  function drawGlyph(ctx) {
+    if (!GS) return;
+    var hasSeal = SVG.indexOf('db-seal') >= 0;
+    if (hasSeal) {
+      ctx.transform(1, 0, 0, 1, 512, 508);
+      ctx.transform(1, 0, 0, 1, -512, -508);
+      ctx.rotate(-3 * Math.PI / 180);
+      ctx.transform(1, 0, 0, 1, 512, 508);
+      ctx.transform(1, 0, 0, 1, -512, -508);
+    }
+    ctx.font = '400 ' + GS.size + 'px "Smiley Sans Oblique"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GLYPH_COLOR;
+    ctx.fillText(GLYPH, GS.x, GS.y);
+  }
+
+  // 把某个 candidate 渲染成一张 size×size 的离屏 canvas
+  function raster(cand, size, glyphScale) {
+    return new Promise(async function (resolve) {
+      var src = stripGlyph(cand.svg);
+      if (glyphScale && glyphScale !== 1 && src.indexOf('db-seal') < 0) {
+        // 没有印面分组就没法做小尺寸补偿，原样渲染
+      }
+      var img = new Image();
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(src);
+      await img.decode();
+      var cv = document.createElement('canvas');
+      cv.width = cv.height = size;
+      var ctx = cv.getContext('2d');
+      var S = size / 1024;
+      ctx.setTransform(S, 0, 0, S, 0, 0);
+      ctx.drawImage(img, 0, 0, 1024, 1024);
+      if (hasGlyph(cand.svg)) drawGlyph(ctx);
+      resolve(cv);
+    });
+  }
+
+  function blit(dst, src, x, y) {
+    dst.getContext('2d').drawImage(src, x, y);
+  }
+
+  async function main() {
+    document.fonts.add(new FontFace('Smiley Sans Oblique', FONT_URL, { weight: '400' }));
+    await document.fonts.load(FONT, GLYPH);
+    say('字体就绪，候选 ' + CANDS.length + ' 个');
+
+    var cache = {};                      // key -> canvas
+    for (var ci = 0; ci < CANDS.length; ci++) {
+      for (var si = 0; si < SIZES.length; si++) {
+        var size = SIZES[si];
+        cache[ci + ':' + size] = await raster(CANDS[ci], size, 1);
+        cache[ci + ':' + size + ':4'] = await raster(CANDS[ci], size * 4, 1);
+      }
+      say('  已渲染 ' + CANDS[ci].name);
+    }
+
+    // 布局：每个候选两块（亮底 / 暗底）；块内先 1:1 一行，再 4× 一行
+    var CELL = 300;
+    var rowsPerCand = 4;
+    var W = ROWLABEL + SIZES.length * CELL + PAD * 2;
+    var H = PAD * 2 + CANDS.length * (rowsPerCand * 210 + 40);
+    var sheet = document.createElement('canvas');
+    sheet.width = W; sheet.height = H;
+    var g = sheet.getContext('2d');
+    g.fillStyle = '#8a8a8a';
+    g.fillRect(0, 0, W, H);
+
+    var y = PAD;
+    for (var c2 = 0; c2 < CANDS.length; c2++) {
+      g.fillStyle = '#111';
+      g.font = 'bold 22px "Microsoft YaHei", sans-serif';
+      g.fillText(CANDS[c2].name, PAD, y + 26);
+      y += 40;
+
+      var bands = [{ bg: '#FCFAF5', dark: false }, { bg: '#1A1917', dark: true }];
+      for (var b = 0; b < bands.length; b++) {
+        g.fillStyle = bands[b].bg;
+        g.fillRect(PAD, y, W - PAD * 2, 210);
+        var x = PAD + ROWLABEL;
+        for (var s2 = 0; s2 < SIZES.length; s2++) {
+          var sz = SIZES[s2];
+          // 1:1 靠底对齐
+          blit(sheet, cache[c2 + ':' + sz], x, y + 200 - sz);
+          // 4× 放上面（256×4 太大，跳过）
+          if (sz * 4 <= 256) blit(sheet, cache[c2 + ':' + sz + ':4'], x, y + 190 - sz * 4 - 8);
+          x += CELL;
+        }
+        g.fillStyle = bands[b].dark ? '#8B857A' : '#837D70';
+        g.font = '16px "Microsoft YaHei", sans-serif';
+        g.fillText(bands[b].dark ? '暗底' : '亮底', PAD + 8, y + 120);
+        g.fillText('1:1 与 4×', PAD + 8, y + 146);
+        y += 210;
+      }
+      y += 20;
+    }
+
+    post('render.save', { name: 'icon-lab.png', data: sheet.toDataURL('image/png') });
+    say('完成');
+    post('render.done');
+  }
+
+  (async function () {
+    try { await main(); }
+    catch (e) { post('render.fail', { error: String((e && e.message) || e) }); }
   })();
 })();
 </script></body></html>
@@ -169,9 +358,40 @@ pub fn run(out_dir: &PathBuf, _data_dir: &Path) -> wry::Result<()> {
     let svg_json = serde_json::to_string(svg).unwrap_or_else(|_| "\"\"".into());
     // 字体编进页面：SVG 当图片渲染时加载不了外部字体，印文得由 canvas 重画
     let font_b64 = b64_encode(include_bytes!("../ui/fonts/smiley-sans-oblique.woff2"));
-    let html = PAGE
-        .replace("{{SVG}}", &svg_json)
-        .replace("{{FONT}}", &font_b64);
+
+    // 设计对比模式：把指定目录下所有 .svg 一起渲染成对照表
+    let html = match std::env::var("DESKBASE_RENDER_LAB") {
+        Ok(lab_dir) => {
+            let mut cands = Vec::new();
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&lab_dir)
+                .map_err(|e| wry::Error::Io(std::io::Error::other(e.to_string())))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().map(|x| x == "svg").unwrap_or(false))
+                .collect();
+            files.sort();
+            for f in files {
+                let name = f
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Ok(text) = std::fs::read_to_string(&f) {
+                    cands.push(serde_json::json!({ "name": name, "svg": text }));
+                }
+            }
+            log_to(out_dir, &format!("对比模式：{} 个候选", cands.len()));
+            PAGE_LAB
+                .replace("{{CANDS}}", &serde_json::Value::Array(cands).to_string())
+                .replace("{{FONT}}", &font_b64)
+        }
+        Err(_) => PAGE
+            .replace("{{SVG}}", &svg_json)
+            .replace(
+                "{{SVG_SMALL}}",
+                &serde_json::to_string(include_str!("../ui/brand/icon-small.svg"))
+                    .unwrap_or_else(|_| "\"\"".into()),
+            )
+            .replace("{{FONT}}", &font_b64),
+    };
     log_to(out_dir, &format!("页面大小 {} 字节（含字体 base64）", html.len()));
 
     let event_loop = EventLoop::new();

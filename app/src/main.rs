@@ -30,6 +30,25 @@ use db::Db;
 /// tools/icon 产出的窗口图标边长（`ui/brand/icon-rgba-256.bin` 是 256×256×4）
 const ICON_SIZE: u32 = 256;
 
+/// 项目仓库地址。**只在这里定义一次**，界面里的链接与「打开发布页」都用它。
+///
+/// 目前仓库还没有配置远端（`git remote -v` 为空），所以这里是一个占位值。
+/// 仓库公开时把这一行改成真实地址即可，界面上的「待确认」标记会自动消失。
+const PROJECT_REPO: &str = "https://github.com/deskbase-app/deskbase";
+
+/// 允许用系统浏览器打开的地址。**白名单是硬编码的，前端改不了。**
+///
+/// 为什么要有白名单：`app.openExternal` 一旦接受任意 URL，被注入的渲染层就能
+/// 拿它当"用系统默认程序打开任意东西"的跳板。这里只放项目自己的几个地址，
+/// 渲染层无论传什么，不在这张表里的都会被拒并记进日志。
+fn allowed_urls() -> Vec<String> {
+    vec![
+        PROJECT_REPO.to_string(),
+        format!("{PROJECT_REPO}/releases"),
+        format!("{PROJECT_REPO}/tree/main/docs"),
+    ]
+}
+
 /// 应用全局状态。IPC 处理器与主线程共享它。
 struct AppState {
     db: Mutex<Db>,
@@ -115,7 +134,10 @@ fn main() -> wry::Result<()> {
         .with_title("DeskBase 桌库")
         .with_window_icon(window_icon)
         .with_inner_size(LogicalSize::new(1180.0, 780.0))
-        .with_min_inner_size(LogicalSize::new(880.0, 600.0))
+        // 最小尺寸必须小到能让窄屏布局真的出现：Windows 的"贴靠布局"里
+        // 三分之一窗宽在 1920 屏上只有 640px。之前设的是 880×600，
+        // 结果 CSS 里 <720 与 <560 两档永远走不到 —— 等于没做自适应。
+        .with_min_inner_size(LogicalSize::new(420.0, 380.0))
         .build(&event_loop)
         .expect("创建窗口失败");
 
@@ -192,8 +214,37 @@ fn dispatch(state: &AppState, req: Request) -> String {
                     "dataDir": state.data_dir.to_string_lossy(),
                     "noteCount": count,
                     "uptimeMs": state.started_at.elapsed().as_millis() as u64,
+                    "repo": PROJECT_REPO,
                 }),
             )
+        }
+
+        // 用系统浏览器打开链接。白名单在 Rust 侧，前端改不了（见 allowed_urls）。
+        // 每一次尝试都记日志 —— 包括被拒绝的，这是 docs/08 的审计要求。
+        "app.openExternal" => {
+            let url = req.args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if !allowed_urls().iter().any(|u| u == url) {
+                let msg = format!("已拒绝打开不在白名单里的地址：{url}");
+                log_line(&state.data_dir, &msg);
+                return err(id, msg);
+            }
+            log_line(&state.data_dir, &format!("用户请求打开外部链接：{url}"));
+            match open_in_browser(url) {
+                Ok(()) => ok(id, serde_json::json!({})),
+                Err(e) => {
+                    log_line(&state.data_dir, &format!("打开失败：{e}"));
+                    err(id, format!("打开失败：{e}"))
+                }
+            }
+        }
+
+        "audit.tail" => {
+            // 给设置页显示的审计摘要：日志文件里"打开外部链接/已拒绝"的行数
+            let log = state.data_dir.join("logs").join("app.log");
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let opened = text.lines().filter(|l| l.contains("请求打开外部链接")).count();
+            let denied = text.lines().filter(|l| l.contains("已拒绝打开")).count();
+            ok(id, serde_json::json!({ "opened": opened, "denied": denied }))
         }
 
         "note.list" => match state.db.lock() {
@@ -268,9 +319,40 @@ fn dispatch(state: &AppState, req: Request) -> String {
     }
 }
 
+/// 用系统默认浏览器打开一个 http(s) 链接。
+///
+/// ⚠️ 这里**不实现**自己在程序内联网 —— 「网络默认关闭」是产品承诺（ADR-0005）。
+/// 由用户的浏览器去取页面，程序的进程不发出任何请求。
+/// 调用方必须先过 `allowed_urls()` 白名单。
+fn open_in_browser(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许 http/https".into());
+    }
+    // 只往命令行里传已经过白名单的常量和拼出来的路径，不接受任意字符串
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(opener)
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// GUI 程序没有控制台，日志写文件，便于排查。
-fn log_line(data_dir: &std::path::Path, msg: &str) {
-    let dir = data_dir.join("logs");
+fn log_line(data_dir: &std::path::Path, msg: &str) {    let dir = data_dir.join("logs");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("app.log");
     let stamp = time::OffsetDateTime::now_utc()
