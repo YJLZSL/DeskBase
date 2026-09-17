@@ -16,6 +16,12 @@ notes/
 *.local.md
 *.private.md
 
+# ---------- 项目本地 agent 数据（个人工作日志，不入库）----------
+# 保留 .workbuddy/ 目录本身（skills 等可共享），但排除个人 memory 与本地覆盖文件
+.workbuddy/memory/
+.workbuddy/*.local.*
+.workbuddy/logs/
+
 # ---------- 构建产物 ----------
 dist/
 build/
