@@ -184,12 +184,14 @@
     store("deskbase.sidebar", now);
     // 侧栏宽度变化会让内容区重排；限定范围，别让整页跟着重算
     app.classList.add("is-animating-layout");
-    root.dataset.sidebar = now;
+    flip(".main", () => {
+      root.dataset.sidebar = now;
+    });
     sidebarBtn.title = now === "rail" ? "展开侧栏" : "收起侧栏";
     setTimeout(() => {
       app.classList.remove("is-animating-layout");
       movePill(document.querySelector('.nav-item[aria-current="true"]'));
-    }, 260);
+    }, 320);
   });
 
   // 点击抽屉外的区域收起抽屉（窄屏）
@@ -225,10 +227,41 @@
     root.dataset.texture = v;
   }, "light");
 
+  /** 动效档位：系统「减少动效」是**封顶**而不是覆盖。
+   *
+   *  之前只在启动时判断一次，而且仅当存的是 "standard" 才降级 —— 存了「丰富」
+   *  的用户开了系统减少动效也照样满屏动。而且系统设置运行中改了不会生效。
+   *  现在：effective = min(用户选择, 精简)（当系统要求减少动效时），
+   *  并且监听系统设置变化。用户的选择不被覆盖，系统设置改回去就恢复。 */
+  const TIERS = ["off", "minimal", "standard", "rich"];
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function effectiveMotion(stored) {
+    if (!reduceMotion.matches) return stored;
+    return TIERS.indexOf(stored) > TIERS.indexOf("minimal") ? "minimal" : stored;
+  }
+
+  function applyMotion(stored) {
+    const eff = effectiveMotion(stored);
+    root.dataset.motion = eff;
+    motionSel.value = eff;
+    const hint = $("#motion-hint");
+    if (hint) {
+      hint.textContent = reduceMotion.matches
+        ? "动效服务于理解，不做循环播放的装饰动画。检测到系统开启了「减少动效」，已封顶为「精简」（你的选择没被改掉，系统设置改回去就恢复）。"
+        : "动效服务于理解，不做循环播放的装饰动画。调到「关」会立刻停掉全部过渡与位移。";
+    }
+  }
+
   const motionSel = bindSelect("#motion-select", "deskbase.motion", (v) => {
-    root.dataset.motion = v;
+    applyMotion(v);
     if (v === "off") toast("动效已关闭");
   }, "standard");
+
+  // 系统设置随时可能变，必须监听（事件驱动，不轮询）
+  reduceMotion.addEventListener("change", () => {
+    applyMotion(store("deskbase.motion") || "standard");
+  });
 
   /** 标题字体：data-heading="serif" 才切回宋体系；默认（得意黑）时去掉属性，
    *  让 CSS 走 :root 的默认值 —— 纯 CSS 变量切换，不重新加载任何资源。 */
@@ -272,11 +305,38 @@
 
   function movePill(btn) {
     if (!btn || !pillEl) return;
-    // 用 transform 移动，不动 top/left —— 只触发合成，不触发重排
+    // 指示块是固定高度（与导航项同高），所以只需要动 translateY —— 不改 height
     const base = navEl.getBoundingClientRect();
     const r = btn.getBoundingClientRect();
-    pillEl.style.height = r.height + "px";
-    pillEl.style.transform = `translateY(${r.top - base.top - 0}px)`;
+    pillEl.style.transform = `translateY(${r.top - base.top}px)`;
+  }
+
+  /**
+   * FLIP：先量位置 → 执行改动 → 再量 → 用 transform 把差值补回去 → 过渡到 0。
+   *
+   * 为什么不直接 transition grid-template-columns：那是布局属性，浏览器每帧
+   * 都要重算几何。FLIP 把"动画"从布局挪到合成层 —— 宽度只瞬间变一次（重排一次），
+   * 之后动的只有 transform。
+   */
+  function flip(target, mutate) {
+    const el = typeof target === "string" ? document.querySelector(target) : target;
+    if (!el) {
+      mutate();
+      return;
+    }
+    const before = el.getBoundingClientRect();
+    mutate();
+    const dx = before.left - el.getBoundingClientRect().left;
+    if (!dx) return;
+    el.style.transition = "none";
+    el.style.transform = `translateX(${dx}px)`;
+    requestAnimationFrame(() => {
+      el.style.transition = `transform var(--dur-normal) var(--ease-glide)`;
+      el.style.transform = "";
+      setTimeout(() => {
+        el.style.transition = "";
+      }, 320);
+    });
   }
 
   function showView(name, opts) {
@@ -346,8 +406,11 @@
     if (!active) return;
     const base = filtersEl.getBoundingClientRect();
     const r = active.getBoundingClientRect();
-    filterPill.style.width = r.width + "px";
-    filterPill.style.transform = `translateX(${r.left - base.left - 3}px)`;
+    // 三个筛选项宽度不同，所以宽度得变 —— 但用 scaleX 而不是 width。
+    // 基准宽度与 theme.css 里 .filter-pill 的 --pill-base 必须一致。
+    const baseW = parseFloat(getComputedStyle(filterPill).getPropertyValue("--pill-base")) || 100;
+    filterPill.style.transform =
+      `translateX(${r.left - base.left - 3}px) scaleX(${(r.width / baseW).toFixed(4)})`;
   }
 
   /** 筛选条只建一次 —— 每次渲染重建会让滑块动画每次都从头开始，还会闪。 */
@@ -606,15 +669,8 @@
     // 质感
     root.dataset.texture = restoreSelect(textureSel, "deskbase.texture", "light");
 
-    // 动效：默认「标准」；若系统要求减少动效，则降级为「精简」并如实显示
-    let mo = restoreSelect(motionSel, "deskbase.motion", "standard");
-    if (mo === "standard" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      mo = "minimal";
-      const hint = $("#motion-hint");
-      if (hint) hint.textContent += "（检测到系统「减少动效」，已自动降为「精简」）";
-    }
-    motionSel.value = mo;
-    root.dataset.motion = mo;
+    // 动效：默认「标准」；系统要求减少动效时封顶为「精简」并如实说明
+    applyMotion(restoreSelect(motionSel, "deskbase.motion", "standard"));
 
     // 标题字体
     applyHeading(restoreSelect(headingSel, "deskbase.heading", "display"));
