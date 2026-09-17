@@ -17,6 +17,7 @@ mod csv_import;
 mod db;
 mod import_pipeline;
 mod render;
+mod schema;
 mod xlsx;
 
 use std::path::PathBuf;
@@ -388,9 +389,19 @@ fn dispatch(state: &AppState, req: Request) -> String {
             if !b("palette") {
                 missing.push("palette");
             }
+            if !b("grid") {
+                missing.push("grid");
+            }
+            if !b("sql") {
+                missing.push("sql");
+            }
+            if !b("dbpage") {
+                missing.push("dbpage");
+            }
             let line = if missing.is_empty() {
                 format!(
-                    "界面自检通过：动效=✓（档位 {}）组件库=✓ 命令面板=✓（{} 条命令）主题={}",
+                    "界面自检通过：动效=✓（档位 {}）组件库=✓ 命令面板=✓（{} 条命令）\
+                     数据网格=✓ SQL编辑器=✓ 数据库页=✓ 主题={}",
                     s("motionTier"),
                     n("commands"),
                     s("theme"),
@@ -705,6 +716,256 @@ fn dispatch(state: &AppState, req: Request) -> String {
             ok(id, serde_json::json!({ "opened": opened, "denied": denied }))
         }
 
+        // ---------- 用户库表（schema.rs）----------
+        // 数据库页的 IPC。表名/字段名的校验与转义全部在 schema 层（标识符
+        // 白名单 + 引号包裹），值一律参数绑定 —— 这一层只做参数搬运与锁管理，
+        // 不拼任何 SQL。接口约定见 schema.rs 头注释：Page.columns[0] 恒为
+        // `_rowid`，rows[i][0] 是行号，界面靠它调 updateCell / deleteRows。
+        "schema.listTables" => match state.db.lock() {
+            Ok(d) => match schema::list_tables(d.conn()) {
+                Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),
+                Err(e) => err(id, e),
+            },
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        "schema.getTable" => {
+            let Some(name) = req.args.get("name").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 name");
+            };
+            match state.db.lock() {
+                Ok(d) => match schema::get_table(d.conn(), name) {
+                    Ok(t) => ok(id, serde_json::to_value(t).unwrap_or_default()),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.columnMeta" => {
+            let Some(name) = req.args.get("name").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 name");
+            };
+            match state.db.lock() {
+                Ok(d) => match schema::column_meta(d.conn(), name) {
+                    Ok(m) => ok(id, serde_json::to_value(m).unwrap_or_default()),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.createTable" => {
+            let parsed = req
+                .args
+                .get("spec")
+                .and_then(|v| serde_json::from_value::<schema::TableSpec>(v.clone()).ok());
+            let Some(spec) = parsed else {
+                return err(id, "建表参数不完整或格式不对");
+            };
+            match state.db.lock() {
+                Ok(d) => match schema::create_table(d.conn(), &spec) {
+                    Ok(()) => {
+                        // 日志记表名不记内容 —— 表名会出现在界面上，不算业务数据
+                        log_line(&state.data_dir, &format!("新建库表「{}」", spec.name));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.dropTable" => {
+            let name = req.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let confirm = req
+                .args
+                .get("confirmName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                return err(id, "缺少参数 name");
+            }
+            match state.db.lock() {
+                Ok(d) => match schema::drop_table(d.conn(), name, confirm) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("删除库表「{name}」"));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.pageRows" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let order_by = req.args.get("orderBy").and_then(|v| v.as_str());
+            let desc = req
+                .args
+                .get("desc")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let cursor = req.args.get("cursor").and_then(|v| v.as_str());
+            let limit = req
+                .args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200)
+                .min(schema::MAX_PAGE_LIMIT as u64) as usize;
+            // 筛选条件：{列名: 关键词} 或 [[列名, 关键词], …]，两种都收
+            let filters: Vec<(String, String)> = match req.args.get("filters") {
+                Some(serde_json::Value::Object(m)) => m
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect(),
+                Some(serde_json::Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|p| p.as_array().map(|kv| (kv, kv)))
+                    .filter_map(|(a, b)| {
+                        Some((
+                            a.first()?.as_str()?.to_string(),
+                            b.get(1)?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            match state.db.lock() {
+                Ok(d) => {
+                    let page = if filters.is_empty() {
+                        schema::page_rows(d.conn(), table, order_by, desc, cursor, limit)
+                    } else {
+                        schema::page_rows_filtered(
+                            d.conn(),
+                            table,
+                            order_by,
+                            desc,
+                            cursor,
+                            limit,
+                            &filters,
+                        )
+                    };
+                    match page {
+                        Ok(p) => ok(id, serde_json::to_value(p).unwrap_or_default()),
+                        Err(e) => err(id, e),
+                    }
+                }
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.updateCell" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let Some(rowid) = req.args.get("rowid").and_then(|v| v.as_i64()) else {
+                return err(id, "缺少参数 rowid（数据行的行号）");
+            };
+            let Some(column) = req.args.get("column").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 column");
+            };
+            let value = json_to_cell(req.args.get("value").unwrap_or(&serde_json::Value::Null));
+            match state.db.lock() {
+                Ok(d) => match schema::update_cell(d.conn(), table, rowid, column, value.as_deref())
+                {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.deleteRows" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let rowids: Vec<i64> = req
+                .args
+                .get("rowids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+                .unwrap_or_default();
+            match state.db.lock() {
+                Ok(d) => match schema::delete_rows(d.conn(), table, &rowids) {
+                    Ok(n) => ok(id, serde_json::json!({ "deleted": n })),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.insertRows" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let columns: Vec<String> = req
+                .args
+                .get("columns")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let rows: Vec<Vec<String>> = req
+                .args
+                .get("rows")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            // insert_rows 要求 &mut Connection（事务 API 的需要），见 db.rs::conn_mut
+            match state.db.lock() {
+                Ok(mut d) => match schema::insert_rows(d.conn_mut(), table, &columns, &rows) {
+                    Ok(n) => ok(id, serde_json::json!({ "inserted": n })),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.runQuery" => {
+            let Some(sql) = req.args.get("sql").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 sql");
+            };
+            let max_rows = req
+                .args
+                .get("maxRows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5000)
+                .clamp(1, 100_000) as usize;
+            let confirmed = req
+                .args
+                .get("confirmed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            // **策略层闸门**（交接清单点名要做的那一层）：危险语句必须带着
+            // 显式确认回来才执行。sql.js 自己的粗判只覆盖它认得出的情形；
+            // 这一道在 IPC 边界上再拦一次，漏网的（WHERE 藏在子查询里、
+            // 前端粗判被绕过）在这里被接住。确认对话由前端拿 needsConfirm 弹出。
+            if !confirmed {
+                if let Some(reason) = schema::needs_confirm(sql) {
+                    return ok(id, serde_json::json!({ "needsConfirm": reason }));
+                }
+            }
+
+            match state.db.lock() {
+                Ok(d) => match schema::run_query(d.conn(), sql, max_rows) {
+                    Ok(r) => {
+                        // 不记录 SQL 内容（docs/06 §9.3：查询日志默认关闭）；
+                        // 只记"发生过写"这个事实，供审计页计数。
+                        if confirmed || r.affected > 0 {
+                            log_line(
+                                &state.data_dir,
+                                &format!("SQL 编辑器执行了写操作，影响 {} 行", r.affected),
+                            );
+                        }
+                        ok(id, serde_json::to_value(r).unwrap_or_default())
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "note.list" => match state.db.lock() {
             Ok(d) => match d.list_notes() {
                 Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),
@@ -881,6 +1142,21 @@ fn take_plan(id: &str) -> Option<convert::ConversionPlan> {
         return None;
     }
     plan_store().lock().ok().and_then(|mut m| m.remove(id))
+}
+
+/// IPC 上来的单元格值 → schema 层的 `Option<&str>` 语义。
+///
+/// `None` = NULL（"没填"）；字符串原样；数字/布尔转成文本后交给
+/// schema 层按列的语义类型强转（money 按分、布尔收 1/0）。
+/// JSON 的 `null` 与缺省都走 NULL —— 界面上"设为 NULL"按钮靠它生效。
+fn json_to_cell(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Some(v.to_string()),
+    }
 }
 
 /// UTC 毫秒 → 本地可读时间。存的是 UTC（项目约定），显示用本地。

@@ -9,10 +9,12 @@
 <link rel="stylesheet" href="theme.css" />
 <!-- motion.css 只声明三条 linear() 弹簧曲线，不写任何 transition；
      components.css / palette.css 是自包含组件的样式。
-     三者的选择器都带自己的前缀或属性作用域，顺序不影响结果。 -->
+     database.css 是数据库页的布局外壳。
+     四者的选择器都带自己的前缀或属性作用域，顺序不影响结果。 -->
 <link rel="stylesheet" href="motion.css" />
 <link rel="stylesheet" href="components.css" />
 <link rel="stylesheet" href="palette.css" />
+<link rel="stylesheet" href="database.css" />
 <link rel="icon" href="brand/icon-64.png" />
 </head>
 <body>
@@ -135,20 +137,34 @@
       </section>
 
       <!-- ---------- 数据库 ---------- -->
+      <!-- 页面外壳只是容器：表列表、数据网格（DeskBaseGrid）与 SQL 编辑器
+           （DeskBaseSql）都由 db.js 在运行时挂进来。 -->
       <section class="view" data-view="database">
-        <div class="stack">
-          <div class="card">
-            <h3>数据库</h3>
-            <p class="muted">
-              存储引擎已经就绪（单文件 SQLite，WAL + 每次提交 fsync）。
-              「笔记」模块就是它的第一个使用者。可视化建表、查询向导等尚未实现。
-            </p>
-            <dl class="kv">
-              <dt>引擎</dt><dd>SQLite（bundled，自带源码编译）</dd>
-              <dt>持久性</dt><dd>WAL + synchronous=FULL</dd>
-              <dt>数据文件</dt><dd id="about-datadir">—</dd>
-              <dt>现有笔记</dt><dd id="about-count">—</dd>
-            </dl>
+        <div class="dbwrap" id="db-wrap">
+          <aside class="db-side">
+            <div class="db-side-head">
+              <span class="db-side-title">库表</span>
+              <button class="btn btn-ghost db-mini" id="btn-db-refresh" title="刷新表列表" type="button">刷新</button>
+            </div>
+            <button class="btn db-newtable" id="btn-db-new-table" type="button">新建表</button>
+            <div class="db-table-list" id="db-table-list"></div>
+            <div class="db-side-foot">
+              <div class="db-foot-line">数据目录</div>
+              <div class="db-foot-path mono" id="about-datadir" title="">—</div>
+            </div>
+          </aside>
+          <div class="db-main">
+            <div class="db-tabs" id="db-tabs" role="tablist">
+              <button class="btn btn-ghost icon-only db-side-toggle" id="btn-db-side"
+                      aria-label="库表列表" title="库表列表" type="button">
+                <svg class="ico"><use href="#i-db"/></svg>
+              </button>
+              <button class="db-tab" data-tab="data" type="button" role="tab" aria-selected="true">数据</button>
+              <button class="db-tab" data-tab="sql" type="button" role="tab" aria-selected="false">SQL</button>
+              <span class="db-current" id="db-current-name"></span>
+            </div>
+            <div class="db-pane" id="db-pane-grid"></div>
+            <div class="db-pane" id="db-pane-sql" hidden></div>
           </div>
         </div>
       </section>
@@ -368,10 +384,16 @@
 <div class="toast" id="toast" data-show="false" role="status" aria-live="polite"></div>
 
 <!-- 组件库与命令面板都是自包含的 IIFE：DOM 在运行时创建并挂到 body，
-     这里只负责把它们加载进来。必须排在 app.js 之前 —— app.js 是它们的调用方。 -->
+     这里只负责把它们加载进来。必须排在 app.js 之前 —— app.js 是它们的调用方。
+     grid.js / sql.js 是数据网格与 SQL 编辑器（不认识业务）；db.js 是数据库页
+     的装配层，它调 app.js 暴露的 IPC 桥（window.__deskbase.call），所以必须
+     排在 app.js 之前定义、由 app.js 在 boot 完成后调用初始化。 -->
 <script src="motion.js"></script>
 <script src="components.js"></script>
 <script src="palette.js"></script>
+<script src="grid.js"></script>
+<script src="sql.js"></script>
 <script src="app.js"></script>
+<script src="db.js"></script>
 </body>
 </html>

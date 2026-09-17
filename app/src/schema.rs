@@ -400,6 +400,11 @@ pub fn money_parse(raw: &str) -> Result<i64> {
 }
 
 /// 把最小单位（分）显示成"元"的字符串，固定两位小数。
+///
+/// 当前界面（db.js）用同一条规则在 JS 侧做了换算（centsToYuan），
+/// Rust 侧暂无调用方。**终止条件**：导入 / 导出管线（xlsx / csv）开始
+/// 携带金额列时必须改用本函数，不得在那些模块里再写第二套换算。
+#[allow(dead_code)]
 pub fn money_display(cents: i64) -> String {
     let neg = cents < 0;
     let v = (cents as i128).abs();
@@ -769,6 +774,7 @@ fn semantic_for(ty: ColType) -> Option<ColType> {
     }
 }
 
+#[allow(dead_code)]
 fn upsert_column_comment(conn: &Connection, table: &str, column: &str, comment: &str) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT INTO _db_column_comment (table_name, column_name, comment, semantic)
@@ -1338,6 +1344,12 @@ pub fn create_table(conn: &Connection, spec: &TableSpec) -> Result<()> {
 /// 为什么必须显式搬注释：SQLite 不知道我们这两张注释表跟用户表有什么关系，
 /// `ALTER TABLE ... RENAME` 不会替我们改（ADR-0012 说的"结构变更与元数据
 /// 必须同一事务"就是这件事）。
+// 【未接线 API】表结构编辑器（改表名 / 加列 / 改注释）的界面尚未实现，
+// 以下函数在二进制里暂时没有调用方。按本项目规矩（D-044），豁免必须写明
+// 终止条件：**建表向导二期（表结构编辑）接线时，这里一个 allow 都不能留**。
+// 它们各自带着完整的校验与测试，删掉等于丢掉已经想清楚的边界条件。
+
+#[allow(dead_code)]
 pub fn rename_table(conn: &Connection, from: &str, to: &str) -> Result<()> {
     validate_identifier(from)?;
     validate_user_table_name(to)?;
@@ -1397,6 +1409,7 @@ pub fn drop_table(conn: &Connection, name: &str, confirm_name: &str) -> Result<(
 /// 两处提前拦下的 SQLite 限制（报错原文不好懂，这里给人话）：
 ///   - 不能加主键列；
 ///   - 要求非空就必须给默认值（已有的行要用它填值）。
+#[allow(dead_code)]
 pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()> {
     validate_identifier(table)?;
     let real = ensure_user_table(conn, table)?;
@@ -1437,6 +1450,7 @@ pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()>
 }
 
 /// 改表注释。
+#[allow(dead_code)]
 pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;
     let real = ensure_user_table(conn, table)?;
@@ -1446,6 +1460,7 @@ pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Resul
 }
 
 /// 改字段注释。
+#[allow(dead_code)]
 pub fn set_column_comment(conn: &Connection, table: &str, column: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;
     validate_column_name(column)?;
@@ -1541,6 +1556,29 @@ pub fn page_rows(
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<Page> {
+    page_rows_filtered(conn, table, order_by, desc, cursor, limit, &[])
+}
+
+/// 带**列关键词筛选**的分页（数据网格筛选行的后端）。
+///
+/// `filters` 是 (字段名, 关键词) 列表，语义是"这一列的值**包含**该关键词
+/// （大小写不敏感）"，多个条件之间是 AND；空关键词被忽略。
+///
+/// 两个刻意的决定：
+///   - **不数总数**：与 [`page_rows`] 同一个理由，筛选后的行数只能靠
+///     "取到没有更多为止"得知，界面显示已加载行数即可。
+///   - **游标不编码筛选条件**：筛选变化时界面必须回到第一页重新开始
+///     （网格的 reload() 正是这么做的）。把筛选编进游标会让人误以为
+///     "换个筛选还能接着翻旧游标"，那翻出来的是错误数据。
+pub fn page_rows_filtered(
+    conn: &Connection,
+    table: &str,
+    order_by: Option<&str>,
+    desc: bool,
+    cursor: Option<&str>,
+    limit: usize,
+    filters: &[(String, String)],
+) -> Result<Page> {
     validate_identifier(table)?;
     if limit == 0 {
         return Err("每页行数至少为 1".to_string());
@@ -1582,40 +1620,73 @@ pub fn page_rows(
         None => format!("ORDER BY {ROWID_EXPR} {dir}"),
     };
 
+    // ---- WHERE 的装配：筛选在前，游标在后 ----
+    // 绑定值全部收进一个 Vec，占位符用**带编号**的 ?n（n 从 1 数起）。
+    // 筛选参数排前面，所以游标占位符的编号依赖筛选的个数 —— 这也是为什么
+    // 筛选必须先装配。顺序错了整条查询就错了，新增参数时必须跟着改编号。
+    let mut binds: Vec<Value> = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
+
+    for (col, kw) in filters {
+        let kw = kw.trim();
+        if kw.is_empty() {
+            continue;
+        }
+        validate_column_name(col)?;
+        let real_col = cols
+            .iter()
+            .find(|x| x.name.eq_ignore_ascii_case(col))
+            .ok_or_else(|| format!("表「{real}」没有字段「{col}」"))?;
+        // CAST 成文本再做包含匹配：数字列也能按"123"筛。
+        // NULL 行自然被排除（CAST(NULL) 还是 NULL，instr 返回 NULL，不满足 > 0）。
+        let idx = binds.len() + 1;
+        binds.push(Value::Text(kw.to_lowercase()));
+        clauses.push(format!(
+            "instr(lower(CAST({} AS TEXT)), lower(?{idx})) > 0",
+            quote_ident(&real_col.name)
+        ));
+    }
+
     let cur = match cursor {
         Some(s) => Some(decode_cursor(s, key_col.as_deref(), desc)?),
         None => None,
     };
-    // 位置参数编号写死在这里，避免和执行时的绑定顺序对不上
-    let (where_clause, binds): (String, Vec<Value>) = match (&cur, &key_col) {
-        (None, _) => (String::new(), Vec::new()),
+    let p1 = binds.len() + 1;
+    let p2 = binds.len() + 2;
+    match (&cur, &key_col) {
+        (None, _) => {}
         (Some(c), None) => {
             let op = if desc { "<" } else { ">" };
-            (
-                format!("WHERE {ROWID_EXPR} {op} ?1"),
-                vec![Value::Integer(c.rowid)],
-            )
+            clauses.push(format!("{ROWID_EXPR} {op} ?{p1}"));
+            binds.push(Value::Integer(c.rowid));
         }
         (Some(c), Some(_)) => {
-            let sql = if desc {
+            let cond = if desc {
                 // 降序时 NULL 排在最后：游标在 NULL 组里，就只剩同组的 rowid 更大的行
                 format!(
-                    "WHERE (?1 IS NULL AND {key_expr} IS NULL AND {ROWID_EXPR} > ?2)
-                        OR (?1 IS NOT NULL AND ({key_expr} IS NULL
-                            OR {key_expr} < ?1
-                            OR ({key_expr} = ?1 AND {ROWID_EXPR} > ?2)))"
+                    "(?{p1} IS NULL AND {key_expr} IS NULL AND {ROWID_EXPR} > ?{p2})
+                        OR (?{p1} IS NOT NULL AND ({key_expr} IS NULL
+                            OR {key_expr} < ?{p1}
+                            OR ({key_expr} = ?{p1} AND {ROWID_EXPR} > ?{p2})))"
                 )
             } else {
                 // 升序时 NULL 排在最前：游标在 NULL 组里，剩下的是同组更大的 rowid + 全部非 NULL 行
                 format!(
-                    "WHERE (?1 IS NULL AND ({key_expr} IS NULL AND {ROWID_EXPR} > ?2
+                    "(?{p1} IS NULL AND ({key_expr} IS NULL AND {ROWID_EXPR} > ?{p2}
                             OR {key_expr} IS NOT NULL))
-                        OR (?1 IS NOT NULL AND ({key_expr} > ?1
-                            OR ({key_expr} = ?1 AND {ROWID_EXPR} > ?2)))"
+                        OR (?{p1} IS NOT NULL AND ({key_expr} > ?{p1}
+                            OR ({key_expr} = ?{p1} AND {ROWID_EXPR} > ?{p2})))"
                 )
             };
-            (sql, vec![c.key.clone(), Value::Integer(c.rowid)])
+            clauses.push(cond);
+            binds.push(c.key.clone());
+            binds.push(Value::Integer(c.rowid));
         }
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
     };
 
     let select_list = std::iter::once(format!("{ROWID_EXPR} AS {}", quote_ident(ROWID_COLUMN)))
@@ -1908,10 +1979,22 @@ pub fn needs_confirm(sql: &str) -> Option<&'static str> {
     }
 }
 
-/// 语句里有没有出现在字符串/注释之外的 `WHERE`。
+/// 语句里有没有出现在字符串/注释之外、**括号深度 0** 的 `WHERE`。
+///
+/// 为什么必须看括号深度：`WHERE` 藏在子查询里时，对外层语句**没有**过滤条件 ——
+///
+/// ```sql
+/// UPDATE 客户 SET 电话 = (SELECT 1 WHERE 1=1);   -- 外层 UPDATE 仍然改全表
+/// ```
+///
+/// 这里唯一一个词面意义的 WHERE 在括号里，它约束的是子查询，不是这条 UPDATE。
+/// 上一版实现只要在语句里找到 WHERE 这个词就算"有条件"，恰好漏掉这一类
+/// （第十二轮交接清单里点名的那条确认漏网）。现在记录每个词的括号深度，
+/// 只有**顶层** WHERE 才算过滤条件。
 fn has_where(sql: &str) -> bool {
     let mut rest = sql;
-    let mut tokens: Vec<String> = Vec::new();
+    let mut tokens: Vec<(String, usize)> = Vec::new();
+    let mut depth = 0usize;
     while !rest.is_empty() {
         if let Some(r) = rest.strip_prefix("--") {
             rest = match r.find('\n') {
@@ -1956,18 +2039,29 @@ fn has_where(sql: &str) -> bool {
             };
             continue;
         }
+        // 括号深度：子查询里的关键字与顶层关键字必须分得开（见本函数文档）
+        if c == '(' {
+            depth += 1;
+            rest = &rest[1..];
+            continue;
+        }
+        if c == ')' {
+            depth = depth.saturating_sub(1);
+            rest = &rest[1..];
+            continue;
+        }
         if c.is_ascii_alphabetic() || c == '_' {
             let word: String = rest
                 .chars()
                 .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
                 .collect();
             rest = &rest[word.len()..];
-            tokens.push(word.to_ascii_uppercase());
+            tokens.push((word.to_ascii_uppercase(), depth));
             continue;
         }
         rest = &rest[c.len_utf8()..];
     }
-    tokens.iter().any(|t| t == "WHERE")
+    tokens.iter().any(|(t, d)| t == "WHERE" && *d == 0)
 }
 
 /// 执行一条 SQL。
@@ -3206,6 +3300,102 @@ mod tests {
         assert!(needs_confirm("INSERT INTO t VALUES (1)").is_none());
         // 字符串里的 where 不算
         assert!(needs_confirm("UPDATE t SET a = 'where'").is_some());
+    }
+
+    #[test]
+    fn where_藏在子查询里不算过滤条件() {
+        // 第十二轮交接点名的确认漏网：词面有 WHERE，但它在括号里，
+        // 约束的是子查询 —— 外层 UPDATE 仍然改全表，必须弹确认。
+        assert!(needs_confirm("UPDATE t SET a = (SELECT 1 WHERE 1=1);").is_some());
+        assert!(needs_confirm("UPDATE 客户 SET 电话=(SELECT 1 WHERE 1=1);").is_some());
+        // 顶层 WHERE 才算数；子查询和顶层 WHERE 并存时也认得出
+        assert!(needs_confirm("DELETE FROM t WHERE id IN (SELECT id FROM x)").is_none());
+        // 注释与字符串里的括号不影响深度计数
+        assert!(needs_confirm("UPDATE t SET a = '(where' -- (where\n").is_some());
+        assert!(needs_confirm("UPDATE t SET a = 1 /* ( */ WHERE id = 1").is_none());
+    }
+
+    // ---------- 筛选分页（page_rows_filtered） ----------
+
+    #[test]
+    fn 筛选按包含匹配且大小写不敏感() {
+        let mut conn = mem();
+        create_table(
+            &conn,
+            &spec(
+                "客户",
+                vec![c("名称", ColType::Text), c("金额", ColType::Money)],
+            ),
+        )
+        .unwrap();
+        let rows: Vec<Vec<String>> = vec![
+            vec!["华为手机".into(), "1234.56".into()],
+            vec!["小米电视".into(), "99.00".into()],
+            vec!["Huawei Pad".into(), "5.00".into()],
+        ];
+        insert_rows(&mut conn, "客户", &["名称".into(), "金额".into()], &rows).unwrap();
+
+        let f = |kw: &str| vec![("名称".to_string(), kw.to_string())];
+        let page = page_rows_filtered(&conn, "客户", None, false, None, 100, &f("华为")).unwrap();
+        assert_eq!(page.rows.len(), 1, "中文关键词命中中文行");
+        let page = page_rows_filtered(&conn, "客户", None, false, None, 100, &f("HUA")).unwrap();
+        assert_eq!(page.rows.len(), 1, "关键词大小写不敏感（ASCII）");
+        // 数字列按文本筛：金额 1234.56 能被 "1234" 命中
+        let page = page_rows_filtered(
+            &conn,
+            "客户",
+            None,
+            false,
+            None,
+            100,
+            &[("金额".to_string(), "1234".to_string())],
+        )
+        .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        // 空关键词被忽略 = 全量
+        let page = page_rows_filtered(&conn, "客户", None, false, None, 100, &f("")).unwrap();
+        assert_eq!(page.rows.len(), 3);
+        // 不存在的字段要报错，不能静默不过滤（注意这里必须直接给"地址"这个列名）
+        assert!(
+            page_rows_filtered(
+                &conn,
+                "客户",
+                None,
+                false,
+                None,
+                100,
+                &[("地址".to_string(), "x".to_string())]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn 筛选与游标分页可以叠加() {
+        let mut conn = mem();
+        create_table(&conn, &spec("t", vec![c("名", ColType::Text)])).unwrap();
+        let rows: Vec<Vec<String>> = (1..=10)
+            .map(|i| vec![if i % 2 == 0 { format!("偶{i}") } else { format!("奇{i}") }])
+            .collect();
+        insert_rows(&mut conn, "t", &["名".into()], &rows).unwrap();
+
+        let f = vec![("名".to_string(), "偶".to_string())];
+        // 筛选后只剩 5 行，一页取 2 行，翻完应恰好取到这 5 行、不重不漏
+        let mut seen: Vec<i64> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let page =
+                page_rows_filtered(&conn, "t", None, false, cursor.as_deref(), 2, &f).unwrap();
+            for r in &page.rows {
+                seen.push(r[0].as_i64().unwrap());
+            }
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, vec![2, 4, 6, 8, 10], "筛选 + keyset 翻页必须不重不漏");
     }
 
     // ---------- 注释元数据 ----------

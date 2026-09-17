@@ -1,0 +1,370 @@
+/* ============================================================
+   DeskBase 数据库页布局外壳（database view）
+   ============================================================
+   这里只管"页面的骨架"：左侧库表列表 + 右侧 数据 / SQL 两个页签。
+   数据网格的样式在 grid.css、SQL 编辑器在 sql.css、通用组件在
+   components.css —— 本文件不重复它们的任何规则。
+
+   布局约定：
+   · 整页是一个两栏 grid，左栏固定宽、右栏弹性（minmax(0,1fr) 防止
+     网格内容把列撑爆）；
+   · 高度全部用 100% 链路（.view 是 .content 这个 grid 的 item，
+     默认 stretch），不写 calc(100vh - …) 那样的 magic number ——
+     主题改密度/行高时它不会跟着错（这个坑在笔记页踩过一次）；
+   · 动效只动 transform / opacity / 颜色，与 check-motion 门禁一致。
+   ============================================================ */
+
+/* 数据库视图占满内容区（其余视图是流式卡片，不需要这一条） */
+.view[data-view="database"] {
+  height: 100%;
+}
+.view[data-view="database"][data-active="true"] {
+  display: block;
+}
+
+.dbwrap {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  gap: var(--sp-4);
+  min-height: 0;
+}
+
+/* ---------- 左栏：库表列表 ---------- */
+.db-side {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: var(--sp-2);
+  min-height: 0;
+  padding: var(--sp-3);
+  background: var(--card);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.db-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.db-side-title {
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  color: var(--ink);
+}
+
+.db-mini {
+  padding: 2px 10px;
+  font-size: var(--fs-aux);
+}
+
+.db-newtable {
+  width: 100%;
+}
+
+.db-table-list {
+  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 2px;
+}
+
+/* 空态：还没有任何用户表时 */
+.db-empty {
+  color: var(--ink-3);
+  font-size: var(--fs-sub);
+  padding: var(--sp-3) var(--sp-2);
+  line-height: var(--lh-body);
+  text-align: center;
+}
+
+.db-table-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: var(--line-w) solid transparent;
+  background: transparent;
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-body);
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+.db-table-item:hover {
+  background: var(--paper-2);
+}
+.db-table-item[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--line);
+}
+
+.db-table-item .t {
+  display: block;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.db-table-item .d {
+  display: block;
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 行数估计必须带"约"——它是 SQLite 的估计值，不是 COUNT(*)（schema.rs 的约定） */
+.db-table-item .n {
+  color: var(--ink-2);
+}
+
+/* 删除表的入口做得轻：悬停才显形，避免整列都是红色按钮的观感 */
+.db-table-item .del {
+  float: right;
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+.db-table-item:hover .del,
+.db-table-item .del:focus-visible {
+  opacity: 1;
+}
+.db-table-item .del:hover {
+  color: var(--danger);
+}
+
+.db-side-foot {
+  border-top: var(--line-w) solid var(--line);
+  padding-top: var(--sp-2);
+}
+.db-foot-line {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+.db-foot-path {
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 长路径让左端（用户目录）省略，保住最右端的文件名 */
+  text-align: left;
+}
+
+/* ---------- 右栏：页签 + 面板 ---------- */
+.db-main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: var(--sp-2);
+  min-height: 0;
+}
+
+.db-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.db-tab {
+  border: var(--line-w) solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--fs-sub);
+  padding: var(--sp-1) var(--sp-4);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+.db-tab:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+.db-tab[aria-selected="true"] {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow-1);
+}
+
+.db-current {
+  margin-left: var(--sp-2);
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-pane {
+  min-height: 0;
+  /* 网格与 SQL 编辑器自己撑满（它们挂进来的根节点负责布局） */
+  height: 100%;
+}
+.db-pane[hidden] {
+  display: none;
+}
+
+/* ---------- 建表 / 删表对话框 ----------
+   用 <dialog>：原生模态，焦点圈与 Escape 都是浏览器给的，
+   不自己再发明一套（也避免和命令面板的焦点管理打架） */
+.db-dialog {
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--ink);
+  padding: var(--sp-5);
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  box-shadow: var(--shadow-2);
+}
+.db-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.32);
+}
+.db-dialog h3 {
+  margin: 0 0 var(--sp-3);
+  font-family: var(--font-heading);
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+.db-dialog .hint {
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  line-height: var(--lh-body);
+  margin: 0 0 var(--sp-3);
+}
+.db-dialog form {
+  display: grid;
+  gap: var(--sp-3);
+}
+.db-dialog input[type="text"] {
+  font: inherit;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  width: 100%;
+}
+.db-dialog input[type="text"]:focus {
+  outline: 2px solid var(--focus-bg);
+  outline-offset: -1px;
+}
+.db-dialog input::placeholder {
+  color: var(--ink-3);
+}
+
+.db-cols {
+  display: grid;
+  gap: var(--sp-2);
+  overflow: auto;
+  min-height: 0;
+}
+.db-col-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto auto auto;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.db-col-row input[type="text"] {
+  padding: var(--sp-1) var(--sp-2);
+}
+.db-col-row select {
+  font: inherit;
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-1) var(--sp-2);
+  width: 100%;
+}
+.db-col-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.db-col-row .rm {
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+.db-col-row .rm:hover {
+  color: var(--danger);
+  background: var(--paper-2);
+}
+
+.db-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* 窄屏抽屉开关：宽屏藏起来，窄屏才是入口 */
+.db-side-toggle {
+  display: none;
+}
+
+/* ---------- 窄屏：左栏收成覆盖抽屉（与笔记页同一档位） ---------- */
+@media (max-width: 720px) {
+  .db-side-toggle {
+    display: inline-flex;
+  }
+  .dbwrap {
+    grid-template-columns: minmax(0, 1fr);
+    position: relative;
+  }
+  .db-side {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    width: min(300px, 84vw);
+    background: var(--card);
+    box-shadow: var(--shadow-2);
+    transform: translateX(-110%);
+    transition: transform var(--dur-normal) var(--ease-glide);
+  }
+  /* 窄屏下由 db.js 挂 data-open 控制；浮在内容上方而不是把网格挤扁 */
+  .db-side[data-open="true"] {
+    transform: translateX(0);
+  }
+  .db-main {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .db-tabs::before {
+    content: "库表";
+    font-size: var(--fs-aux);
+    color: var(--ink-3);
+    margin-right: var(--sp-1);
+  }
+}

@@ -99,6 +99,35 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- 数据库页（数据网格 + SQL 编辑器 + 页面模块） ----------
+        // grid / sql 是第十二轮交付的数据核心组件；database.css / db.js 是
+        // 接线时新增的页面外壳。四份必须**成对**登记：JS 自己会注入 <link>
+        // 拉样式（见 grid.js 的 injectStyles），漏掉任何一半都是静默 404。
+        "/grid.css" => Asset {
+            bytes: include_bytes!("../ui/grid.css"),
+            mime: CSS,
+        },
+        "/grid.js" => Asset {
+            bytes: include_bytes!("../ui/grid.js"),
+            mime: JS,
+        },
+        "/sql.css" => Asset {
+            bytes: include_bytes!("../ui/sql.css"),
+            mime: CSS,
+        },
+        "/sql.js" => Asset {
+            bytes: include_bytes!("../ui/sql.js"),
+            mime: JS,
+        },
+        "/database.css" => Asset {
+            bytes: include_bytes!("../ui/database.css"),
+            mime: CSS,
+        },
+        "/db.js" => Asset {
+            bytes: include_bytes!("../ui/db.js"),
+            mime: JS,
+        },
+
         // ---------- 字体（见 tools/fonts/ 的来源登记与校验脚本） ----------
         // 得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
         // 许可原文随包分发：app/ui/fonts/OFL-smiley-sans.txt

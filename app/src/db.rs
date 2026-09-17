@@ -147,6 +147,16 @@ impl Db {
         &self.conn
     }
 
+    /// 可变借用底层连接。
+    ///
+    /// 为什么必须开这个口子：`schema::insert_rows` 出于事务安全的理由要求
+    /// `&mut Connection`（rusqlite 的事务 API 需要）。这是目前唯一一个
+    /// 合法的 `&mut` 使用方 —— 不要用这个口子绕开 `note` 表的
+    /// id / 时间戳规则，那类写入必须走 `create_note` / `save_note`。
+    pub fn conn_mut(&mut self) -> &mut rusqlite::Connection {
+        &mut self.conn
+    }
+
     pub fn list_notes(&self) -> Result<Vec<NoteSummary>> {
         let mut stmt = self
             .conn

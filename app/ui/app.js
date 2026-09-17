@@ -41,6 +41,10 @@
     });
   }
 
+  // 数据库页（db.js）是独立脚本，它需要的 IPC 能力从这里拿。
+  // 只暴露这一个入口 —— db.js 仍然不能绕过 Rust 侧的命令白名单做任何事。
+  window.__deskbase.call = call;
+
   // ---------- 小工具 ----------
   const $ = (sel) => document.querySelector(sel);
   const root = document.documentElement;
@@ -381,6 +385,11 @@
 
     // 换页后让列表重新做一次逐项进场
     if (noteOnly && !(opts && opts.keepList)) renderNoteList();
+
+    // 数据库页是独立模块（db.js）：首次进入时它自己懒加载表列表
+    if (window.DeskBaseDb && typeof window.DeskBaseDb.onShow === "function") {
+      window.DeskBaseDb.onShow(name);
+    }
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -1010,6 +1019,9 @@
         motion: !!(window.DeskBaseMotion && window.DeskBaseMotion.spring),
         ui: !!(window.DeskBaseUI && window.DeskBaseUI.toast),
         palette: !!(window.DeskBasePalette && window.DeskBasePalette.open),
+        grid: !!(window.DeskBaseGrid && window.DeskBaseGrid.mount),
+        sql: !!(window.DeskBaseSql && window.DeskBaseSql.mount),
+        dbpage: !!(window.DeskBaseDb && window.DeskBaseDb.onShow),
         motionTier: (window.DeskBaseMotion && window.DeskBaseMotion.tier && window.DeskBaseMotion.tier()) || "?",
         commands: cmdCount || 0,
         theme: root.dataset.theme || "?",
