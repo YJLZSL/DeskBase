@@ -273,6 +273,26 @@
   color: var(--ink-3);
 }
 
+/* 模板下拉：建表对话框里的第一项，给"不知道从哪下手"的人一个起点 */
+.db-dialog select.db-tpl-select {
+  font: inherit;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  width: 100%;
+  cursor: pointer;
+}
+.db-dialog select.db-tpl-select:focus {
+  outline: 2px solid var(--focus-bg);
+  outline-offset: -1px;
+}
+.db-tpl-hint {
+  margin: var(--sp-1) 0 0;
+}
+
 .db-cols {
   display: grid;
   gap: var(--sp-2);

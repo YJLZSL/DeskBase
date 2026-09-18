@@ -116,6 +116,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 <!-- 下面这行与 118 行重复（同一份 ADR 的两种描述），保留后者，此行待清理 -->
 | [0015](0015-distribution-and-installer-strategy.md) | 分发形态与安装器策略（便携版 + Windows 安装版） | 提议 | 2026-09-17 |
 | [0016](0016-in-app-update-mechanism.md) | 程序内更新：默认关闭、显式开启、强制签名校验、更新不碰数据 | 提议 | 2026-09-18 |
+| [0017](0017-ai-assistance-privacy-boundary.md) | AI 协助的隐私边界：默认本地、外部调用逐次授权、数据最小化、生成内容不自动执行 | 提议 | 2026-09-18 |
 
 ---
 

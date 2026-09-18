@@ -377,6 +377,48 @@
     ["blob", "二进制（进阶）"],
   ];
 
+  // ---------- 默认模板 ----------
+  // 为什么要有模板：调研里最硬的一条是"非程序员可用性是生死线"，而空表对新手等于
+  // 无从下手。所以提供几张**能直接开始记东西**的表（发起人要求：数据库要有默认模板）。
+  // 约定：字段名一律中文；金额用 money（按分存）；日期用 date。
+  // 改这里 = 改用户第一次看到的东西，改完必须同步 `help.js` 的教程，别让教程说谎。
+  const TEMPLATES = {
+    客户台账: [
+      { name: "客户名称", ty: "text", nn: true },
+      { name: "联系人", ty: "text" },
+      { name: "电话", ty: "text" },
+      { name: "应收金额", ty: "money" },
+      { name: "最近跟进", ty: "date" },
+      { name: "已结清", ty: "boolean" },
+    ],
+    进出货: [
+      { name: "品名", ty: "text", nn: true },
+      { name: "规格", ty: "text" },
+      { name: "数量", ty: "integer" },
+      { name: "单价", ty: "money" },
+      { name: "进出", ty: "text" },
+      { name: "日期", ty: "date" },
+      { name: "经办人", ty: "text" },
+    ],
+    费用报销: [
+      { name: "事由", ty: "text", nn: true },
+      { name: "类别", ty: "text" },
+      { name: "金额", ty: "money" },
+      { name: "发生日期", ty: "date" },
+      { name: "发票号", ty: "text" },
+      { name: "已报销", ty: "boolean" },
+    ],
+    库存盘点: [
+      { name: "物料", ty: "text", nn: true },
+      { name: "规格", ty: "text" },
+      { name: "单位", ty: "text" },
+      { name: "账面数", ty: "integer" },
+      { name: "实盘数", ty: "integer" },
+      { name: "盘点日期", ty: "date" },
+      { name: "备注", ty: "text" },
+    ],
+  };
+
   function buildDialog(id, title, hint) {
     let dlg = document.getElementById(id);
     if (dlg) return dlg;
@@ -408,6 +450,15 @@
     );
 
     const form = el("form", { novalidate: "novalidate" });
+
+    // 模板放在最上面：新手第一眼看到的是"我可以先套一个"，而不是一排空白输入框
+    const tpl = el("select", { class: "db-tpl-select" });
+    tpl.appendChild(el("option", { value: "" }, "从模板开始（可选）"));
+    Object.keys(TEMPLATES).forEach((k) => tpl.appendChild(el("option", { value: k }, k)));
+    const tplHint = el("p", { class: "hint db-tpl-hint" }, "不知道从哪下手？先套一个模板，字段和表名都能改。");
+    form.appendChild(tpl);
+    form.appendChild(tplHint);
+
     const nameInput = el("input", { type: "text", placeholder: "表名，例如：费用明细" });
     const nameField = el("div");
     nameField.appendChild(nameInput);
@@ -416,13 +467,15 @@
     const colsBox = el("div", { class: "db-cols" });
     form.appendChild(colsBox);
 
-    function colRow() {
+    function colRow(col) {
       const row = el("div", { class: "db-col-row" });
       const name = el("input", { type: "text", placeholder: "字段名" });
+      if (col) name.value = col.name;
       const type = el("select");
+      const wantTy = col ? col.ty : "text";
       TYPES.forEach(([v, label]) => {
         const opt = el("option", { value: v }, label);
-        if (v === "text") opt.setAttribute("selected", "selected");
+        if (v === wantTy) opt.setAttribute("selected", "selected");
         type.appendChild(opt);
       });
       const pk = el("label");
@@ -431,6 +484,10 @@
       const nn = el("label");
       const nnBox = el("input", { type: "checkbox" });
       nn.append(nnBox, document.createTextNode("必填"));
+      if (col) {
+        pkBox.checked = !!col.pk;
+        nnBox.checked = !!col.nn;
+      }
       const rm = el("button", { class: "rm", type: "button", title: "移除这一列" }, "×");
       rm.addEventListener("click", () => {
         if (colsBox.children.length > 1) row.remove();
@@ -438,6 +495,19 @@
       row.append(name, type, pk, nn, rm);
       return row;
     }
+
+    function applyTemplate(tname) {
+      const cols = TEMPLATES[tname];
+      if (!cols) return;
+      // 表名没填才自动填 —— 用户自己起的名字比模板名重要
+      if (!nameInput.value.trim()) nameInput.value = tname;
+      colsBox.textContent = "";
+      cols.forEach((c) => colsBox.appendChild(colRow(c)));
+      tplHint.textContent =
+        "已套用「" + tname + "」，" + cols.length + " 个字段 —— 表名和字段都能改，用不上的删掉就行。";
+    }
+    tpl.addEventListener("change", () => applyTemplate(tpl.value));
+
     colsBox.appendChild(colRow());
     colsBox.appendChild(colRow());
     colsBox.appendChild(colRow());
