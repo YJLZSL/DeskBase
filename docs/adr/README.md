@@ -112,11 +112,10 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0009](0009-dual-ui-mode.md) | 采用简洁 / 高级双界面模式 | 已接受 | 2026-09-17 |
 | [0010](0010-desktop-shell-selection.md) | 桌面外壳技术选型 | 已接受 | 2026-09-17 |
 | [0011](0011-visual-system-and-theme-strategy.md) | 采用「宣纸为默认 + 多主题可切换 + token 驱动」的视觉系统策略 | 已接受 | 2026-09-17 |
-| [0015](0015-distribution-and-installer-strategy.md) | 分发形态与安装器方案（便携版 + 自建安装器优先） | 提议 | 2026-09-17 |
-| [0012](0012-metadata-storage-and-id-scheme.md) | 元数据与主数据的存储划分及 ID 方案 | 已接受 | 2026-09-17 |
-| [0013](0013-version-history-and-recycle-bin.md) | 版本历史存储方式与回收站实现方式 | 已接受 | 2026-09-17 |
 | [0014](0014-attachment-encryption-vector-index-and-fts.md) | 附件加密与去重、向量索引存放、全文检索方案及 schema 同步 | 已接受 | 2026-09-17 |
+<!-- 下面这行与 118 行重复（同一份 ADR 的两种描述），保留后者，此行待清理 -->
 | [0015](0015-distribution-and-installer-strategy.md) | 分发形态与安装器策略（便携版 + Windows 安装版） | 提议 | 2026-09-17 |
+| [0016](0016-in-app-update-mechanism.md) | 程序内更新：默认关闭、显式开启、强制签名校验、更新不碰数据 | 提议 | 2026-09-18 |
 
 ---
 

@@ -390,6 +390,9 @@
     if (window.DeskBaseDb && typeof window.DeskBaseDb.onShow === "function") {
       window.DeskBaseDb.onShow(name);
     }
+
+    // 视图切换即工作区变化，顺手上报（下次启动能回到这里）
+    reportWorkspace();
   }
 
   document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -1119,6 +1122,7 @@
         moveFilterPill();
         // 从窄屏回到宽屏时，把笔记还原成双栏
         if (window.innerWidth >= 720) setPane("list");
+        reportWorkspace();
       });
     });
 
@@ -1130,6 +1134,35 @@
   window.addEventListener("beforeunload", () => {
     if (dirty) flushSave();
   });
+
+  // ============================================================
+  // 工作区状态持久化
+  // ============================================================
+  // 把「当前视图 / 打开的表 / 侧栏状态 / 窗口尺寸」周期性上报给 Rust，存进 sys_meta。
+  // 覆盖 exe 升级或崩溃后，启动时会从 app.info 里带回，用户回到的是离开时的样子
+  // （「更新时工作区不丢失」）。
+  function reportWorkspace() {
+    call("workspace.save", {
+      view: currentView,
+      activeTable:
+        (window.DeskBaseDb && typeof window.DeskBaseDb.activeTable === "function"
+          ? window.DeskBaseDb.activeTable()
+          : "") || "",
+      sidebar: root.dataset.sidebar || "",
+      windowW: Math.round(window.innerWidth),
+      windowH: Math.round(window.innerHeight),
+    }).catch(() => {});
+  }
+
+  // Rust 在收到关闭请求时调用这个钩子：立刻把未保存的笔记写库 + 上报工作区状态。
+  // 通过 evaluate_script 触发，不能 await，但 800ms 的退出宽限足够 IPC 往返完成。
+  window.__deskbase.onBeforeQuit = function () {
+    flushSave();
+    reportWorkspace();
+  };
+
+  // 周期性兜底：页面一直开着不关，也能持续保留最新工作区状态
+  setInterval(reportWorkspace, 5000);
 
   boot();
 })();

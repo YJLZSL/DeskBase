@@ -38,6 +38,9 @@ const TARGETS = [
   // 数据库页的布局外壳 —— 接线时新增的第七份样式表。**新增 UI 样式表必须
   // 同步加进这里**（这条注释就是给下一个加文件的人写的）。
   path.join(ROOT, 'app', 'ui', 'database.css'),
+  // 设置页教程与数据库页首次使用引导
+  path.join(ROOT, 'app', 'ui', 'help.css'),
+  path.join(ROOT, 'app', 'ui', 'db-onboard.css'),
 ];
 
 /** 布局属性：动画它们会触发布局重算 */

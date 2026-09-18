@@ -1,0 +1,35 @@
+/* ============================================================
+   DeskBase 数据库页：首次使用的引导块（db-onboard.js）
+   ============================================================
+   只在"一张表都没有"时出现，目的就一个：让人知道下一步该点哪里。
+   所以它做得很轻 —— 三步 + 一个「创建示例台账」按钮，
+   不给空态堆装饰。样式跟随主题 token，不写死颜色。
+   ============================================================ */
+
+.db-onboard {
+  padding: var(--sp-1) var(--sp-1) var(--sp-2);
+}
+
+.db-onboard-lead {
+  margin: 0 0 var(--sp-2);
+  color: var(--ink-2);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-body);
+}
+
+.db-onboard-steps {
+  margin: 0 0 var(--sp-3);
+  padding-left: 1.35em;
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+  line-height: var(--lh-body);
+}
+
+.db-onboard-steps li {
+  margin-bottom: 2px;
+}
+
+/* 按钮撑满窄栏：空态里它是唯一可点的东西，别让人去找它 */
+.db-onboard-btn {
+  width: 100%;
+}

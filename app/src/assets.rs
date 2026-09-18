@@ -128,6 +128,27 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- 教程与首次使用引导 ----------
+        // help.js 自带 init()（挂到设置页的 .stack），db-onboard.js 自带 init()
+        // （盯着表列表，一张表都没有时注入引导块）—— 两个都不需要 app.js 调用，
+        // 但**必须在这里登记**：漏一个就是页面照开、功能悄悄没有的静默 404。
+        "/help.css" => Asset {
+            bytes: include_bytes!("../ui/help.css"),
+            mime: CSS,
+        },
+        "/help.js" => Asset {
+            bytes: include_bytes!("../ui/help.js"),
+            mime: JS,
+        },
+        "/db-onboard.css" => Asset {
+            bytes: include_bytes!("../ui/db-onboard.css"),
+            mime: CSS,
+        },
+        "/db-onboard.js" => Asset {
+            bytes: include_bytes!("../ui/db-onboard.js"),
+            mime: JS,
+        },
+
         // ---------- 字体（见 tools/fonts/ 的来源登记与校验脚本） ----------
         // 得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
         // 许可原文随包分发：app/ui/fonts/OFL-smiley-sans.txt

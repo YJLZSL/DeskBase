@@ -395,5 +395,9 @@
 <script src="sql.js"></script>
 <script src="app.js"></script>
 <script src="db.js"></script>
+<!-- 教程与首次使用引导都自带 init()，不需要 app.js 调用；
+     但它们要用 __deskbase.call（db-onboard 会建示例表），所以排在 app.js 之后 -->
+<script src="help.js"></script>
+<script src="db-onboard.js"></script>
 </body>
 </html>

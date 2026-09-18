@@ -16,6 +16,7 @@ mod convert;
 mod csv_import;
 mod db;
 mod import_pipeline;
+mod workspace;
 mod render;
 mod schema;
 mod xlsx;
@@ -64,6 +65,8 @@ struct AppState {
     /// WebView 句柄在 build 之后才能拿到，所以先用 Option 占位。
     webview: Mutex<Option<wry::WebView>>,
     started_at: std::time::Instant,
+    /// 前端最近一次上报的工作区状态。退出前的最后一道保存用它兜底落盘。
+    last_workspace: Mutex<Option<workspace::WorkspaceState>>,
 }
 
 impl AppState {
@@ -98,6 +101,20 @@ fn main() -> wry::Result<()> {
     // 数据目录：可用 DESKBASE_DATA_DIR 覆盖（便携版会用它）
     let data_dir = db::default_data_dir();
 
+    // 便携版若用 DESKBASE_DATA_DIR 把数据指到程序目录内，覆盖式更新会连同数据一起
+    // 被替换掉。这里给一个明确警告（不阻断启动，也不改写配置）。
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if data_dir.starts_with(exe_dir) {
+                log_line(
+                    &data_dir,
+                    "警告：数据目录位于程序目录内。覆盖式更新会连同用户数据一起被替换，\
+                     建议用 DESKBASE_DATA_DIR 把数据指到程序目录之外。",
+                );
+            }
+        }
+    }
+
     // 构建期用的图标光栅化模式，正常启动完全不经过这里
     if let Ok(out) = std::env::var("DESKBASE_RENDER") {
         return render::run(&PathBuf::from(out), &data_dir);
@@ -107,7 +124,7 @@ fn main() -> wry::Result<()> {
 
     log_line(&data_dir, &format!("启动，数据目录 = {}", data_dir.display()));
 
-    let database = match Db::open(&db_path) {
+    let database = match Db::open(&data_dir, &db_path) {
         Ok(d) => d,
         Err(e) => {
             // 打不开数据库是致命错误：不静默继续，直接报出来
@@ -122,6 +139,7 @@ fn main() -> wry::Result<()> {
         data_dir: data_dir.clone(),
         webview: Mutex::new(None),
         started_at: std::time::Instant::now(),
+        last_workspace: Mutex::new(None),
     });
 
     let event_loop = EventLoop::new();
@@ -190,17 +208,63 @@ fn main() -> wry::Result<()> {
     }
     log_line(&data_dir, "窗口与 WebView 就绪");
 
+    // 退出前保存：先让前端把未保存的笔记落库 + 上报工作区状态，给 800ms 宽限，
+    // 宽限到（或前端已上报）后用最近一次上报的状态再落一次盘，最后退出。
+    // 不会因为等保存而让窗口关不掉——到时间就走。
+    let mut quitting = false;
+    let mut quit_at: Option<std::time::Instant> = None;
+
     event_loop.run(move |event, _, control_flow| {
+        if quitting {
+            // 已经点了关闭：等够 800ms 就收尾退出
+            if let Some(t) = quit_at {
+                if std::time::Instant::now() >= t {
+                    finalize_workspace(&state);
+                    log_line(&state.data_dir, "退出前保存完成，退出");
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+            }
+            *control_flow = ControlFlow::WaitUntil(quit_at.unwrap());
+            return;
+        }
+
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent {
             event: WindowEvent::CloseRequested,
             ..
         } = event
         {
-            log_line(&data_dir, "收到关闭请求，退出");
-            *control_flow = ControlFlow::Exit;
+            quitting = true;
+            quit_at = Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(800),
+            );
+            *control_flow = ControlFlow::WaitUntil(quit_at.unwrap());
+            // 通知前端：该保存了（flushSave + 上报工作区状态）
+            if let Ok(guard) = state.webview.lock() {
+                if let Some(wv) = guard.as_ref() {
+                    let _ = wv.evaluate_script(
+                        "window.__deskbase && window.__deskbase.onBeforeQuit && window.__deskbase.onBeforeQuit();",
+                    );
+                }
+            }
+            log_line(&data_dir, "收到关闭请求，通知前端保存，等待后退出");
         }
     });
+}
+
+/// 退出前的最后一道保存：用前端最近一次上报的工作区状态兜底落盘。
+fn finalize_workspace(state: &AppState) {
+    let last = state
+        .last_workspace
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if let Some(ws) = last {
+        if let Ok(guard) = state.db.lock() {
+            let _ = workspace::save(guard.conn(), &ws);
+        }
+    }
 }
 
 /// 命令分发。所有前端能做的事都在这里，一一显式列出，不做通配。
@@ -214,6 +278,12 @@ fn dispatch(state: &AppState, req: Request) -> String {
                 .map_err(|_| "锁失败".to_string())
                 .and_then(|d| d.count_notes())
                 .unwrap_or(-1);
+            let workspace = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|d| workspace::load(d.conn()).ok())
+                .unwrap_or_default();
             ok(
                 id,
                 serde_json::json!({
@@ -223,6 +293,7 @@ fn dispatch(state: &AppState, req: Request) -> String {
                     "noteCount": count,
                     "uptimeMs": state.started_at.elapsed().as_millis() as u64,
                     "repo": PROJECT_REPO,
+                    "workspace": workspace,
                 }),
             )
         }
@@ -1027,6 +1098,27 @@ fn dispatch(state: &AppState, req: Request) -> String {
             }
             match state.db.lock() {
                 Ok(d) => match d.delete_note(note_id) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // ---------- 工作区状态（workspace.rs）----------
+        // 前端周期性 + 退出前调用，把「当前视图 / 打开的表 / 侧栏状态 / 窗口尺寸」
+        // 存进 sys_meta。存下的状态会在下次启动随 app.info 带回，实现「更新不丢工作区」。
+        "workspace.save" => {
+            let ws: workspace::WorkspaceState = match serde_json::from_value(req.args.clone()) {
+                Ok(s) => s,
+                Err(e) => return err(id, format!("工作区状态格式不对: {e}")),
+            };
+            // 兜底：记住最近一次上报的状态，退出前再用它落一次盘
+            if let Ok(mut g) = state.last_workspace.lock() {
+                *g = Some(ws.clone());
+            }
+            match state.db.lock() {
+                Ok(d) => match workspace::save(d.conn(), &ws) {
                     Ok(()) => ok(id, serde_json::json!({})),
                     Err(e) => err(id, e),
                 },
