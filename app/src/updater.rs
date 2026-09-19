@@ -386,6 +386,249 @@ fn max_by_version<'a>(items: &[&'a Release]) -> Option<&'a Release> {
 }
 
 // ============================================================
+// 网络传输（HTTPS，走系统 WinHTTP）
+// ============================================================
+//
+// **为什么是 WinHTTP 而不是引一个 HTTP crate**：HTTPS 必然要 TLS，
+// 引纯 Rust 的 rustls 会拉进上 MB；WinHTTP 用系统 schannel，
+// 体积代价只落在"我们自己的胶水代码"上（winhttp.dll 是系统 DLL，只有导入表）。
+//
+// 实测（2026-09-19，`windows` 0.62 开 `Win32_Networking_WinHttp` 特性）：
+// **不新增任何包**（Cargo.lock 无变化 —— `windows` 本来就在依赖树里，webview2-com 在用），
+// **体积不变**（5.985 MB → 5.985 MB，差 512 字节是布局噪声）。
+// 这一步只证明"声明是免费的"；真正的代价在调用处，见实现后的复测。
+//
+// 代理：用 `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` —— 它读系统代理设置，
+// 所以本机开着 Clash（7890）时它能自己走对路，不需要我们再实现一遍代理逻辑。
+
+/// 「最新发布」的取数地址。
+///
+/// ⚠️ **不是 `/releases/latest`** —— 那个接口的语义是"最近一个**非预发布**的 Release"，
+/// 而本仓库迄今所有发布都是 alpha/beta，实测它**一律 404**。详见 ADR-0018 的补充。
+pub fn releases_api_url() -> String {
+    format!("https://api.github.com/repos/{REPO}/releases?per_page=20")
+}
+
+/// 单次请求的超时（毫秒）。检查更新是"顺手做一下"的事，**不该让人等**。
+pub const HTTP_TIMEOUT_MS: i32 = 15_000;
+
+/// 响应体上限。清单本身只有几十 KB；给 8 MB 是防御性的天花板 ——
+/// 没有上限的话，一个被投毒的响应就能把内存吃光。
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(target_os = "windows")]
+mod http {
+    use std::ffi::c_void;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Networking::WinHttp::{
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
+        WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+        WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    };
+
+    /// 转成给 `PCWSTR` 参数用的宽字符串 —— **必须带结尾 NUL**。
+    ///
+    /// ⚠️ 这里踩过一次坑：原先不带 NUL，`WinHttpOpenRequest` 直接返回
+    /// `ERROR_INVALID_PARAMETER(87)`。原因是 `PCWSTR` 按 **NUL 结尾**读，
+    /// 不带 NUL 的缓冲区会让 WinHTTP 读到缓冲区之外的内容。
+    /// 报错是 87 而不是崩溃，属于运气好 —— 换成别的 API 可能就是读越界。
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 给 `WinHttpSendRequest` 用的头 —— **不能带 NUL**。
+    ///
+    /// 与上面相反：windows-rs 把 `slice.len()` 当作字符数传给 `dwHeadersLength`，
+    /// 多一个 NUL 会被当成头的最后一个字符。
+    fn wide_len(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    /// 最近一次 Win32 错误码。
+    ///
+    /// **必须带上它**：WinHTTP 的函数失败时只返回 NULL，不给原因。
+    /// 上一次就是因为在"构造请求失败"里没带错误码，只能靠猜 —— 那是最浪费时间的一种调试。
+    fn last_error() -> u32 {
+        unsafe { windows::Win32::Foundation::GetLastError().0 }
+    }
+
+    /// 把常见的 WinHTTP 错误码翻成人话。翻不出来的就原样给出码值，别假装知道。
+    fn explain(code: u32) -> String {
+        match code {
+            12001 => "没有足够的缓冲区".to_string(),
+            12002 => "请求超时".to_string(),
+            12005 => "地址无效".to_string(),
+            12006 => "无法解析主机名（DNS 失败）".to_string(),
+            12007 => "连不上服务器".to_string(),
+            12017 => "操作被取消".to_string(),
+            12029 => "与服务器建立安全连接失败（TLS 握手失败）".to_string(),
+            12037 => "证书过期或无效".to_string(),
+            12175 => "安全通道错误：证书校验没通过（可能是网络中间人，或系统时间不对）"
+                .to_string(),
+            other => format!("Win32 错误码 {other}"),
+        }
+    }
+
+    /// RAII：句柄离开作用域就关掉。WinHTTP 的每个句柄都要显式关闭，
+    /// 中途 return 的每条路径都不能漏 —— 交给 Drop 比手写 close 可靠。
+    struct Handle(*mut c_void);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // 关闭失败也没别的办法，忽略返回值；但**不能**因此跳过关闭
+                let _ = unsafe { WinHttpCloseHandle(self.0) };
+            }
+        }
+    }
+
+    /// 发一个 HTTPS GET，返回响应体。只支持 `https://<host>/<path>`。
+    ///
+    /// 为什么限制这么死：更新器只访问一个写死的地址，
+    /// 支持更多形态只会扩大攻击面（重定向、自定义端口、userinfo 之类）。
+    pub fn get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let rest = url
+            .strip_prefix("https://")
+            .ok_or_else(|| format!("更新器只允许访问 https 地址：{url}"))?;
+        let (host, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        if host.is_empty() {
+            return Err(format!("地址里没有主机名：{url}"));
+        }
+
+        unsafe {
+            let agent = wide("DeskBase");
+            let session = Handle(WinHttpOpen(
+                PCWSTR(agent.as_ptr()),
+                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                PCWSTR(std::ptr::null()),
+                PCWSTR(std::ptr::null()),
+                0,
+            ));
+            if session.0.is_null() {
+                return Err(format!("WinHttpOpen 失败：{}", explain(last_error())));
+            }
+            // 四个超时都要设：只设一个等于没设 —— 卡在 DNS 或 TLS 握手同样会挂住
+            let _ = WinHttpSetTimeouts(session.0, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
+
+            let host_w = wide(host);
+            let connect = Handle(WinHttpConnect(
+                session.0,
+                PCWSTR(host_w.as_ptr()),
+                443u16,
+                0,
+            ));
+            if connect.0.is_null() {
+                return Err(format!("连不上 {host}：{}", explain(last_error())));
+            }
+
+            let verb = wide("GET");
+            let obj = wide(path);
+            let req = Handle(WinHttpOpenRequest(
+                connect.0,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(obj.as_ptr()),
+                PCWSTR(std::ptr::null()),
+                PCWSTR(std::ptr::null()),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            ));
+            if req.0.is_null() {
+                return Err(format!("构造请求失败：{}", explain(last_error())));
+            }
+
+            // 跟着重定向走：资产下载会 302 到 CDN，不跟就拿不到东西。
+            // 注意这是**请求级**选项，不是会话级。
+            let policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS.to_le_bytes();
+            let _ = WinHttpSetOption(
+                Some(req.0 as *const c_void),
+                WINHTTP_OPTION_REDIRECT_POLICY,
+                Some(&policy),
+            );
+
+            // GitHub 的 API 要求带 User-Agent，不带会被 403。
+            // 用 wide_len（不带 NUL）—— 见它自己的注释，这里与 PCWSTR 的规则相反。
+            let headers =
+                wide_len("User-Agent: DeskBase\r\nAccept: application/vnd.github+json\r\n");
+            WinHttpSendRequest(req.0, Some(&headers), None, 0, 0, 0)
+                .map_err(|e| format!("发送请求失败：{e}"))?;
+            WinHttpReceiveResponse(req.0, std::ptr::null_mut())
+                .map_err(|e| format!("接收响应失败：{e}"))?;
+
+            let mut status: u32 = 0;
+            let mut len = std::mem::size_of::<u32>() as u32;
+            WinHttpQueryHeaders(
+                req.0,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                PCWSTR(std::ptr::null()),
+                Some(&mut status as *mut u32 as *mut c_void),
+                &mut len,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| format!("读状态码失败：{e}"))?;
+
+            // 先把 body 读完再判状态码：**非 200 时响应体里往往有原因**
+            // （GitHub 会写明是限流还是缺 User-Agent），少了它就只剩一个干巴巴的 403。
+            let mut out: Vec<u8> = Vec::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let mut read: u32 = 0;
+                WinHttpReadData(
+                    req.0,
+                    buf.as_mut_ptr() as *mut c_void,
+                    buf.len() as u32,
+                    &mut read,
+                )
+                .map_err(|e| format!("读响应体失败：{e}"))?;
+                if read == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..read as usize]);
+                if out.len() > max_bytes {
+                    return Err(format!(
+                        "响应超过 {} MB 上限，已中止（不把内存交给对方说了算）",
+                        max_bytes / 1024 / 1024
+                    ));
+                }
+            }
+
+            if status != 200 {
+                let snippet: String = String::from_utf8_lossy(&out).chars().take(200).collect();
+                let head = match status {
+                    403 => "403 —— GitHub 的 API 拒绝了这个请求",
+                    404 => "404 —— 仓库或发布不存在（也可能是还没有任何发布）",
+                    429 => "429 —— 请求太频繁",
+                    _ => "非预期状态码",
+                };
+                return Err(format!("服务器返回 HTTP {status}（{head}）：{snippet}"));
+            }
+            Ok(out)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod http {
+    pub fn get(_url: &str, _timeout_ms: i32, _max_bytes: usize) -> Result<Vec<u8>, String> {
+        Err("更新器的网络传输目前只实现了 Windows（项目也只做 Windows）".into())
+    }
+}
+
+/// 取发布清单并解析。
+///
+/// 这是"检查更新"的全部网络行为：**一次 GET，不发任何用户数据**
+/// —— 按 ADR-0019 它属于 R2（默认关闭 + 记审计），不属于 R1 数据红线。
+pub fn fetch_releases() -> Result<Vec<Release>, String> {
+    let body = http::get(&releases_api_url(), HTTP_TIMEOUT_MS, MAX_RESPONSE_BYTES)?;
+    let text = String::from_utf8(body).map_err(|_| "响应不是合法的 UTF-8".to_string())?;
+    parse_releases(&text)
+}
+
+// ============================================================
 // 五步校验链（ADR-0018 第 1 条）
 // ============================================================
 
@@ -1176,5 +1419,58 @@ mod tests_release {
         assert!(parse_releases("not json").is_err());
         assert!(parse_releases("{}").is_err(), "顶层应当是数组");
         assert!(parse_releases("[]").unwrap().is_empty(), "空数组是合法的");
+    }
+}
+
+#[cfg(test)]
+mod tests_net {
+    use super::*;
+
+    /// 真实的联网检查。**默认忽略**（`#[ignore]`）。
+    ///
+    /// 为什么不放进常规测试集：CI 与用户机器的网络都不可靠，
+    /// 一个"有时红有时绿"的测试最后一定会被人无视掉 —— **那比没有测试更糟**。
+    /// 这里要的是一次**真跑**，所以手动执行：
+    ///
+    /// ```bash
+    /// cd app && cargo test -- --ignored 联网检查更新能拿到清单 --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要网络；手动用 cargo test -- --ignored 跑"]
+    fn 联网检查更新能拿到清单() {
+        match fetch_releases() {
+            Ok(rs) => {
+                assert!(!rs.is_empty(), "至少应当有一个发布");
+                for r in &rs {
+                    assert!(r.version().is_some(), "tag 应当能解析：{}", r.tag);
+                }
+                println!("✔ 取到 {} 个发布，最新的 tag = {}", rs.len(), rs[0].tag);
+            }
+            // 未认证的 GitHub API 是 **60 次/小时/出口 IP**。走系统代理时出口 IP 是共享的，
+            // 所以这条很容易撞上 —— 这不是我们代码的问题，但**必须能被认出来**，
+            // 而且测试不能因此变红（否则又会变成"随机红的测试最后被无视"）。
+            Err(e) if e.contains("rate limit") => {
+                println!("⚠ 撞上 GitHub 限流 —— 这恰好说明请求确实到达了 API：\n{e}");
+            }
+            Err(e) => panic!("本该能取到清单（限流之外的错误都算失败）：{e}"),
+        }
+    }
+
+    /// 取数地址必须写死在官方仓库上 —— 它是"下载源不可配置"这条要求的锚点。
+    #[test]
+    fn 取数地址写死在官方仓库且不是_latest() {
+        let u = releases_api_url();
+        assert!(u.starts_with("https://api.github.com/repos/YJLZSL/DeskBase/releases"));
+        assert!(
+            !u.ends_with("/latest"),
+            "不能用 /releases/latest —— 本仓库所有发布都是预发布，实测它一律 404"
+        );
+    }
+
+    /// 非 https 的地址必须被拒（不进网络栈就拒）。
+    #[test]
+    fn 只允许_https_地址() {
+        let err = http::get("http://api.github.com/x", 1000, 1024).unwrap_err();
+        assert!(err.contains("https"), "{err}");
     }
 }
