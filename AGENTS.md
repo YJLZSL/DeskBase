@@ -51,6 +51,40 @@
 
 ---
 
+## 1b. 目录职责表（别猜某个目录是干什么的）
+
+```
+DeskBase/
+├── app/                    应用本体（唯一会进产物的东西）
+│   ├── src/*.rs            Rust：外壳 + 全部能力。模块职责见 AI_CONTEXT 第 3 节
+│   ├── ui/*.{js,css,html}  WebView 里的手写前端（零依赖、零构建）
+│   └── target/             ⚠️ 构建缓存（~4 GB），可随时删，不要提交
+├── docs/                   ★ 对外文档（会入库）：产品设计 00–19 + ADR。文档是契约
+├── local-docs/             ⚠️ 本地专属，**已 gitignore、永不入库**
+│   ├── reference/          调研与参考（26 篇，索引见其 README）
+│   └── handoff/            AI 交接体系（快照/版本线/决策/待决/文件索引）
+├── scripts/                构建、打包、发布、四道门禁、界面烟测
+├── tests/                  端到端验收（e2e-import）、压力测试（stress-import）
+│   └── crash/              崩溃一致性套件（P0-08 的产物）
+├── tools/                  构建期工具（图标光栅化、字体校验）
+├── testdata/               测试夹具（脏数据语料生成器 + GitHub 发布样本）
+├── poc/                    ⚠️ 调研期产物（ADR-0010 的实测依据）。源码入库，
+│                              `target-msvc/` 与 `node_modules/` 是构建缓存（约 700 MB），
+│                              **不要删源码**（ADR-0010 引用它作为方案对比的依据）
+├── dist/                   ⚠️ 发布产物归档（zip / SHA-256 / SBOM），已 gitignore
+└── .workbuddy/             会话记忆（memory/ 是个人工作日志，已 gitignore）
+```
+
+**三条容易踩的边界**：
+
+| 目录 | 规则 |
+|------|------|
+| `local-docs/` | **永不入库**（`git add -f` 也不行）。换机必须单独拷贝 |
+| `docs/` | 是对外契约，改它要按 `CONTRIBUTING.md` 第八节补流程；结论性改动走 ADR |
+| `poc/`、`dist/` | 本地产物。`poc/` 的**源码**留着（它是决策依据），缓存可删 |
+
+---
+
 ## 2. 干活：命令速查
 
 **不要绕过 `scripts/build.cjs` 直接跑 `cargo`** —— 本机有三处非标准
@@ -63,17 +97,30 @@
 | 构建 release | `node scripts/build.cjs` |
 | 构建 debug / 构建后启动 | `node scripts/build.cjs --debug` / `--run` |
 | **测试**（唯一入口） | `node scripts/build.cjs --test` |
-| 界面烟测（真实 WebView 里真实点击） | `node scripts/build.cjs --smoke` 或 `node scripts/ui-smoke.cjs <exe>` |
+| 界面烟测（真实 WebView 里真实点击，31 步） | `node scripts/build.cjs --smoke` 或 `node scripts/ui-smoke.cjs <exe>` |
+| **端到端验收**（真实数据走完整导入链路，28 步） | `node scripts/build.cjs --e2e` 或 `node tests/e2e-import.cjs <表格文件>` |
+| **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
 | 门禁四件套 | `node scripts/check-motion.cjs` · `check-contrast.cjs` · `check-wiring.cjs` · `check-size.cjs` |
 | 打包（zip + SHA-256 + SBOM） | `node scripts/package.cjs` |
 | 发布（打标签即发布） | `node scripts/publish-release.cjs vX.Y.Z [--dry-run] [--prerelease]` |
 | 发布说明 | `node scripts/gen-changelog.cjs [--to <ref>]` |
 
 **验收口径（重要）**：
-- 改动涉及界面 → 至少跑 `--smoke`；涉及样式/主题 → 跑 `check-motion` + `check-contrast`；
-  涉及新增界面文件或 IPC 命令 → 跑 `check-wiring`。
+
+| 改了什么 | 至少跑什么 |
+|---------|-----------|
+| 纯后端逻辑 | `--test` |
+| 涉及界面 | `--test` + `--smoke` |
+| 涉及样式 / 主题 | 再加 `check-motion` + `check-contrast` |
+| 新增界面文件或 IPC 命令 | 再加 `check-wiring` |
+| **涉及导入 / 大批量数据** | 再加 `--e2e` + `stress-import --sizes 10000,100000` |
+| 动到体积（加依赖 / 加资源） | 再加 `check-size` |
+
 - **别把"后端测过"说成"界面点过"** —— 这是本项目最忌讳的事。
   验收覆盖到哪一层，`ACCEPTANCE-*.md` 里逐项标着（已自动化 / 仅 IPC 层 / 未覆盖）。
+- **测试必须可重复**：只断言确定的东西。网络结果（限流/超时/有新版）是**合法结果**，
+  UI 如实展示即通过 —— 把网络抖动当红灯的测试会被无视。
+- **改完连跑两次**确认稳定再提交：偶发通过的测试等于没有测试。
 
 ---
 
