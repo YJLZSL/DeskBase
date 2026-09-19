@@ -14,20 +14,26 @@
 
 // ⚠️ 临时的死代码豁免 —— **有终止条件，接线时必须删掉这一行**。
 //
-// 本模块是"半接线"状态：`--apply-update` / `--version` 两个命令行模式是**真的在用**
-// （替换、备份、回滚全都能跑），但下面这一半还没有调用方：
+// 下面这份清单是**实测出来的**，不是估的：把本行临时摘掉跑一次 release 构建，
+// rustc 报 28 个未使用警告，正好是"下载 / 暂存 / 校验"这一半 ——
+// 因为调用它们的那条 IPC（`app.updateDownload`）还没写。
 //
-//   下载与校验：`Asset` / `pick_zip` / `pick_sha256` / `version_from_asset_name` /
-//   `parse_sha256_file` / `sha256_file` / `verify_sha256` / `plan_managed_files` /
-//   `ManagedPlan` / `plan_apply` / `same_path` / `Version::is_newer_than` / `is_prerelease`
+//   下载与暂存：`download_and_stage` / `download_to` / `staging_dir` / `Staged` /
+//   `asset_api_url` / `asset_name` / `ASSET_PREFIX` / `ASSET_SUFFIX` / `ACCEPT_OCTET` /
+//   `DOWNLOAD_TIMEOUT_MS` / `usable_assets` / `version_from_asset_name` / `is_prerelease`
+//   五步校验：`verify_and_stage_zip` / `extract_managed` / `MANAGED_FILES` /
+//   `verify_sha256` / `sha256_file` / `parse_sha256_file` / `verify_zip_layout`
+//   替换计划：`plan_apply` / `plan_managed_files` / `same_path` / `ManagedPlan` /
+//   `pick_zip` / `pick_sha256` / `Asset` 与它的字段
 //
-// 它们要等「更新向导」接上（取 Releases API → 下载 → 五步校验 → 写 plan.json）。
+// **已经接通的**（所以不在这份清单里）：`app.updateCheck` / `app.updateSettings` /
+// `--version` / `--apply-update` —— 版本比较、发布清单解析、通道挑选、
+// 设置读写、时钟与审计、替换与回滚都在真的跑。
 //
-// **终止条件**（写死在代码里）：IPC `app.updateCheck` / `app.updateDownload` 接通后，
-// 删除本行 —— 一个都不许留。
+// **终止条件**（写死在代码里）：IPC `app.updateDownload` 接通后删除本行 —— 一个都不许留。
 //
-// 已知代价：模块级豁免会**连带盖住将来新出现的死代码**。所以它必须尽快消失，
-// 而不是变成常驻。之所以现在不动它：把这一半拆成子模块要跨 `impl` 边界搬代码，
+// 已知代价：模块级豁免会**连带盖住将来新出现的死代码**，所以它必须尽快消失。
+// 之所以现在不动它：把这一半拆成子模块要跨 `impl` 边界搬代码，
 // 在当前改动量下风险大于收益。这条记在 OPEN_QUESTIONS 的 Q-046 里。
 #![allow(dead_code)]
 
@@ -484,11 +490,19 @@ mod http {
         }
     }
 
-    /// 发一个 HTTPS GET，返回响应体。只支持 `https://<host>/<path>`。
+    /// 发一个 HTTPS GET，**边收边交给 `on_chunk`**，不在内存里攒整份。
     ///
-    /// 为什么限制这么死：更新器只访问一个写死的地址，
-    /// 支持更多形态只会扩大攻击面（重定向、自定义端口、userinfo 之类）。
-    pub fn get(url: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>, String> {
+    /// 为什么是流式：清单只有几十 KB，但**安装包会变大**（现在 3.2 MB，将来可能几十 MB）。
+    /// 攒在内存里跑得通不代表应该这么写 —— 内存目标是写死的（≤400 MB）。
+    ///
+    /// `on_chunk` 返回 Err 就直接中止（用于"写文件失败"这类不该继续的情况）。
+    pub fn stream(
+        url: &str,
+        accept: &str,
+        timeout_ms: i32,
+        max_bytes: usize,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
         let rest = url
             .strip_prefix("https://")
             .ok_or_else(|| format!("更新器只允许访问 https 地址：{url}"))?;
@@ -552,8 +566,7 @@ mod http {
 
             // GitHub 的 API 要求带 User-Agent，不带会被 403。
             // 用 wide_len（不带 NUL）—— 见它自己的注释，这里与 PCWSTR 的规则相反。
-            let headers =
-                wide_len("User-Agent: DeskBase\r\nAccept: application/vnd.github+json\r\n");
+            let headers = wide_len(&format!("User-Agent: DeskBase\r\nAccept: {accept}\r\n"));
             WinHttpSendRequest(req.0, Some(&headers), None, 0, 0, 0)
                 .map_err(|e| format!("发送请求失败：{e}"))?;
             WinHttpReceiveResponse(req.0, std::ptr::null_mut())
@@ -571,9 +584,11 @@ mod http {
             )
             .map_err(|e| format!("读状态码失败：{e}"))?;
 
-            // 先把 body 读完再判状态码：**非 200 时响应体里往往有原因**
+            // 先收一段 body 再判状态码：**非 200 时响应体里往往有原因**
             // （GitHub 会写明是限流还是缺 User-Agent），少了它就只剩一个干巴巴的 403。
-            let mut out: Vec<u8> = Vec::new();
+            // 但 200 时不能攒 —— 那时候内容是安装包本身，只往前端（文件）递。
+            let mut total: usize = 0;
+            let mut err_snippet: Vec<u8> = Vec::new();
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 let mut read: u32 = 0;
@@ -587,45 +602,289 @@ mod http {
                 if read == 0 {
                     break;
                 }
-                out.extend_from_slice(&buf[..read as usize]);
-                if out.len() > max_bytes {
+                let chunk = &buf[..read as usize];
+                total += chunk.len();
+                if total > max_bytes {
                     return Err(format!(
                         "响应超过 {} MB 上限，已中止（不把内存交给对方说了算）",
                         max_bytes / 1024 / 1024
                     ));
                 }
+                if status == 200 {
+                    on_chunk(chunk)?;
+                } else if err_snippet.len() < 200 {
+                    err_snippet.extend_from_slice(chunk);
+                }
             }
 
             if status != 200 {
-                let snippet: String = String::from_utf8_lossy(&out).chars().take(200).collect();
+                let snippet: String =
+                    String::from_utf8_lossy(&err_snippet).chars().take(200).collect();
                 let head = match status {
                     403 => "403 —— GitHub 的 API 拒绝了这个请求",
-                    404 => "404 —— 仓库或发布不存在（也可能是还没有任何发布）",
+                    404 => "404 —— 仓库 / 发布 / 资产不存在（也可能是还没有任何发布）",
                     429 => "429 —— 请求太频繁",
                     _ => "非预期状态码",
                 };
                 return Err(format!("服务器返回 HTTP {status}（{head}）：{snippet}"));
             }
-            Ok(out)
+            Ok(())
         }
+    }
+
+    /// 收进内存。只用于**小体积**响应（JSON 清单）。
+    pub fn get(url: &str, accept: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>, String> {
+        let mut out: Vec<u8> = Vec::new();
+        stream(url, accept, timeout_ms, max_bytes, &mut |c| {
+            out.extend_from_slice(c);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// 收进文件。用于**大体积**响应（安装包），全程不驻留内存。
+    pub fn download_to(
+        url: &str,
+        accept: &str,
+        timeout_ms: i32,
+        max_bytes: usize,
+        dest: &std::path::Path,
+    ) -> Result<u64, String> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(dest)
+            .map_err(|e| format!("建不了临时文件 {}：{e}", dest.display()))?;
+        let mut written: u64 = 0;
+        let r = stream(url, accept, timeout_ms, max_bytes, &mut |c| {
+            f.write_all(c).map_err(|e| format!("写文件失败：{e}"))?;
+            written += c.len() as u64;
+            Ok(())
+        });
+        if let Err(e) = r {
+            // 半截文件必须删掉：留着它比没有更危险 —— 下次可能被当成完整的包
+            let _ = std::fs::remove_file(dest);
+            return Err(e);
+        }
+        f.flush().map_err(|e| format!("落盘失败：{e}"))?;
+        Ok(written)
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod http {
-    pub fn get(_url: &str, _timeout_ms: i32, _max_bytes: usize) -> Result<Vec<u8>, String> {
+    pub fn stream(
+        _url: &str,
+        _accept: &str,
+        _timeout_ms: i32,
+        _max_bytes: usize,
+        _on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        Err("更新器的网络传输目前只实现了 Windows（项目也只做 Windows）".into())
+    }
+
+    pub fn get(
+        _url: &str,
+        _accept: &str,
+        _timeout_ms: i32,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        Err("更新器的网络传输目前只实现了 Windows（项目也只做 Windows）".into())
+    }
+
+    pub fn download_to(
+        _url: &str,
+        _accept: &str,
+        _timeout_ms: i32,
+        _max_bytes: usize,
+        _dest: &std::path::Path,
+    ) -> Result<u64, String> {
         Err("更新器的网络传输目前只实现了 Windows（项目也只做 Windows）".into())
     }
 }
+
+/// 取 JSON（发布清单用）
+pub const ACCEPT_JSON: &str = "application/vnd.github+json";
+
+/// 取原始字节（下载发布资产用）。
+/// **必须显式声明**，否则 GitHub 会返回资产的 JSON 描述而不是文件本身 —— 那是个很难一眼看出的坑：
+/// 下载下来的"zip"其实是几百字节的 JSON。
+pub const ACCEPT_OCTET: &str = "application/octet-stream";
 
 /// 取发布清单并解析。
 ///
 /// 这是"检查更新"的全部网络行为：**一次 GET，不发任何用户数据**
 /// —— 按 ADR-0019 它属于 R2（默认关闭 + 记审计），不属于 R1 数据红线。
 pub fn fetch_releases() -> Result<Vec<Release>, String> {
-    let body = http::get(&releases_api_url(), HTTP_TIMEOUT_MS, MAX_RESPONSE_BYTES)?;
+    let body = http::get(
+        &releases_api_url(),
+        ACCEPT_JSON,
+        HTTP_TIMEOUT_MS,
+        MAX_RESPONSE_BYTES,
+    )?;
     let text = String::from_utf8(body).map_err(|_| "响应不是合法的 UTF-8".to_string())?;
     parse_releases(&text)
+}
+
+// ============================================================
+// 设置（存 sys_meta，与工作区状态同一个表、不同的键）
+// ============================================================
+//
+// 为什么存库而不是像主题那样放 localStorage：**这是网络开关**。
+// 它必须跟"这个数据目录"绑定 —— 换个数据目录就不该继承上一个目录的联网许可。
+// 而且 ADR-0005 要求它可审计，存库才好查。
+
+/// 更新检查的档位。**默认 `Never`** —— ADR-0005「网络默认关闭」，这是红线级的默认值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UpdateMode {
+    /// 从不检查（默认）
+    Never,
+    /// 只检查并提醒，**不下载**
+    Notify,
+    /// 检查并下载，替换前询问用户
+    DownloadAsk,
+}
+
+impl UpdateMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateMode::Never => "never",
+            UpdateMode::Notify => "notify",
+            UpdateMode::DownloadAsk => "download_ask",
+        }
+    }
+    pub fn parse(s: &str) -> Option<UpdateMode> {
+        match s {
+            "never" => Some(UpdateMode::Never),
+            "notify" => Some(UpdateMode::Notify),
+            "download_ask" => Some(UpdateMode::DownloadAsk),
+            _ => None,
+        }
+    }
+}
+
+impl Channel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Channel::Stable => "stable",
+            Channel::Prerelease => "prerelease",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Channel> {
+        match s {
+            "stable" => Some(Channel::Stable),
+            "prerelease" => Some(Channel::Prerelease),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct UpdateSettings {
+    pub mode: UpdateMode,
+    pub channel: Channel,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        // 保守到底：默认不检查、默认稳定通道
+        UpdateSettings {
+            mode: UpdateMode::Never,
+            channel: Channel::Stable,
+        }
+    }
+}
+
+const KEY_MODE: &str = "net.update.mode";
+const KEY_CHANNEL: &str = "net.update.channel";
+
+/// 读设置。**任何异常都回退到默认（从不检查）** —— 读不出来时倾向于不联网，
+/// 而不是倾向于联网。方向不能反。
+pub fn load_settings(conn: &rusqlite::Connection) -> UpdateSettings {
+    let get = |key: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM sys_meta WHERE key = ?1",
+            rusqlite::params![key],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+    let mut s = UpdateSettings::default();
+    if let Some(v) = get(KEY_MODE) {
+        if let Some(m) = UpdateMode::parse(&v) {
+            s.mode = m;
+        }
+    }
+    if let Some(v) = get(KEY_CHANNEL) {
+        if let Some(c) = Channel::parse(&v) {
+            s.channel = c;
+        }
+    }
+    s
+}
+
+pub fn save_settings(
+    conn: &rusqlite::Connection,
+    s: &UpdateSettings,
+) -> Result<(), String> {
+    for (k, v) in [
+        (KEY_MODE, s.mode.as_str().to_string()),
+        (KEY_CHANNEL, s.channel.as_str().to_string()),
+    ] {
+        conn.execute(
+            "INSERT INTO sys_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![k, v],
+        )
+        .map_err(|e| format!("保存更新设置失败：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 一次检查的结果，连"为什么没检查"一起给出来。
+///
+/// `checked = false` 时**没有发生任何网络行为** —— 界面要能明确区分
+/// "检查过，是最新"与"压根没检查（网络默认关闭）"，这两件事对用户的意义完全不同。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CheckReport {
+    pub checked: bool,
+    pub mode: String,
+    pub channel: String,
+    pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<CheckOutcome>,
+}
+
+/// 按设置执行一次检查。**`Never` 档位下不会发起任何网络请求。**
+///
+/// 网络行为本身由调用方（IPC 层）记审计 —— 这里只做"该不该发"的判断。
+pub fn check_by_settings(
+    conn: &rusqlite::Connection,
+    current: &Version,
+) -> Result<CheckReport, String> {
+    let s = load_settings(conn);
+    let mut rep = CheckReport {
+        checked: false,
+        mode: s.mode.as_str().to_string(),
+        channel: s.channel.as_str().to_string(),
+        current: current.to_string(),
+        reason: None,
+        outcome: None,
+    };
+
+    if s.mode == UpdateMode::Never {
+        rep.reason = Some(
+            "网络默认关闭 —— 更新检查在设置里开启之后才会联网（ADR-0005）。\
+             现在也可以直接到发布页手动下载。"
+                .into(),
+        );
+        return Ok(rep);
+    }
+
+    let releases = fetch_releases()?;
+    rep.checked = true;
+    rep.outcome = Some(check(&releases, current, s.channel));
+    Ok(rep)
 }
 
 // ============================================================
@@ -718,6 +977,184 @@ pub fn plan_managed_files(zip_entries: &[String]) -> ManagedPlan {
     replace.sort();
     ignored.sort();
     ManagedPlan { replace, ignored }
+}
+
+// ============================================================
+// 下载 + 暂存（ADR-0018 第 2–4 步的落地）
+// ============================================================
+
+/// 下安装包用的超时：比清单长得多（3 MB 在慢网络上也要一会儿）。
+pub const DOWNLOAD_TIMEOUT_MS: i32 = 120_000;
+
+/// 暂存好的更新。`dir` 里会有：`update.zip`、`update.zip.sha256`、
+/// 解压出来的受管文件、以及给 `--apply-update` 读的 `plan.json`。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Staged {
+    pub dir: String,
+    pub plan: ApplyPlan,
+    pub zip_entries: Vec<String>,
+    pub zip_bytes: u64,
+}
+
+/// 资产的下载地址 —— **走 API 的 asset 端点**，不用 `browser_download_url`。
+/// 理由：这样连下载请求的第一跳也落在 `api.github.com`（ADR-0018 第 7 节）。
+pub fn asset_api_url(asset: &Asset) -> String {
+    format!(
+        "https://api.github.com/repos/{REPO}/releases/assets/{}",
+        asset.id
+    )
+}
+
+/// 暂存目录：放在**数据目录**下。
+///
+/// 为什么不放程序目录：安装版的程序目录是只读的（Program Files），
+/// 而数据目录一定有写权限。且数据目录本来就有 `backups/`，
+/// 更新暂存放进去与它同级，用户找得到也删得掉。
+pub fn staging_dir(data_dir: &Path, version: &Version) -> PathBuf {
+    data_dir.join("updates").join(version.to_string())
+}
+
+/// 把 zip 里**白名单内**的文件解出来。白名单外的连碰都不碰。
+fn extract_managed(zip_path: &Path, dest: &Path, wanted: &[String]) -> Result<(), String> {
+    use std::io::copy;
+    let f = std::fs::File::open(zip_path).map_err(|e| format!("打不开安装包：{e}"))?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("这不是一个有效的压缩包：{e}"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("读包内条目失败：{e}"))?;
+        let name = entry.name().to_string();
+        if !wanted.iter().any(|w| w == &name) {
+            continue; // 白名单外一律不落地（verify_zip_layout 已经拦过路径穿越）
+        }
+        let out = dest.join(&name);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
+        }
+        let mut w = std::fs::File::create(&out).map_err(|e| format!("建文件失败：{e}"))?;
+        copy(&mut entry, &mut w).map_err(|e| format!("解压 {name} 失败：{e}"))?;
+    }
+    Ok(())
+}
+
+/// **第 2–4 步 + 解压到暂存目录。全是本地操作，可以离线测。**
+///
+/// 拆出来的目的就是这一点：五步校验里真正容易错的是"边界判断"（大小不符、
+/// 哈希不符、包里没可执行文件、路径穿越），而这些不需要联网就能构造出来。
+pub fn verify_and_stage_zip(
+    zip_path: &Path,
+    sha256_text: &str,
+    expected_size: u64,
+    staging: &Path,
+    install_dir: &Path,
+    data_dir: &Path,
+    current: &Version,
+    target: &Version,
+) -> Result<Staged, String> {
+    // ① 第 2 步后半：API 报的 size 与实下载字节数一致
+    let actual = std::fs::metadata(zip_path)
+        .map_err(|e| format!("读不到下载的包：{e}"))?
+        .len();
+    if actual != expected_size {
+        return Err(format!(
+            "包大小与清单不符 —— 可能只下了一半，或者根本不是同一个包。\n实际：{actual} 字节\n清单：{expected_size} 字节"
+        ));
+    }
+
+    // ② 第 3 步：配套的 SHA-256 逐字节比对
+    let (want, _) = parse_sha256_file(sha256_text)
+        .ok_or("校验和文件的内容不是 64 位十六进制 —— 拒绝继续（没有它能比的东西）")?;
+    verify_sha256(zip_path, &want)?;
+
+    // ③ 第 4 步：真打开包，确认有 deskbase.exe、且没有路径穿越
+    let entries = verify_zip_layout(zip_path)?;
+
+    // ④ 算替换计划（内含两条底线：拒绝安装目录==暂存目录、拒绝写进数据目录）
+    let plan = plan_apply(staging, install_dir, data_dir, &entries, current, target)?;
+
+    // ⑤ 解压白名单内的文件
+    std::fs::create_dir_all(staging).map_err(|e| format!("建暂存目录失败：{e}"))?;
+    extract_managed(zip_path, staging, &plan.replace)?;
+
+    // ⑥ 写 plan.json —— `--apply-update` 靠它知道"从哪个版本到哪个版本、动哪些文件"
+    let text = serde_json::to_string_pretty(&plan)
+        .map_err(|e| format!("序列化替换计划失败：{e}"))?;
+    std::fs::write(staging.join("plan.json"), text)
+        .map_err(|e| format!("写替换计划失败：{e}"))?;
+
+    Ok(Staged {
+        dir: staging.to_string_lossy().to_string(),
+        plan,
+        zip_entries: entries,
+        zip_bytes: actual,
+    })
+}
+
+/// 从选定的 Release **下载并暂存**。这是"下载"这一步的全部网络行为。
+///
+/// 每一次失败都要**保持程序原状态**并说清原因 —— 更新器最不该做的事，
+/// 是留下一个"看起来升级了、其实是半截"的状态。
+pub fn download_and_stage(
+    release: &Release,
+    install_dir: &Path,
+    data_dir: &Path,
+    current: &Version,
+) -> Result<Staged, String> {
+    let target = release
+        .version()
+        .ok_or_else(|| format!("发布标签解析不出合法版本号：{}", release.tag))?;
+    let assets = release.usable_assets();
+
+    let zip = pick_zip(&assets, &target).ok_or_else(|| {
+        format!(
+            "这个发布里没有 {} —— 产物可能还没传完",
+            asset_name(&target.to_string())
+        )
+    })?;
+    // 没有校验和就不继续 —— SHA-256 是这条链上**唯一的**内容校验，缺它等于裸装
+    let sha = pick_sha256(&assets, zip)
+        .ok_or("这个发布里没有配套的 .sha256 —— 缺它就没法校验内容，拒绝继续")?;
+
+    let staging = staging_dir(data_dir, &target);
+    // 先把旧的暂存清掉：残留文件会让"这次到底装了什么"变得说不清
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| format!("清理旧暂存失败：{e}"))?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| format!("建暂存目录失败：{e}"))?;
+
+    // 上限给"清单里说的大小 + 1 MB"：不允许对方比它自己声明的还多塞内容
+    let cap = (zip.size as usize).saturating_add(1024 * 1024).max(1024 * 1024);
+    let zip_path = staging.join("update.zip");
+    http::download_to(
+        &asset_api_url(zip),
+        ACCEPT_OCTET,
+        DOWNLOAD_TIMEOUT_MS,
+        cap,
+        &zip_path,
+    )?;
+
+    // 校验和资产很小，收进内存就够；同时**落到暂存目录留证**
+    let sha_body = http::get(
+        &asset_api_url(sha),
+        ACCEPT_OCTET,
+        HTTP_TIMEOUT_MS,
+        64 * 1024,
+    )?;
+    let sha_text =
+        String::from_utf8(sha_body).map_err(|_| "校验和文件不是合法的 UTF-8".to_string())?;
+    std::fs::write(staging.join("update.zip.sha256"), &sha_text)
+        .map_err(|e| format!("保存校验和文件失败：{e}"))?;
+
+    verify_and_stage_zip(
+        &zip_path,
+        &sha_text,
+        zip.size,
+        &staging,
+        install_dir,
+        data_dir,
+        current,
+        &target,
+    )
 }
 
 // ============================================================
@@ -1470,7 +1907,375 @@ mod tests_net {
     /// 非 https 的地址必须被拒（不进网络栈就拒）。
     #[test]
     fn 只允许_https_地址() {
-        let err = http::get("http://api.github.com/x", 1000, 1024).unwrap_err();
+        let err = http::get("http://api.github.com/x", ACCEPT_JSON, 1000, 1024).unwrap_err();
         assert!(err.contains("https"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tests_stage {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("deskbase_stage_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 造一个**内容真实**的包（不是塞几个 "x"）：这样 SHA-256 才有意义。
+    fn make_zip(path: &Path, files: &[(&str, &[u8])]) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in files {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    /// 一次成功的暂存：三件事都要成立 —— 计划对了、文件解出来了、plan.json 写了。
+    #[test]
+    fn 正常情况能暂存并写出替换计划() {
+        let d = tmp("ok");
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+
+        let zip = d.join("pkg.zip");
+        make_zip(
+            &zip,
+            &[
+                ("deskbase.exe", b"NEW-EXE"),
+                ("README.md", b"NEW-README"),
+                ("startup.bat", b"should-not-be-taken"),
+            ],
+        );
+        let size = std::fs::metadata(&zip).unwrap().len();
+        let hash = sha256_file(&zip).unwrap();
+        let sha_text = format!("{hash}  deskbase-0.2.2-windows-x64-portable.zip\n");
+
+        let staging = staging_dir(&data, &v("0.2.2"));
+        let staged = verify_and_stage_zip(
+            &zip,
+            &sha_text,
+            size,
+            &staging,
+            &install,
+            &data,
+            &v("0.2.1"),
+            &v("0.2.2"),
+        )
+        .expect("应当暂存成功");
+
+        assert_eq!(staged.plan.from, "0.2.1");
+        assert_eq!(staged.plan.to, "0.2.2");
+        assert_eq!(staged.zip_bytes, size);
+
+        // 白名单内的文件解出来了
+        assert_eq!(std::fs::read(staging.join("deskbase.exe")).unwrap(), b"NEW-EXE");
+        assert_eq!(std::fs::read(staging.join("README.md")).unwrap(), b"NEW-README");
+        // 白名单外的**没有**落地
+        assert!(!staging.join("startup.bat").exists(), "startup.bat 不该被解出来");
+
+        // plan.json 写了，而且能被读回来（--apply-update 就靠它）
+        let text = std::fs::read_to_string(staging.join("plan.json")).unwrap();
+        let plan: ApplyPlan = serde_json::from_str(&text).unwrap();
+        assert_eq!(plan.to, "0.2.2");
+        assert!(plan.replace.contains(&"deskbase.exe".to_string()));
+
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn 大小与清单不符时必须拒绝() {
+        let d = tmp("size");
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+        let zip = d.join("pkg.zip");
+        make_zip(&zip, &[("deskbase.exe", b"x")]);
+        let size = std::fs::metadata(&zip).unwrap().len();
+        let hash = sha256_file(&zip).unwrap();
+
+        let staging = staging_dir(&data, &v("0.2.2"));
+        let err = verify_and_stage_zip(
+            &zip,
+            &format!("{hash}\n"),
+            size + 1, // 清单说的大一点
+            &staging,
+            &install,
+            &data,
+            &v("0.2.1"),
+            &v("0.2.2"),
+        )
+        .unwrap_err();
+        assert!(err.contains("大小与清单不符"), "{err}");
+        assert!(err.contains("实际") && err.contains("清单"), "要把两个数都说出来：{err}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn 校验和不符时必须拒绝并说清两个值() {
+        let d = tmp("sha");
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+        let zip = d.join("pkg.zip");
+        make_zip(&zip, &[("deskbase.exe", b"real-content")]);
+        let size = std::fs::metadata(&zip).unwrap().len();
+
+        let staging = staging_dir(&data, &v("0.2.2"));
+        let err = verify_and_stage_zip(
+            &zip,
+            &format!("{}\n", "0".repeat(64)),
+            size,
+            &staging,
+            &install,
+            &data,
+            &v("0.2.1"),
+            &v("0.2.2"),
+        )
+        .unwrap_err();
+        assert!(err.contains("校验和不符"), "{err}");
+        assert!(err.contains("实际") && err.contains("应为"), "{err}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn 校验和文件格式不对时拒绝继续() {
+        let d = tmp("shafmt");
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+        let zip = d.join("pkg.zip");
+        make_zip(&zip, &[("deskbase.exe", b"x")]);
+        let size = std::fs::metadata(&zip).unwrap().len();
+
+        let staging = staging_dir(&data, &v("0.2.2"));
+        let err = verify_and_stage_zip(
+            &zip,
+            "这不是校验和",
+            size,
+            &staging,
+            &install,
+            &data,
+            &v("0.2.1"),
+            &v("0.2.2"),
+        )
+        .unwrap_err();
+        assert!(err.contains("64 位十六进制"), "{err}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn 包里没有可执行文件时拒绝暂存() {
+        let d = tmp("noexe");
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+        let zip = d.join("pkg.zip");
+        make_zip(&zip, &[("README.md", b"only-docs")]);
+        let size = std::fs::metadata(&zip).unwrap().len();
+        let hash = sha256_file(&zip).unwrap();
+
+        let staging = staging_dir(&data, &v("0.2.2"));
+        let err = verify_and_stage_zip(
+            &zip,
+            &format!("{hash}\n"),
+            size,
+            &staging,
+            &install,
+            &data,
+            &v("0.2.1"),
+            &v("0.2.2"),
+        )
+        .unwrap_err();
+        assert!(err.contains("deskbase.exe"), "{err}");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn 暂存目录在数据目录下而不是程序目录() {
+        let data = PathBuf::from("C:/data/DeskBaseData");
+        let s = staging_dir(&data, &v("0.3.0"));
+        assert!(s.starts_with(&data), "暂存放数据目录：{}", s.display());
+        assert!(s.ends_with("updates/0.3.0") || s.ends_with("updates\\0.3.0"), "{}", s.display());
+    }
+
+    #[test]
+    fn 下载地址走的是资产端点() {
+        let a = Asset { id: 571438036, name: "x.zip".into(), size: 1 };
+        let u = asset_api_url(&a);
+        assert!(u.contains("/releases/assets/571438036"), "{u}");
+        assert!(!u.contains("browser_download_url"), "不该用 browser_download_url：这样第一跳就不在 api 上了");
+    }
+}
+
+#[cfg(test)]
+mod tests_e2e {
+    use super::*;
+
+    /// 端到端：真去 GitHub 取清单 → 挑版本 → 下载包 → 走完五步校验 → 落到暂存目录。
+    ///
+    /// **默认忽略**，手动跑：
+    /// ```bash
+    /// cd app && cargo test -- --ignored 端到端下载并暂存 --nocapture
+    /// ```
+    /// 会真的下载几 MB。安装目录与数据目录都用临时目录，**不会碰任何真实文件**。
+    #[test]
+    #[ignore = "需要网络且会真下载几 MB；手动用 cargo test -- --ignored 跑"]
+    fn 端到端下载并暂存() {
+        let releases = match fetch_releases() {
+            Ok(r) => r,
+            Err(e) if e.contains("rate limit") => {
+                println!("⚠ 撞上 GitHub 限流，这条端到端验证这次跑不了（不是代码问题）：\n{e}");
+                return;
+            }
+            Err(e) => panic!("取清单失败：{e}"),
+        };
+
+        // 用一个比全部都低的当前版本，保证"有更新"
+        let current = Version::parse("0.0.1").unwrap();
+        let picked = match check(&releases, &current, Channel::Prerelease) {
+            CheckOutcome::Newer { tag, version, .. } => {
+                println!("✔ 挑中 {tag}（{version}）");
+                (tag, version)
+            }
+            other => panic!("本该有更新，实际：{other:?}"),
+        };
+        let _ = picked;
+
+        let target_tag = match check(&releases, &current, Channel::Prerelease) {
+            CheckOutcome::Newer { tag, .. } => tag,
+            _ => unreachable!(),
+        };
+        let release = releases
+            .iter()
+            .find(|r| r.tag == target_tag)
+            .expect("刚挑出来的发布应当还在清单里");
+
+        let d = std::env::temp_dir().join(format!("deskbase_e2e_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let data = d.join("data");
+        let install = d.join("install");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&install).unwrap();
+
+        let staged = download_and_stage(release, &install, &data, &current)
+            .unwrap_or_else(|e| panic!("下载并暂存失败：{e}"));
+
+        println!("✔ 暂存到 {}", staged.dir);
+        println!("  包 {} 字节，替换清单 {:?}", staged.zip_bytes, staged.plan.replace);
+
+        let dir = PathBuf::from(&staged.dir);
+        // ① 包真的落了盘
+        assert!(dir.join("update.zip").exists());
+        // ② 五步校验过了才会走到这里：可执行文件解出来了
+        assert!(dir.join("deskbase.exe").exists(), "包里应当有 deskbase.exe 并已解出");
+        // ③ 计划落了盘，且带版本号
+        let text = std::fs::read_to_string(dir.join("plan.json")).unwrap();
+        let plan: ApplyPlan = serde_json::from_str(&text).unwrap();
+        assert_eq!(plan.from, "0.0.1");
+        assert!(plan.replace.contains(&"deskbase.exe".to_string()));
+        // ④ 校验和文件留了证
+        assert!(dir.join("update.zip.sha256").exists());
+        // ⑤ 解出来的 exe 应当是个真 PE（头两字节 "MZ"）
+        let head = std::fs::read(dir.join("deskbase.exe")).unwrap();
+        assert_eq!(&head[..2], b"MZ", "解出来的应当是真正的 Windows 可执行文件");
+
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[cfg(test)]
+mod tests_settings {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE sys_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        c
+    }
+
+    #[test]
+    fn 默认是从不检查且稳定通道() {
+        let c = db();
+        let s = load_settings(&c);
+        assert_eq!(s.mode, UpdateMode::Never, "「网络默认关闭」是红线级默认值，不许改松");
+        assert_eq!(s.channel, Channel::Stable, "不能默认把人带上 beta");
+    }
+
+    #[test]
+    fn 设置能存能读且重复存不炸() {
+        let c = db();
+        let s = UpdateSettings {
+            mode: UpdateMode::DownloadAsk,
+            channel: Channel::Prerelease,
+        };
+        save_settings(&c, &s).unwrap();
+        assert_eq!(load_settings(&c).mode, UpdateMode::DownloadAsk);
+        assert_eq!(load_settings(&c).channel, Channel::Prerelease);
+        // UPSERT：再存一次不该报错
+        save_settings(&c, &s).unwrap();
+        assert_eq!(load_settings(&c).channel, Channel::Prerelease);
+    }
+
+    #[test]
+    fn 设置里出现不认识的档位时回退到不联网() {
+        let c = db();
+        c.execute(
+            "INSERT INTO sys_meta (key, value) VALUES ('net.update.mode', 'whatever')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings(&c).mode,
+            UpdateMode::Never,
+            "读不懂就倾向于不联网 —— 方向不能反"
+        );
+    }
+
+    /// **这条是红线级的行为**：默认档位下必须一个包都不发。
+    /// 能离线跑本身就是证明 —— 它没有进网络栈。
+    #[test]
+    fn 从不检查档位下不发起任何网络行为() {
+        let c = db();
+        let rep = check_by_settings(&c, &current_version()).unwrap();
+        assert!(!rep.checked, "Never 档位下 checked 必须是 false");
+        assert!(rep.outcome.is_none(), "不该有结果");
+        let why = rep.reason.unwrap_or_default();
+        assert!(why.contains("网络默认关闭"), "要说清为什么没检查：{why}");
+        assert!(why.contains("手动下载"), "要给出替代路径，而不是只说不行：{why}");
+    }
+
+    #[test]
+    fn 档位与通道的人话字符串能互转() {
+        for m in [
+            UpdateMode::Never,
+            UpdateMode::Notify,
+            UpdateMode::DownloadAsk,
+        ] {
+            assert_eq!(UpdateMode::parse(m.as_str()), Some(m));
+        }
+        assert_eq!(UpdateMode::parse("nope"), None);
+        for ch in [Channel::Stable, Channel::Prerelease] {
+            assert_eq!(Channel::parse(ch.as_str()), Some(ch));
+        }
+        assert_eq!(Channel::parse("nope"), None);
     }
 }

@@ -1249,6 +1249,88 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // ---------- 更新（ADR-0018 / ADR-0019）----------
+        //
+        // 这两条是**唯一**会让程序主动联网的 IPC。按 ADR-0019 它们属于 **R2**：
+        // 默认关闭、可被用户单独关掉、每次出站（**含被跳过的**）都记审计。
+        // 它们**不接触任何用户数据** —— 只交换"程序自己的版本与产物"，所以不归 R1 数据红线管。
+        "app.updateSettings" => {
+            // 不传 mode / channel 就是只读；传了就是改。改完要落库并记一条审计。
+            match state.db.lock() {
+                Ok(d) => {
+                    let mut cur = updater::load_settings(d.conn());
+                    let mut changed = false;
+                    if let Some(m) = req.args.get("mode").and_then(|v| v.as_str()) {
+                        match updater::UpdateMode::parse(m) {
+                            Some(x) => {
+                                cur.mode = x;
+                                changed = true;
+                            }
+                            None => return err(id, format!("不认识的档位：{m}")),
+                        }
+                    }
+                    if let Some(c) = req.args.get("channel").and_then(|v| v.as_str()) {
+                        match updater::Channel::parse(c) {
+                            Some(x) => {
+                                cur.channel = x;
+                                changed = true;
+                            }
+                            None => return err(id, format!("不认识的通道：{c}")),
+                        }
+                    }
+                    if changed {
+                        if let Err(e) = updater::save_settings(d.conn(), &cur) {
+                            return err(id, e);
+                        }
+                        log_line(
+                            &state.data_dir,
+                            &format!(
+                                "更新设置改为：档位={} 通道={}",
+                                cur.mode.as_str(),
+                                cur.channel.as_str()
+                            ),
+                        );
+                    }
+                    ok(id, serde_json::json!(cur))
+                }
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "app.updateCheck" => {
+            // 先读设置判断"该不该发"。**`Never` 档位下一个包都不发。**
+            let mode = match state.db.lock() {
+                Ok(d) => updater::load_settings(d.conn()).mode,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            if mode == updater::UpdateMode::Never {
+                // 被跳过的尝试也要记 —— ADR-0005 要求"全部出站尝试（**含被拒绝的**）记审计"，
+                // 少了这一条，用户在审计日志里就看不出"程序本来想联网但被我自己关掉了"。
+                log_line(&state.data_dir, "更新检查未执行：网络默认关闭（设置里可开启）");
+            } else {
+                log_line(&state.data_dir, "出站尝试：检查更新（api.github.com）");
+            }
+
+            let cur = updater::current_version();
+            let r = match state.db.lock() {
+                Ok(d) => updater::check_by_settings(d.conn(), &cur),
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            match r {
+                Ok(rep) => {
+                    if rep.checked {
+                        log_line(&state.data_dir, "更新检查完成");
+                    }
+                    ok(id, serde_json::to_value(rep).unwrap_or_default())
+                }
+                Err(e) => {
+                    // 联网失败也要留痕，不然"为什么检查失败"只能靠猜
+                    log_line(&state.data_dir, &format!("更新检查失败：{e}"));
+                    err(id, e)
+                }
+            }
+        }
+
         other => err(id, format!("未知命令: {other}")),
     }
 }
