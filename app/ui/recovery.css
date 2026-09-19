@@ -1,0 +1,116 @@
+/* ============================================================
+   崩溃恢复向导（recovery.css）
+   ============================================================
+   只在上次未正常退出时出现（recovery.js 动态渲染）。
+   规则与其它样式表一致：
+     · 只用 theme.css 的语义 token，不写死色值（11 个主题全部适配）；
+     · 动效只动 opacity / transform，不碰 layout 属性（check-motion 门禁）。
+   ============================================================ */
+
+.recovery-dialog {
+  width: min(560px, calc(100vw - 48px));
+  box-sizing: border-box;
+  padding: var(--sp-6, 24px);
+  border: var(--line-w, 1px) solid var(--line-strong, var(--line));
+  border-radius: var(--radius-lg, 12px);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow-2, var(--shadow-1));
+  animation: recovery-in var(--dur-normal, 200ms) var(--ease-enter, ease-out);
+}
+
+.recovery-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* 入场：一次性、只动 opacity/transform */
+@keyframes recovery-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.recovery-dialog h3 {
+  margin: 0 0 var(--sp-3, 12px);
+  font-size: var(--fs-title, 20px);
+  color: var(--ink);
+}
+
+.recovery-lead,
+.recovery-advice {
+  margin: 0 0 var(--sp-4, 16px);
+  font-size: var(--fs-body, 14px);
+  line-height: var(--lh-body, 1.7);
+  color: var(--ink-2);
+}
+
+.recovery-banner {
+  padding: var(--sp-3, 12px) var(--sp-4, 16px);
+  margin-bottom: var(--sp-4, 16px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md, 8px);
+  font-size: var(--fs-body, 14px);
+  line-height: var(--lh-body, 1.7);
+}
+
+.recovery-banner.is-ok {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.recovery-banner.is-bad {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.recovery-rows {
+  margin-bottom: var(--sp-4, 16px);
+  border-top: 1px solid var(--line);
+}
+
+.recovery-row {
+  display: flex;
+  gap: var(--sp-3, 12px);
+  padding: var(--sp-2, 8px) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sub, 13px);
+}
+
+.recovery-label {
+  flex: 0 0 84px;
+  color: var(--ink-3);
+}
+
+.recovery-value {
+  flex: 1 1 auto;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.recovery-result {
+  min-height: 1.4em;
+  margin-bottom: var(--sp-3, 12px);
+  font-size: var(--fs-sub, 13px);
+  line-height: var(--lh-body, 1.7);
+  color: var(--ink-3);
+  word-break: break-all;
+}
+
+.recovery-result.is-ok {
+  color: var(--success);
+}
+
+.recovery-result.is-bad {
+  color: var(--danger);
+}
+
+.recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2, 8px);
+}

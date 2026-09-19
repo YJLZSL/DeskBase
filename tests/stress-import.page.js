@@ -239,16 +239,14 @@
     step("是否结清存成 1/0", full.rows[0][col("是否结清")] === 1, String(full.rows[0][col("是否结清")]));
     step("日期规范化（YYYY-MM-DD）", /^\d{4}-\d{2}-\d{2}$/.test(String(full.rows[0][col("签单日期")])), String(full.rows[0][col("签单日期")]));
 
-    // 空值：i=7、14、21… 的备注为空。
+    // 空值：i=7、14、21… 的备注为空 → **统一落 NULL**（Q-047 已拍板，2026-09-19）。
     //
-    // ⚠️ 这里断言的是**当前的真实行为**，而它是一处**已知的不一致**（不是设计上的好）：
-    // 文本列的空格子进来是**空串**，而数字/日期列的空格子进来是 **NULL**
-    // （判据在 schema.rs 的 `coerce_value`，那条规则本身是给手动编辑单元格定的：
-    // 用户把文本格清空 = 空串，把数字格清空 = NULL，两者在那条路径上都有道理）。
-    //
-    // 但**导入**这条路径上，源文件里这一格是空的更接近没有值。于是同一份导入数据里
-    // `WHERE 备注 IS NULL` 查不到文本列的空、`WHERE 数量 IS NULL` 又能查到数字列的空 ——
-    // 用户会踩坑。已记入 OPEN_QUESTIONS（Q-047）待产品决策，**不在这里偷偷改行为**。
+    // 这里以前断言的是"文本列存空串、数字列存 NULL"的旧行为 —— 那是一处已知的不一致
+    // （同一份导入数据里，`WHERE 备注 IS NULL` 查不到文本列的空、`WHERE 数量 IS NULL`
+    // 又能查到数字列的空）。现在的两条路径是**刻意不同**的：
+    //   · **导入**：源文件里的空格子 = 没填 = 没有值 → 统一 NULL（含文本列）；
+    //   · **手动编辑**：文本格清空仍保留空串语义（"我确实填了个空的"）。
+    // 判据：excel_import.rs 读文件时（trim 后为空 → None）+ schema.rs 的 insert_rows_opt。
     const seven = await ipc("schema.pageRows", {
       table: TABLE,
       orderBy: "金额",
@@ -259,8 +257,8 @@
     const nullCount = seven.rows.filter((r) => r[noteIdx] === null).length;
     const emptyStr = seven.rows.filter((r) => r[noteIdx] === "").length;
     step(
-      "空单元格：文本列存空串（当前行为，已记录为待决策的不一致）",
-      emptyStr >= 1 && nullCount === 0,
+      "空单元格：文本列也落成 NULL（Q-047 已拍板）",
+      nullCount >= 1 && emptyStr === 0,
       `前 8 行里 NULL=${nullCount} 空串=${emptyStr}（i=7 的备注为空）`
     );
 

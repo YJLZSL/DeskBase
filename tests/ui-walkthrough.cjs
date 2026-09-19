@@ -1,0 +1,470 @@
+#!/usr/bin/env node
+/* ============================================================
+   DeskBase 自动点击走查（ui-walkthrough.cjs）
+   ============================================================
+   它回答的是那个一直没人答的问题：**"界面看着怎么样？"**
+   烟测（ui-smoke）证明的是"控件在、点了有反应、值真的落库"，
+   但它一张截图都不留 —— 观感、文案、窄屏布局这些只有人眼能判断的东西，
+   它帮不上忙。
+
+   这个脚本的做法：把真实产物起起来（烟测模式 → CDP 端口 9222），
+   从**外部**用 DevTools 协议去驱动浏览器 —— 真点击、真读取、真截图：
+     · 每个主要页面留一张截图（自动拼成一份自带图的 HTML 报告）；
+     · 导出每页的界面文案（供逐字审阅，不用开应用）；
+     · 在 1000 / 800 / 640 / 520 四档宽度下做**布局体检**：
+       横向溢出、元素跑出视口、单行文本被裁 —— 疑似问题逐条列出。
+
+   它**不做**价值判断（"这个按钮丑"、"这句话该改"）—— 那是人做的事。
+   它把"需要人看的东西"整理好摆在面前：截图 + 文案 + 疑似清单。
+
+   用法：
+     node tests/ui-walkthrough.cjs [<exe 路径>] [--out <目录>] [--keep]
+   退出码：0 = 走查执行完整；1 = 有步骤失败；2 = 跑不起来（缺产物 / 连不上）
+   ============================================================ */
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawn, spawnSync } = require("child_process");
+
+const ROOT = path.resolve(__dirname, "..");
+const argv = process.argv.slice(2);
+const argExe = argv.find((a) => !a.startsWith("--"));
+const EXE = argExe
+  ? path.resolve(argExe)
+  : path.join(ROOT, "app", "target", "release", "deskbase.exe");
+const KEEP = argv.includes("--keep");
+const outArgIdx = argv.indexOf("--out");
+const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
+const OUT = outArgIdx >= 0 && argv[outArgIdx + 1]
+  ? path.resolve(argv[outArgIdx + 1])
+  : path.join(ROOT, "local-docs", "runs", "walkthrough-" + stamp);
+const BOOT_PAGE = path.join(__dirname, "walkthrough-boot.page.js");
+const PORT = 9222;
+
+if (!fs.existsSync(EXE)) {
+  console.error(`✘ 找不到产物：${EXE}\n  先跑 node scripts/build.cjs 再试。`);
+  process.exit(2);
+}
+
+const shotsDir = path.join(OUT, "shots");
+const textDir = path.join(OUT, "text");
+fs.mkdirSync(shotsDir, { recursive: true });
+fs.mkdirSync(textDir, { recursive: true });
+
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "deskbase-walk-"));
+const logPath = path.join(dataDir, "logs", "app.log");
+
+console.log(`自动点击走查 · ${EXE}`);
+console.log(`输出目录：${OUT}`);
+console.log("（窗口会出现在屏幕上若干秒，属正常）\n");
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const readLog = () => {
+  try { return fs.readFileSync(logPath, "utf8"); } catch (_) { return ""; }
+};
+
+// ---------- CDP 客户端（Node 22 自带 WebSocket，零依赖） ----------
+class CDP {
+  constructor(ws) {
+    this.ws = ws;
+    this.seq = 0;
+    this.pending = new Map();
+    ws.addEventListener("message", (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch (_) { return; }
+      if (m.id && this.pending.has(m.id)) {
+        const { res, rej } = this.pending.get(m.id);
+        this.pending.delete(m.id);
+        if (m.error) rej(new Error(m.error.message || "CDP 错误"));
+        else res(m.result);
+      }
+    });
+  }
+  send(method, params) {
+    const id = ++this.seq;
+    return new Promise((res, rej) => {
+      this.pending.set(id, { res, rej });
+      this.ws.send(JSON.stringify({ id, method, params: params || {} }));
+    });
+  }
+  async eval(expression) {
+    const r = await this.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
+    if (r.exceptionDetails) {
+      const d = r.exceptionDetails;
+      throw new Error((d.exception && d.exception.description) || d.text || "页面抛异常");
+    }
+    return r.result ? r.result.value : undefined;
+  }
+}
+
+async function connectCdp(ms) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${PORT}/json/list`);
+      const list = await res.json();
+      const page =
+        list.find((t) => t.type === "page" && /deskbase|localhost/.test(t.url || "")) ||
+        list.find((t) => t.type === "page");
+      if (page && page.webSocketDebuggerUrl) {
+        const ws = new WebSocket(page.webSocketDebuggerUrl);
+        await new Promise((ok, bad) => {
+          const tt = setTimeout(() => bad(new Error("WS 连接超时")), 8000);
+          ws.addEventListener("open", () => { clearTimeout(tt); ok(); });
+          ws.addEventListener("error", () => { clearTimeout(tt); bad(new Error("WS 连接失败")); });
+        });
+        return { cdp: new CDP(ws), url: page.url };
+      }
+    } catch (_) {}
+    if (Date.now() - t0 > ms) return null;
+    await sleep(400);
+  }
+}
+
+// ---------- 页面里的布局体检（在页面上下文里执行） ----------
+const AUDIT_JS = `(() => {
+  const issues = [];
+  const de = document.documentElement;
+  const vw = window.innerWidth;
+  if (de.scrollWidth > de.clientWidth + 1) {
+    issues.push({ type: "page-h-overflow", sel: "html", detail: de.scrollWidth + " > " + de.clientWidth });
+  }
+  const sel = (el) => {
+    let s = el.tagName.toLowerCase();
+    if (el.id) s += "#" + el.id;
+    else if (typeof el.className === "string" && el.className.trim())
+      s += "." + el.className.trim().split(/\\s+/).slice(0, 2).join(".");
+    return s;
+  };
+  for (const el of document.querySelectorAll("body *")) {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    if (r.right > vw + 2 && cs.position !== "fixed") {
+      issues.push({ type: "out-of-viewport", sel: sel(el), detail: Math.round(r.left) + "…" + Math.round(r.right) + " / vw " + vw });
+    }
+    if (el.children.length === 0) {
+      const tx = (el.textContent || "").trim();
+      if (tx && el.scrollWidth > el.clientWidth + 2 && cs.overflow === "hidden" && cs.textOverflow !== "ellipsis") {
+        issues.push({ type: "text-clipped", sel: sel(el), detail: tx.slice(0, 24) });
+      }
+    }
+    if (issues.length > 60) break;
+  }
+  return { count: issues.length, issues: issues.slice(0, 60) };
+})()`;
+
+// ---------- 走查主体 ----------
+(async () => {
+  spawnSync("taskkill", ["/IM", "deskbase.exe", "/F"], { windowsHide: true });
+  await sleep(700);
+
+  const steps = [];
+  const audits = [];
+  const texts = {};
+  const notes = [];
+  const embeds = []; // { name, b64 }
+  let shotNo = 0;
+  let app = null;
+  let appInfo = null;
+
+  const step = (name, ok, detail) => {
+    steps.push({ name, ok: !!ok, detail: detail == null ? "" : String(detail) });
+    console.log(`${ok ? "✔" : "✖"} ${name}${detail ? `　（${detail}）` : ""}`);
+  };
+
+  try {
+    const env = { ...process.env, DESKBASE_DATA_DIR: dataDir, DESKBASE_UI_SMOKE: BOOT_PAGE };
+    delete env.DESKBASE_RENDER;
+    const errFd = fs.openSync(path.join(dataDir, "stderr.log"), "a");
+    app = spawn(EXE, [], { env, stdio: ["ignore", "ignore", errFd], windowsHide: false });
+
+    const conn = await connectCdp(45000);
+    if (!conn) throw new Error("45 秒内连不上 CDP（9222）—— 应用没起来或端口没开");
+    const cdp = conn.cdp;
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    console.log(`已连上页面：${conn.url}\n`);
+
+    async function shot(name) {
+      shotNo += 1;
+      const tag = String(shotNo).padStart(2, "0") + "-" + name;
+      const png = await cdp.send("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(path.join(shotsDir, tag + ".png"), Buffer.from(png.data, "base64"));
+      const jpg = await cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 84 });
+      embeds.push({ name: tag, b64: jpg.data });
+      return tag;
+    }
+    async function waitPage(expr, ms) {
+      const t0 = Date.now();
+      for (;;) {
+        let v = false;
+        try { v = await cdp.eval(expr); } catch (_) {}
+        if (v) return true;
+        if (Date.now() - t0 > ms) return false;
+        await sleep(120);
+      }
+    }
+    const PAGE_NAMES = { workbench: "工作台", notes: "笔记", database: "数据库", settings: "设置" };
+    const PAGES = ["workbench", "notes", "database", "settings"];
+
+    async function navTo(t) {
+      await cdp.eval(`(function(){ var b = document.querySelector('.nav-item[data-target="${t}"]'); if (b) b.click(); return !!b; })()`);
+      return waitPage(`(function(){ var v = document.querySelector('section.view[data-view="${t}"]'); return !!(v && v.dataset.active === "true"); })()`, 4000);
+    }
+    async function dumpText(name) {
+      try {
+        const tx = await cdp.eval("document.body.innerText");
+        texts[name] = (tx || "").length;
+        fs.writeFileSync(path.join(textDir, name + ".txt"), tx || "");
+      } catch (_) {}
+    }
+
+    // ---------- 0. 就绪 ----------
+    const ready = await waitPage(
+      `!!(window.__deskbase && window.__deskbase.call) && !!document.querySelector('.nav-item')`,
+      30000
+    );
+    step("界面就绪（IPC 桥 + 导航都在）", ready, ready ? "" : "30 秒内没就绪");
+
+    // 应用自述（版本等）进报告头
+    try { appInfo = await cdp.eval(`window.__deskbase.call("app.info")`); } catch (_) {}
+    await shot("boot-首屏");
+
+    // ---------- 1. 每个主要页面：截图 + 文案 ----------
+    for (const t of PAGES) {
+      const ok = await navTo(t);
+      step(`切到「${PAGE_NAMES[t]}」`, ok, ok ? "" : "视图没激活");
+      if (ok) {
+        await sleep(350);
+        await shot("page-" + t);
+        await dumpText("page-" + t);
+      }
+    }
+
+    // ---------- 2. 导入向导（真实打开、截图、关闭） ----------
+    await navTo("database");
+    const opened = await cdp.eval(
+      `(function(){ if (window.DeskBaseDb && window.DeskBaseDb.openImportDialog) { window.DeskBaseDb.openImportDialog({ autoPick: false }); return true; } return false; })()`
+    );
+    if (opened) {
+      const shown = await waitPage(`!!document.getElementById("db-dialog-import")`, 5000);
+      step("导入向导能打开（autoPick:false）", shown);
+      if (shown) {
+        await shot("dialog-import");
+        await dumpText("dialog-import");
+        await cdp.eval(`(function(){ var d = document.getElementById("db-dialog-import"); if (d) d.close("cancel"); return true; })()`);
+        await sleep(250);
+      }
+    } else {
+      step("导入向导能打开（autoPick:false）", false, "找不到 DeskBaseDb.openImportDialog");
+    }
+
+    // 建表向导（选择器不保证存在 —— 存在就点，不存在只记录，不算失败）
+    const hasNew = await cdp.eval(`!!document.getElementById("btn-db-new")`);
+    if (hasNew) {
+      await cdp.eval(`document.getElementById("btn-db-new").click()`);
+      const dlgOpen = await waitPage(`!!document.getElementById("db-dialog-new")`, 4000);
+      step("建表向导能打开", dlgOpen);
+      if (dlgOpen) {
+        await shot("dialog-newtable");
+        await cdp.eval(`(function(){ var d = document.getElementById("db-dialog-new"); if (d) d.close(); return true; })()`);
+        await sleep(250);
+      }
+    } else {
+      notes.push("建表向导：找不到 #btn-db-new，本次跳过（不影响其它步骤）");
+    }
+
+    // ---------- 3. 窄屏布局体检 ----------
+    const WIDTHS = [
+      { w: 1000, shot: true },
+      { w: 800, shot: true },
+      { w: 640, shot: true },
+      { w: 520, shot: false },
+    ];
+    let emuOk = true;
+    try {
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 1000, height: 780, deviceScaleFactor: 1, mobile: false,
+      });
+    } catch (e) {
+      emuOk = false;
+      notes.push("窄屏模拟不可用（Emulation 域被拒）：" + (e && e.message));
+    }
+    if (emuOk) {
+      for (const { w, shot: doShot } of WIDTHS) {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: w, height: 780, deviceScaleFactor: 1, mobile: false,
+        });
+        for (const t of PAGES) {
+          const ok = await navTo(t);
+          if (!ok) continue;
+          await sleep(250);
+          let audit = null;
+          try { audit = await cdp.eval(AUDIT_JS); } catch (_) {}
+          audits.push({ width: w, page: t, count: audit ? audit.count : -1, issues: audit ? audit.issues : [] });
+          if (doShot) await shot(`w${w}-${t}`);
+        }
+      }
+      await cdp.send("Emulation.clearDeviceMetricsOverride");
+      const totalIssues = audits.reduce((s, a) => s + Math.max(0, a.count), 0);
+      step(`窄屏布局体检完成（4 档宽度 × 4 页，疑似问题 ${totalIssues} 处）`, true);
+    }
+
+    // 回到原生尺寸，收尾
+    await navTo("workbench");
+
+    // ---------- 4. 正常退出（走 smokeReport → 与"关闭窗口"同一条收尾路径） ----------
+    try {
+      await cdp.eval(`window.__deskbase.call("app.smokeReport", { steps: [], failures: [] })`);
+    } catch (_) {}
+  } catch (e) {
+    step("走查过程出现异常", false, (e && e.message) || String(e));
+  }
+
+  // ---------- 汇总输出 ----------
+  const meta = {
+    stamp,
+    exe: EXE,
+    version: appInfo && appInfo.version ? appInfo.version : "?",
+    pages: ["workbench", "notes", "database", "settings"],
+  };
+  const failed = steps.filter((s) => !s.ok).length;
+  const auditTotal = audits.reduce((s, a) => s + Math.max(0, a.count), 0);
+
+  fs.writeFileSync(
+    path.join(OUT, "report.json"),
+    JSON.stringify({ meta, notes, steps, audits, texts }, null, 2)
+  );
+  fs.writeFileSync(path.join(OUT, "index.html"), buildHtml({ meta, steps, audits, embeds, texts }));
+
+  // 等应用退出（给宽限 800ms + 保存时间）
+  if (app) {
+    await new Promise((res) => {
+      const t = setTimeout(res, 12000);
+      if (app.exitCode !== null) { clearTimeout(t); return res(); }
+      app.once("exit", () => { clearTimeout(t); res(); });
+    });
+    if (app.exitCode === null) {
+      try { app.kill(); } catch (_) {}
+    }
+  }
+
+  console.log("");
+  if (notes.length) {
+    console.log("备注：");
+    notes.forEach((n) => console.log("  · " + n));
+  }
+  console.log(`走查完成：${steps.length - failed} / ${steps.length} 步通过` + (failed ? `，失败 ${failed}` : ""));
+  console.log(`布局体检：疑似问题 ${auditTotal} 处（0 处 = 各档宽度都没有溢出/裁切）`);
+  console.log(`报告：${path.join(OUT, "index.html")}`);
+  console.log(`截图：${shotsDir}（${embeds.length} 张）· 文案：${textDir}`);
+
+  if (failed || auditTotal > 0) {
+    console.log("\n--- app.log 尾部 ---");
+    readLog().trim().split("\n").slice(-10).forEach((l) => console.log("  " + l));
+  }
+  try {
+    if (!KEEP && !failed) fs.rmSync(dataDir, { recursive: true, force: true });
+    else console.log(`临时数据目录保留：${dataDir}`);
+  } catch (_) {}
+
+  process.exit(failed ? 1 : 0);
+})();
+
+// ---------- HTML 报告 ----------
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildHtml({ meta, steps, audits, embeds, texts }) {
+  const rows = steps
+    .map(
+      (s) =>
+        `<tr class="${s.ok ? "ok" : "bad"}"><td>${s.ok ? "✔" : "✖"}</td><td>${esc(s.name)}</td><td>${esc(s.detail)}</td></tr>`
+    )
+    .join("\n");
+
+  const shots = embeds
+    .map(
+      (e) =>
+        `<figure class="shot"><img src="data:image/jpeg;base64,${e.b64}" alt="${esc(e.name)}"><figcaption>${esc(e.name)}</figcaption></figure>`
+    )
+    .join("\n");
+
+  const auditSections = [1000, 800, 640, 520]
+    .map((w) => {
+      const rows2 = audits
+        .filter((a) => a.width === w)
+        .map((a) => {
+          const list = (a.issues || [])
+            .map((i) => `<li><code>${esc(i.type)}</code> ${esc(i.sel)} — ${esc(i.detail)}</li>`)
+            .join("");
+          return `<details ${a.count > 0 ? "open" : ""}><summary>宽度 ${w} · ${esc(a.page)}：疑似 ${a.count} 处</summary><ul>${list || "<li>（无）</li>"}</ul></details>`;
+        })
+        .join("\n");
+      const tot = audits.filter((a) => a.width === w).reduce((s, a) => s + Math.max(0, a.count), 0);
+      return `<h3>宽度 ${w}px（合计疑似 ${tot} 处）</h3>\n${rows2 || "<p>（未采集）</p>"}`;
+    })
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeskBase 界面走查报告 · ${esc(meta.stamp)}</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; padding: 32px clamp(16px, 5vw, 64px); background: #f7f5f0; color: #2a2520;
+         font: 14px/1.75 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 36px 0 12px; border-bottom: 2px solid #d9d2c5; padding-bottom: 6px; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  .meta { color: #6b6154; font-size: 12.5px; margin-bottom: 24px; }
+  .meta code { background: #efeae0; padding: 1px 6px; border-radius: 4px; }
+  .hint { background: #fff8e6; border: 1px solid #e6d9b8; border-radius: 8px; padding: 12px 16px; font-size: 13px; margin: 16px 0; }
+  table.steps { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.steps td { border-bottom: 1px solid #e5ded2; padding: 6px 10px; vertical-align: top; }
+  tr.bad td { background: #fdeeee; }
+  table.steps td:first-child { width: 28px; text-align: center; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .shot { margin: 0; background: #fff; border: 1px solid #e0d9cc; border-radius: 10px; overflow: hidden; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot figcaption { padding: 6px 10px; font-size: 12px; color: #6b6154; background: #fbf9f4; }
+  details { margin: 6px 0; background: #fff; border: 1px solid #e5ded2; border-radius: 8px; padding: 8px 12px; }
+  summary { cursor: pointer; font-size: 13px; }
+  details ul { margin: 8px 0 4px; font-size: 12.5px; color: #7a4b3a; }
+  code { font-family: Consolas, monospace; background: #f2ede3; padding: 0 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>DeskBase 界面走查报告</h1>
+<div class="meta">
+  时间 <code>${esc(meta.stamp)}</code> · 版本 <code>v${esc(meta.version)}</code><br>
+  产物 <code>${esc(meta.exe)}</code>
+</div>
+
+<div class="hint">
+  <b>怎么读这份报告</b>：截图是真实 WebView 里的真实界面（外部通过 DevTools 协议点击与抓取）。
+  布局体检是<b>启发式</b>的 —— 它只找三类机械问题（横向溢出 / 跑出视口 / 单行文本被裁），
+  标为"疑似"的都要人眼复核；观感与文案好不好，机器不发表意见，请直接看截图与 text/ 目录的文案导出口。
+</div>
+
+<h2>一、走查步骤</h2>
+<table class="steps">${rows}</table>
+
+<h2>二、截图（${embeds.length} 张）</h2>
+<div class="grid">${shots}</div>
+
+<h2>三、窄屏布局体检</h2>
+${auditSections}
+
+</body>
+</html>`;
+}

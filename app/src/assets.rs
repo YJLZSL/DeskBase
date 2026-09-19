@@ -149,6 +149,17 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- 崩溃恢复向导（recovery.rs 的界面侧） ----------
+        // 只在上次未正常退出时渲染；平时一个节点都不建。
+        "/recovery.css" => Asset {
+            bytes: include_bytes!("../ui/recovery.css"),
+            mime: CSS,
+        },
+        "/recovery.js" => Asset {
+            bytes: include_bytes!("../ui/recovery.js"),
+            mime: JS,
+        },
+
         // ---------- 字体（见 tools/fonts/ 的来源登记与校验脚本） ----------
         // 得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
         // 许可原文随包分发：app/ui/fonts/OFL-smiley-sans.txt

@@ -100,6 +100,8 @@ DeskBase/
 | 界面烟测（真实 WebView 里真实点击，31 步） | `node scripts/build.cjs --smoke` 或 `node scripts/ui-smoke.cjs <exe>` |
 | **端到端验收**（真实数据走完整导入链路，28 步） | `node scripts/build.cjs --e2e` 或 `node tests/e2e-import.cjs <表格文件>` |
 | **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
+| **崩溃恢复端到端**（强杀→重启验尸→复检，三阶段） | `node tests/crash-recovery.cjs` |
+| **界面自动走查**（截图 + 文案导出 + 布局体检，出 HTML 报告） | `node tests/ui-walkthrough.cjs` |
 | 门禁四件套 | `node scripts/check-motion.cjs` · `check-contrast.cjs` · `check-wiring.cjs` · `check-size.cjs` |
 | 打包（zip + SHA-256 + SBOM） | `node scripts/package.cjs` |
 | 发布（打标签即发布） | `node scripts/publish-release.cjs vX.Y.Z [--dry-run] [--prerelease]` |

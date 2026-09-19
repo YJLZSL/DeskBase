@@ -16,6 +16,7 @@ mod convert;
 mod csv_import;
 mod db;
 mod excel_import;
+mod recovery;
 mod import_pipeline;
 mod workspace;
 mod render;
@@ -251,6 +252,11 @@ struct AppState {
     /// "读任意文件"的能力。所以路径由启动进程给出、在这里换成一次性令牌，
     /// 前端只能拿到令牌（`app.e2eSource`，不接受任何参数）。
     e2e_source: Mutex<Option<String>>,
+    /// 启动时的崩溃恢复自检结论（见 [`recovery::begin_boot`]）。
+    ///
+    /// 只读：启动那一刻算一次；之后的动作（生成快照 / 打开目录）都不改它。
+    /// `unclean == false` 时前端完全不看它 —— 恢复向导"只在出事时出现"。
+    recovery_status: recovery::RecoveryReport,
 }
 
 impl AppState {
@@ -380,6 +386,21 @@ fn main() -> wry::Result<()> {
         log_line(&data_dir, &format!("烟测模式：自检后将执行界面脚本 {}", p.display()));
     }
 
+    // 崩溃恢复：先看上次是不是正常退的（标记文件还在 = 没走到正常退出这一步）。
+    // 没正常退就做一次完整性自检，结论进 AppState 给恢复向导。**必须在
+    // `Db::open` 之前**：自检要看磁盘上的"现场"（WAL 还剩多少），主连接一开，
+    // SQLite 可能已经自己把一部分现场收拾掉了。
+    let recovery_status = recovery::begin_boot(&data_dir, &db_path);
+    if recovery_status.unclean {
+        log_line(
+            &data_dir,
+            &format!(
+                "检测到上次未正常退出 —— 完整性自检：{}；WAL 检查：{}",
+                recovery_status.quick_check, recovery_status.wal_checkpoint
+            ),
+        );
+    }
+
     let database = match Db::open(&data_dir, &db_path) {
         Ok(d) => d,
         Err(e) => {
@@ -404,6 +425,7 @@ fn main() -> wry::Result<()> {
         smoke_script: ui_smoke,
         smoke_fired: AtomicBool::new(false),
         e2e_source: Mutex::new(e2e_source),
+        recovery_status,
     });
     // 窗口与任务栏图标：用 tools/icon 生成的 256×256 原始 RGBA 直接构造，
     // 不需要在 Rust 侧解码 PNG（见 tools/icon/build-icons.cjs）
@@ -574,6 +596,11 @@ fn main() -> wry::Result<()> {
             if let Some(t) = quit_at {
                 if std::time::Instant::now() >= t {
                     finalize_workspace(&state);
+                    // 正常退出：删掉"未清理"标记。
+                    // 三条退出路径（关闭窗口 / 更新拉起 / 烟测结束）都汇到这里，
+                    // 所以只此一处就够 —— 漏掉任何一条，下次启动会误报
+                    // "上次没有正常退出"。
+                    recovery::mark_clean(&state.data_dir);
                     log_line(&state.data_dir, "退出前保存完成，退出");
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -1498,6 +1525,43 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 // 没有元数据表时不是错误，只是"从没导入过"
                 Err(_) => ok(id, serde_json::json!({ "notice": "" })),
             }
+        }
+
+        // ---------- 崩溃恢复（recovery.rs）----------
+        // 正常启动时 unclean=false，前端不会真的拉这些命令 —— 它们只在
+        // "上次没正常退出"之后才有意义。**刻意没有"自动修复"命令**：
+        // 向导给的是看清现场的能力（自检结果 / 快照 / 数据目录），
+        // 不是一个可能把事办得更糟的魔法按钮。
+        "recovery.status" => ok(
+            id,
+            serde_json::to_value(&state.recovery_status).unwrap_or_default(),
+        ),
+
+        // 一致性快照走 `VACUUM INTO`，**不是文件复制** —— WAL 模式下复制
+        // 可能漏掉还没 checkpoint 的已提交事务。落点：数据目录下的 recovery/。
+        "recovery.snapshot" => match state.db.lock() {
+            Ok(g) => match recovery::snapshot(g.conn(), &state.data_dir) {
+                Ok(p) => {
+                    log_line(&state.data_dir, &format!("恢复向导：已生成数据快照 {p}"));
+                    ok(id, serde_json::json!({ "path": p }))
+                }
+                Err(e) => err(id, e),
+            },
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        "recovery.reveal" => {
+            if let Err(e) = reveal_in_explorer(&state.data_dir.to_string_lossy()) {
+                return err(id, e);
+            }
+            ok(id, serde_json::json!({ "opened": true }))
+        }
+
+        // 用户点了"知道了" —— 记一笔审计。**不删标记文件**：标记只由正常退出
+        // 删除；提前删掉会让"下次启动还能看见现场"变成一句空话。
+        "recovery.ack" => {
+            log_line(&state.data_dir, "恢复向导：用户已知悉");
+            ok(id, serde_json::json!({ "acked": true }))
         }
 
         "audit.tail" => {            // 给设置页显示的审计摘要：日志文件里"打开外部链接/已拒绝"的行数
@@ -2548,6 +2612,7 @@ mod acceptance {
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
             e2e_source: Mutex::new(None),
+            recovery_status: recovery::RecoveryReport::default(),
         });
         (state, dir)
     }
@@ -2961,6 +3026,7 @@ mod acceptance {
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
             e2e_source: Mutex::new(None),
+            recovery_status: recovery::RecoveryReport::default(),
         };
         let info2 = call(&state2, "app.info", json!({})).unwrap();
         assert_eq!(

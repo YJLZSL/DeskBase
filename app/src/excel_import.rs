@@ -327,8 +327,13 @@ pub struct FinalColumn {
 
 /// 一次正在进行的导入。**活在 [`SESSIONS`] 里，前端只拿令牌。**
 pub struct Session {
-    /// 要写的行（只在表头行之后，已经按用户保留的列裁好）
-    rows: Vec<Vec<String>>,
+    /// 要写的行（只在表头行之后、按用户保留的列裁好）。
+    ///
+    /// `None` = 这一格在源文件里是空的。**"空 → NULL"的决定在这里做一次**：
+    /// Q-047 拍板"导入路径上，空 = 没有值"（含文本列），而"空"的判据
+    /// （trim 后为空）只有读文件这一处位置知道 —— 落到写库时已经分不出
+    /// "源文件空格子"与"用户真的填了个空串"了。
+    rows: Vec<Vec<Option<String>>>,
     cursor: usize,
     table: String,
     col_names: Vec<String>,
@@ -453,7 +458,7 @@ pub fn begin_import(
 
     // ---- 把要写的数据读进来 ----
     let source_indexes: Vec<usize> = columns.iter().map(|c| c.source_index).collect();
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut skipped_empty = 0usize;
     let walk = xlsx::for_each_row(path, sheet_index, |row_no, row| {
         if row_no <= header_row {
@@ -466,7 +471,14 @@ pub fn begin_import(
         rows.push(
             source_indexes
                 .iter()
-                .map(|i| row.get(*i).map(|s| import_plan::trim_cell(s)).unwrap_or_default())
+                .map(|i| {
+                    row.get(*i)
+                        .map(|s| import_plan::trim_cell(s))
+                        // 源文件里的空格子 = "没填" → None → 落库 NULL（Q-047）。
+                        // 别再退回 unwrap_or_default()：那会把空格子变成空串，
+                        // 于是同一份数据里"空"又有两种表示（文本列空串 / 数字列 NULL）。
+                        .filter(|s| !s.is_empty())
+                })
                 .collect(),
         );
         Ok(())
@@ -526,7 +538,10 @@ pub fn write_chunk(
         let end = (s.cursor + batch).min(s.rows.len());
         if s.cursor < end {
             let slice = &s.rows[s.cursor..end];
-            schema::insert_rows(conn, &s.table, &s.col_names, slice)?;
+            // 导入路径走 _opt 版本：空单元格在读文件时已标成 None → 统一落 NULL
+            // （含文本列）。手动编辑那条路径的空串语义不受影响，见 schema.rs 的
+            // insert_rows_opt 文档与 Q-047。
+            schema::insert_rows_opt(conn, &s.table, &s.col_names, slice)?;
             s.cursor = end;
         }
         Ok(Chunk {

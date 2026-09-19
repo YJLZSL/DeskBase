@@ -1881,6 +1881,34 @@ pub fn insert_rows(
     columns: &[String],
     rows: &[Vec<String>],
 ) -> Result<usize> {
+    let rows: Vec<Vec<Option<String>>> = rows
+        .iter()
+        .map(|r| r.iter().map(|c| Some(c.clone())).collect())
+        .collect();
+    insert_rows_opt(conn, table, columns, &rows)
+}
+
+/// 批量插入（可空版本）：`None` = 这一格**没有值** → 落成 `NULL`。
+///
+/// 为什么要有第二个入口（而不是改 `insert_rows` 的语义）：因为「空」在两条
+/// 路径上的正确答案不同，而这不同是**拍过板的**（Q-047，见 DECISIONS_LOG）：
+///
+///   · **手动编辑**（界面表格里删空一格）：文本格清空 = 空串 —— 用户能借此
+///     表达"我确实填了个空的"；数字格清空 = NULL。空串与 NULL 的区分在这里
+///     有价值，所以 `insert_rows` 原样保留这套语义。
+///   · **导入**（来自 Excel/CSV 的空格子）：源文件里它只有一个含义 ——
+///     "这一格没填"，没有"空文本"这种语义。所以导入路径统一落 `NULL`，
+///     否则同一份导入数据里 `WHERE 备注 IS NULL` 查不到文本列的空、
+///     `WHERE 数量 IS NULL` 又能查到数字列的空（2026-09-19 实测发现的坑）。
+///
+/// ⚠️ 两条路径的空值行为**刻意不同**。改任何一条之前，先读 Q-047 的结论 ——
+/// 别为了"统一好看"把差异抹掉，那正是这份决策要防的事。
+pub fn insert_rows_opt(
+    conn: &mut Connection,
+    table: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<usize> {
     if rows.is_empty() {
         return Ok(0);
     }
@@ -1941,7 +1969,7 @@ pub fn insert_rows(
             let mut vals: Vec<Value> = Vec::with_capacity(cols.len());
             for (v, c) in row.iter().zip(cols.iter()) {
                 vals.push(
-                    coerce_value(c.ty, &c.name, Some(v))
+                    coerce_value(c.ty, &c.name, v.as_deref())
                         .map_err(|e| format!("第 {} 行{e}", ri + 1))?,
                 );
             }
@@ -4213,5 +4241,92 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    // ---------- Q-047：导入路径与手动编辑路径的空值语义（刻意不同） ----------
+
+    /// 普通列（非主键、可空）—— 这两条测试反复要造。
+    fn plain(name: &str, ty: ColType) -> ColumnDef {
+        ColumnDef {
+            name: name.into(),
+            ty,
+            not_null: false,
+            default: None,
+            primary_key: false,
+            comment: None,
+        }
+    }
+
+    /// `insert_rows_opt`：`None` 落 NULL —— **文本列也不例外**（Q-047 的结论）。
+    #[test]
+    fn q047_none_lands_as_null_even_for_text() {
+        let mut conn = mem();
+        create_table(
+            &conn,
+            &spec(
+                "导入表",
+                vec![
+                    pk("id", ColType::Integer),
+                    plain("备注", ColType::Text),
+                    plain("数量", ColType::Integer),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let cols = vec!["备注".to_string(), "数量".to_string()];
+        let rows = vec![
+            vec![None, None], // 源文件里的空格子 → NULL（含文本列）
+            vec![Some("有值".to_string()), Some("3".to_string())],
+        ];
+        assert_eq!(insert_rows_opt(&mut conn, "导入表", &cols, &rows).unwrap(), 2);
+
+        let (note, qty): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT 备注, 数量 FROM 导入表 WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(note, None, "导入路径：文本列的空格子必须是 NULL");
+        assert_eq!(qty, None);
+
+        let note2: Option<String> = conn
+            .query_row("SELECT 备注 FROM 导入表 WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(note2.as_deref(), Some("有值"));
+    }
+
+    /// `insert_rows`（手动编辑路径）：文本列的空串**保留为空串** —— 与导入路径相反。
+    /// 这个差异是拍过板的（见 `insert_rows_opt` 文档），不是历史包袱。
+    #[test]
+    fn q047_manual_edit_keeps_empty_string() {
+        let mut conn = mem();
+        create_table(
+            &conn,
+            &spec(
+                "手填表",
+                vec![
+                    pk("id", ColType::Integer),
+                    plain("备注", ColType::Text),
+                    plain("数量", ColType::Integer),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let cols = vec!["备注".to_string(), "数量".to_string()];
+        let rows = vec![vec!["".to_string(), "".to_string()]];
+        insert_rows(&mut conn, "手填表", &cols, &rows).unwrap();
+
+        let (note, qty): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT 备注, 数量 FROM 手填表 WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(note.as_deref(), Some(""), "手动编辑：文本列空串保持空串");
+        assert_eq!(qty, None, "手动编辑：数字列空串 = 清空 → NULL");
     }
 }

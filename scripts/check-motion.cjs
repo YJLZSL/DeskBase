@@ -41,6 +41,8 @@ const TARGETS = [
   // 设置页教程与数据库页首次使用引导
   path.join(ROOT, 'app', 'ui', 'help.css'),
   path.join(ROOT, 'app', 'ui', 'db-onboard.css'),
+  // 崩溃恢复向导（recovery.js 动态渲染）—— 新增样式表必须同步加进来，规矩见上
+  path.join(ROOT, 'app', 'ui', 'recovery.css'),
 ];
 
 /** 布局属性：动画它们会触发布局重算 */
