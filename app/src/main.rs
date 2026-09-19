@@ -16,6 +16,7 @@ mod convert;
 mod csv_import;
 mod db;
 mod import_pipeline;
+mod import_plan;
 mod workspace;
 mod render;
 mod schema;
