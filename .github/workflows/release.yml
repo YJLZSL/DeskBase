@@ -1,31 +1,15 @@
-# DeskBase · 发布流水线
-#
-# 存在的理由（来自 MAA 调研，见 local-docs/reference/24 第 3.1 节）：
-#   在此之前，发一次版要在**本机**手工做四件事 —— 构建、打包、建 Release、传产物。
-#   本机环境又特殊（MSVC 路径在 E 盘、SDK 要靠扫盘找、reg.exe 被安全策略拦），
-#   步骤越多越容易漏。已经漏过一次：Cargo.lock 里的版本号没跟着 Cargo.toml 走，
-#   足以让 `cargo build --locked` 直接失败。
-#
-#   现在改成 MAA 那种做法：**推送一个 v* 标签，整条链自己跑完。**
-#
-# 另一层好处：CI 用自带的 GITHUB_TOKEN，**不依赖本机有没有 git 凭据** ——
-#   本机恰恰就卡在这个上（wincred 里没有 GitHub 凭据，github.com:443 时通时不通）。
-#
-# 与 ci.yml 的分工：ci.yml 管"每次提交都别退步"，本文件只管"发版"。
-
-name: 发布
+name: Release
 
 on:
   push:
-    tags: ['v*']
-  # 允许补发（例如标签早就推上去了，Release 没建成功）
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: '要发布的标签（必须已存在于仓库）'
-        required: true
+        description: "Tag to publish (must already exist)"
+        required: false
 
-# 建 Release 与传产物需要写权限；默认 token 只有读权限
 permissions:
   contents: write
 
