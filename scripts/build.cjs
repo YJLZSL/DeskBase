@@ -17,6 +17,14 @@
  *   node scripts/build.cjs            构建 release
  *   node scripts/build.cjs --debug    构建 debug
  *   node scripts/build.cjs --test     跑测试（用 debug）
+ *   node scripts/build.cjs --test --ignored
+ *                                     只跑**需要网络**的测试（updater 的两个 #[ignore]：
+ *                                     真取 GitHub 清单 + 真下载几 MB 并替换一次）。
+ *                                     为什么必须有这个口子：本机直接用 cargo 会踩
+ *                                     工具链的坑（见文件头第 1–3 条），而设计上
+ *                                     "要联网的测试用 #[ignore] 手动跑" —— 两条
+ *                                     加起来等于"这两个测试在这台机器上没法跑"。
+ *                                     2026-09-19 加：**自动更新的最终验证只能靠它们**。
  *   node scripts/build.cjs --run      构建后启动
  *   node scripts/build.cjs --check    只做 cargo check（最快）
  *   node scripts/build.cjs --smoke    构建后跑界面烟测（真实点击，见 ui-smoke.cjs）
@@ -251,7 +259,7 @@ if (!fs.existsSync(cargo)) {
 
 const args =
   MODE === 'test'
-    ? ['test', '--', '--nocapture']
+    ? ['test', '--', ...(has('--ignored') ? ['--ignored'] : []), '--nocapture']
     : MODE === 'check'
     ? ['check']
     : ['build', ...(MODE === 'release' ? ['--release'] : [])];
