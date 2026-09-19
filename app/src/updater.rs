@@ -222,6 +222,170 @@ pub fn parse_sha256_file(text: &str) -> Option<(String, Option<String>)> {
 }
 
 // ============================================================
+// 发布清单（Releases API 的响应）
+// ============================================================
+//
+// ⚠️ 为什么不是 `/releases/latest`：那个接口的语义是"最近一个**非预发布**的 Release"。
+// 本仓库迄今四个发布全部是 `prerelease: true`，实测它**一律返回 404** ——
+// 照原设计实现的话，每个用户点"检查更新"都会看到 404，而且看起来像网络问题。
+// 详见 ADR-0018 的「补充（2026-09-19 实测修正）」。
+
+/// 通道。**默认稳定通道** —— 不能默认把人带上 beta。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Channel {
+    Stable,
+    Prerelease,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ApiAsset {
+    pub id: u64,
+    pub name: String,
+    pub size: u64,
+    /// GitHub 会给 `uploaded`；不是这个值说明资产还没传完
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Release {
+    #[serde(rename = "tag_name")]
+    pub tag: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub assets: Vec<ApiAsset>,
+}
+
+impl Release {
+    /// 从 tag 解析版本。tag 形如 `v0.2.0-beta.3`，**允许带前缀 v**（打标签的习惯如此），
+    /// 但 `Version::parse` 本身拒绝 v —— 所以这里单独剥一次，不放松 parse 的规则。
+    pub fn version(&self) -> Option<Version> {
+        Version::parse(self.tag.strip_prefix('v').unwrap_or(&self.tag))
+    }
+
+    /// 资产里可用的那些（`state` 是 uploaded 或字段缺失时按可用处理）
+    pub fn usable_assets(&self) -> Vec<Asset> {
+        self.assets
+            .iter()
+            .filter(|a| a.state.is_empty() || a.state == "uploaded")
+            .map(|a| Asset {
+                id: a.id,
+                name: a.name.clone(),
+                size: a.size,
+            })
+            .collect()
+    }
+}
+
+/// 检查的结果。**刻意做成三个分支而不是一个 Option** ——
+/// "没有更新"和"只有测试版"是两件必须分开告诉用户的事，
+/// 用一个 `None` 糊过去，界面就只能说"已是最新"，而那是**假话**。
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum CheckOutcome {
+    /// 已经是最新（或没有可比当前更新的）
+    UpToDate,
+    /// 有更新
+    Newer {
+        tag: String,
+        version: String,
+        /// 这个版本是不是预发布
+        prerelease: bool,
+    },
+    /// 稳定通道下：比当前新的只有预发布
+    OnlyPrerelease { tag: String, version: String },
+}
+
+/// 解析 Releases API 的响应。响应的顶层是一个数组。
+pub fn parse_releases(json: &str) -> Result<Vec<Release>, String> {
+    serde_json::from_str::<Vec<Release>>(json)
+        .map_err(|e| format!("发布清单解析失败（GitHub 的响应格式变了？）：{e}"))
+}
+
+/// 在清单里挑出"该装的那个"。
+///
+/// 规则（ADR-0018 补充）：
+/// 1. 丢掉 `draft`（草稿不该被任何人拿到）
+/// 2. 按通道过滤：稳定通道只看 `prerelease = false`
+/// 3. 只留比当前版本新的
+/// 4. 取版本号最高的那个
+pub fn check(releases: &[Release], current: &Version, channel: Channel) -> CheckOutcome {
+    let parsed: Vec<(&Release, Version)> = releases
+        .iter()
+        .filter(|r| !r.draft)
+        .filter_map(|r| r.version().map(|v| (r, v)))
+        .collect();
+
+    // 稳定通道下，比当前新的预发布也要单独记下来 —— 用于"只有测试版"这句提示
+    let stable_newer = parsed
+        .iter()
+        .filter(|(r, v)| !r.prerelease && v.is_newer_than(current))
+        .map(|(r, _)| *r)
+        .collect::<Vec<_>>();
+
+    if channel == Channel::Stable {
+        if let Some(best) = max_by_version(&stable_newer) {
+            return CheckOutcome::Newer {
+                tag: best.tag.clone(),
+                version: best.version().map(|v| v.to_string()).unwrap_or_default(),
+                prerelease: false,
+            };
+        }
+        // 稳定通道没得升 —— 看看是不是只有预发布
+        let pre_newer = parsed
+            .iter()
+            .filter(|(r, v)| r.prerelease && v.is_newer_than(current))
+            .map(|(r, _)| *r)
+            .collect::<Vec<_>>();
+        if let Some(best) = max_by_version(&pre_newer) {
+            return CheckOutcome::OnlyPrerelease {
+                tag: best.tag.clone(),
+                version: best.version().map(|v| v.to_string()).unwrap_or_default(),
+            };
+        }
+        return CheckOutcome::UpToDate;
+    }
+
+    // 测试通道：预发布也看
+    let any_newer = parsed
+        .iter()
+        .filter(|(_, v)| v.is_newer_than(current))
+        .map(|(r, _)| *r)
+        .collect::<Vec<_>>();
+    match max_by_version(&any_newer) {
+        Some(best) => CheckOutcome::Newer {
+            tag: best.tag.clone(),
+            version: best.version().map(|v| v.to_string()).unwrap_or_default(),
+            prerelease: best.prerelease,
+        },
+        None => CheckOutcome::UpToDate,
+    }
+}
+
+fn max_by_version<'a>(items: &[&'a Release]) -> Option<&'a Release> {
+    let mut best: Option<&'a Release> = None;
+    for r in items {
+        let rv = match r.version() {
+            Some(v) => v,
+            None => continue,
+        };
+        match best {
+            None => best = Some(r),
+            Some(b) => {
+                if let Some(bv) = b.version() {
+                    if rv.is_newer_than(&bv) {
+                        best = Some(r);
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+// ============================================================
 // 五步校验链（ADR-0018 第 1 条）
 // ============================================================
 
@@ -837,5 +1001,180 @@ mod tests {
         assert_eq!(backup_dir_name(&v), "update-backup-0.2.1");
         let v2 = Version::parse("0.2.0-beta.3").unwrap();
         assert_eq!(backup_dir_name(&v2), "update-backup-0.2.0-beta.3");
+    }
+}
+
+#[cfg(test)]
+mod tests_release {
+    use super::*;
+
+    /// 真实的 Releases 响应夹具（去掉 body 等体积字段，字段名与类型与 API 一致）。
+    /// **对着真实结构测，不对着想象测** —— 上次就是靠它发现 `/releases/latest` 会 404。
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/github-releases-sample.json");
+
+    fn fixture() -> Vec<Release> {
+        let text = std::fs::read_to_string(FIXTURE).expect("夹具文件应当存在");
+        parse_releases(&text).expect("夹具应当能解析")
+    }
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
+    }
+
+    #[test]
+    fn 真实夹具能解析出四个发布() {
+        let rs = fixture();
+        assert_eq!(rs.len(), 4, "夹具里有 4 个发布");
+        for r in &rs {
+            assert!(r.version().is_some(), "tag 应当能解析：{}", r.tag);
+            assert!(!r.draft, "夹具里没有草稿");
+            assert!(r.prerelease, "本仓库迄今四个发布全是预发布（这正是 latest 会 404 的原因）");
+            assert_eq!(r.usable_assets().len(), 3, "每个发布三个资产：{}", r.tag);
+        }
+        // 最新的排在最前
+        assert_eq!(rs[0].tag, "v0.2.0-beta.3");
+    }
+
+    #[test]
+    fn 标签带前缀v也能解析出版本() {
+        let r = Release {
+            tag: "v0.2.1".into(),
+            draft: false,
+            prerelease: false,
+            assets: vec![],
+        };
+        assert_eq!(r.version().unwrap(), v("0.2.1"));
+        // 不带前缀照样可以
+        let r2 = Release {
+            tag: "0.2.1".into(),
+            draft: false,
+            prerelease: false,
+            assets: vec![],
+        };
+        assert_eq!(r2.version().unwrap(), v("0.2.1"));
+    }
+
+    #[test]
+    fn 预发布小于同号正式版_这是语义化版本的规矩() {
+        // 夹具里是 0.2.0-beta.1/2/3 与 0.1.0-alpha.1。
+        // 从 0.2.0 出发它们**都不算更新** —— beta 小于同号正式版。
+        // 这条先钉住，免得后面有人"顺手"把 beta 当成比正式版新。
+        let rs = fixture();
+        assert!(matches!(
+            check(&rs, &v("0.2.0"), Channel::Prerelease),
+            CheckOutcome::UpToDate
+        ));
+    }
+
+    #[test]
+    fn 稳定通道下只有测试版时必须单独报出来() {
+        // 这是最要紧的一条：不能报"已是最新"（假话），不能报 404，更不能把 beta 当正式版装。
+        // 用一个比 beta 低的当前版本，这样 beta 才成立为"更新的预发布"。
+        let rs = fixture();
+        match check(&rs, &v("0.1.5"), Channel::Stable) {
+            CheckOutcome::OnlyPrerelease { tag, version } => {
+                assert_eq!(tag, "v0.2.0-beta.3");
+                assert_eq!(version, "0.2.0-beta.3");
+            }
+            other => panic!("应当报「只有测试版」，实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 测试通道下能看到预发布() {
+        let rs = fixture();
+        match check(&rs, &v("0.1.5"), Channel::Prerelease) {
+            CheckOutcome::Newer { tag, prerelease, .. } => {
+                assert_eq!(tag, "v0.2.0-beta.3");
+                assert!(prerelease, "它确实是预发布");
+            }
+            other => panic!("测试通道应当看到 beta.3，实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 已经是最新时不报更新() {
+        let rs = fixture();
+        assert!(matches!(
+            check(&rs, &v("0.2.0-beta.3"), Channel::Prerelease),
+            CheckOutcome::UpToDate
+        ));
+        // 比最新还新（本地开发版）也不该报"有更新"
+        assert!(matches!(
+            check(&rs, &v("0.3.0"), Channel::Prerelease),
+            CheckOutcome::UpToDate
+        ));
+    }
+
+    fn rel(tag: &str, prerelease: bool, draft: bool) -> Release {
+        Release {
+            tag: tag.into(),
+            draft,
+            prerelease,
+            assets: vec![ApiAsset {
+                id: 1,
+                name: asset_name(tag.trim_start_matches('v')),
+                size: 100,
+                state: "uploaded".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn 有正式版时稳定通道挑正式版() {
+        let rs = vec![
+            rel("v0.3.0-beta.1", true, false),
+            rel("v0.2.5", false, false),
+            rel("v0.2.1", false, false),
+        ];
+        match check(&rs, &v("0.2.0"), Channel::Stable) {
+            CheckOutcome::Newer { tag, prerelease, .. } => {
+                assert_eq!(tag, "v0.2.5", "应当挑正式版里最高的那个");
+                assert!(!prerelease);
+            }
+            other => panic!("实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 草稿绝不参与挑选() {
+        let rs = vec![rel("v0.9.0", false, true), rel("v0.2.5", false, false)];
+        match check(&rs, &v("0.2.0"), Channel::Stable) {
+            CheckOutcome::Newer { tag, .. } => assert_eq!(tag, "v0.2.5", "草稿 v0.9.0 不该被选中"),
+            other => panic!("实际：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn 只有更旧的版本时算已是最新() {
+        let rs = vec![rel("v0.1.0", false, false)];
+        assert!(matches!(
+            check(&rs, &v("0.2.0"), Channel::Stable),
+            CheckOutcome::UpToDate
+        ));
+    }
+
+    #[test]
+    fn 未上传完的资产不算可用() {
+        let r = Release {
+            tag: "v0.3.0".into(),
+            draft: false,
+            prerelease: false,
+            assets: vec![
+                ApiAsset { id: 1, name: "a.zip".into(), size: 1, state: "uploaded".into() },
+                ApiAsset { id: 2, name: "b.zip".into(), size: 1, state: "starter".into() },
+                ApiAsset { id: 3, name: "c.zip".into(), size: 1, state: String::new() },
+            ],
+        };
+        let names: Vec<String> = r.usable_assets().into_iter().map(|a| a.name).collect();
+        assert_eq!(names, vec!["a.zip", "c.zip"], "上传中的 b.zip 要排除；state 缺失按可用处理");
+    }
+
+    #[test]
+    fn 清单格式不对时报错而不是给空结果() {
+        // 给空结果会让界面显示"已是最新" —— 那是假话。必须报错。
+        assert!(parse_releases("not json").is_err());
+        assert!(parse_releases("{}").is_err(), "顶层应当是数组");
+        assert!(parse_releases("[]").unwrap().is_empty(), "空数组是合法的");
     }
 }

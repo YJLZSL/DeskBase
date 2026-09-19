@@ -1,0 +1,110 @@
+[
+  {
+    "tag_name": "v0.2.0-beta.3",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-09-18T00:18:23Z",
+    "name": "v0.2.0-beta.3",
+    "assets": [
+      {
+        "id": 571438036,
+        "name": "deskbase-0.2.0-beta.3-windows-x64-portable.zip",
+        "size": 3332534,
+        "state": "uploaded"
+      },
+      {
+        "id": 571438092,
+        "name": "deskbase-0.2.0-beta.3-windows-x64-portable.zip.sha256",
+        "size": 113,
+        "state": "uploaded"
+      },
+      {
+        "id": 571438114,
+        "name": "deskbase-0.2.0-beta.3.cdx.json",
+        "size": 64436,
+        "state": "uploaded"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.0-beta.2",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-09-17T22:01:01Z",
+    "name": "v0.2.0-beta.2",
+    "assets": [
+      {
+        "id": 571235929,
+        "name": "deskbase-0.2.0-beta.2-windows-x64-portable.zip",
+        "size": 3316337,
+        "state": "uploaded"
+      },
+      {
+        "id": 571236058,
+        "name": "deskbase-0.2.0-beta.2-windows-x64-portable.zip.sha256",
+        "size": 113,
+        "state": "uploaded"
+      },
+      {
+        "id": 571236108,
+        "name": "deskbase-0.2.0-beta.2.cdx.json",
+        "size": 64436,
+        "state": "uploaded"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.0-beta.1",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-09-17T16:19:41Z",
+    "name": "v0.2.0-beta.1",
+    "assets": [
+      {
+        "id": 570617387,
+        "name": "deskbase-0.2.0-beta.1-windows-x64-portable.zip",
+        "size": 3313536,
+        "state": "uploaded"
+      },
+      {
+        "id": 570617628,
+        "name": "deskbase-0.2.0-beta.1-windows-x64-portable.zip.sha256",
+        "size": 113,
+        "state": "uploaded"
+      },
+      {
+        "id": 570617725,
+        "name": "deskbase-0.2.0-beta.1.cdx.json",
+        "size": 64436,
+        "state": "uploaded"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.1.0-alpha.1",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-09-17T13:58:51Z",
+    "name": "DeskBase 桌库 v0.1.0-alpha.1 · 首个 alpha",
+    "assets": [
+      {
+        "id": 570429797,
+        "name": "deskbase-0.1.0-alpha.1-windows-x64-portable.zip",
+        "size": 3188547,
+        "state": "uploaded"
+      },
+      {
+        "id": 570429901,
+        "name": "deskbase-0.1.0-alpha.1-windows-x64-portable.zip.sha256",
+        "size": 114,
+        "state": "uploaded"
+      },
+      {
+        "id": 570429947,
+        "name": "deskbase-0.1.0-alpha.1.cdx.json",
+        "size": 64439,
+        "state": "uploaded"
+      }
+    ]
+  }
+]

@@ -1,9 +1,12 @@
 # ADR-0005: 网络访问默认关闭
 
 - **状态**：已接受
+  · **2026-09-19 澄清动因**：本 ADR 要防的是"**用户数据**被带出去"（尤其是 AI 协助场景），
+  **不是**"禁止联网功能"。它属于信任与可验证机制（默认关、可开、看得见、关掉时 0 字节），
+  与"数据不出本机"这条红线**不是同一条** —— 边界见 [ADR-0019](0019-network-boundary-clarification.md)。
 - **日期**：2026-09-17
 - **决策者**：核心维护者
-- **相关**：[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md)、[ADR-0001](0001-local-first-architecture.md)
+- **相关**：[08 · 隐私、安全、加密、权限与审计](../08-privacy-security.md)、[ADR-0001](0001-local-first-architecture.md)、[ADR-0019](0019-network-boundary-clarification.md)
 
 ---
 

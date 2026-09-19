@@ -100,6 +100,44 @@ ADR-0016 定的技术路线是"清单放 Release 上的静态 `update.json`"。�
 
 ---
 
+## 补充（2026-09-19 实测修正：取数接口不再是 `/releases/latest`）
+
+第 1 节第 ① 步写的是"只从 `api.github.com/repos/YJLZSL/DeskBase/releases/latest` 取"。
+**实现前实测发现这个接口在本仓库上不可用**：
+
+```
+GET /repos/YJLZSL/DeskBase/releases/latest      → 404 Not Found
+GET /repos/YJLZSL/DeskBase/releases?per_page=20 → 200，返回 4 个 Release
+    v0.2.0-beta.3  draft=false  prerelease=true  assets=3
+    v0.2.0-beta.2  draft=false  prerelease=true  assets=3
+    v0.2.0-beta.1  draft=false  prerelease=true  assets=3
+    v0.1.0-alpha.1 draft=false  prerelease=true  assets=3
+```
+
+**原因**：GitHub 的 `/releases/latest` 语义是"**最近一个非预发布**的 Release"。
+本仓库**迄今四个发布全部是** `prerelease: true`（我们一直按 alpha/beta 发），
+所以它永远 404。
+
+**如果照原样实现，每个用户点"检查更新"都会看到一个 404**，而且这个错误看起来
+像是网络问题 —— 排查起来会很费劲。这正是"先实测再实现"的价值。
+
+**修正**：
+
+1. 取数改为 `GET /repos/YJLZSL/DeskBase/releases?per_page=20`，**按版本号自己挑最高的一个**
+2. 增加**通道**概念，且通道必须显式：
+   - `稳定通道`（默认）：只看 `prerelease = false` 的
+   - `测试通道`：连预发布一起看
+3. **没有稳定版时不许含糊过去**：稳定通道下若只找到预发布，要明确告诉用户
+   "还没有正式版；现在只有测试版 vX（想跟进测试版请在设置里切换通道）"，
+   而不是报 404、也不是把 beta 当正式版装上去
+4. 仍然过滤 `draft = true`（草稿不该被任何人拿到）
+5. 第 1 节其余四步（严格同名、size 一致、SHA-256、包布局、`--version` 核对）**一字不改**
+
+> 夹具：真实响应（去掉 body 等体积字段，字段名与类型与 API 一致）已存进
+> `testdata/github-releases-sample.json`，解析逻辑对着它测 —— 不对着想象测。
+
+---
+
 ## 备选方案
 
 | 方案 | 否决理由 |
