@@ -126,6 +126,26 @@ DeskBase/
 
 ---
 
+## 2b. 发布（Release）
+
+**正路：推标签 → CI 自动发布。** 本地只做四件事 ——
+
+1. 版本号两处一起改：`app/Cargo.toml` + `app/Cargo.lock`（不一致会让 `cargo build --locked` 直接失败）
+2. 写 CHANGELOG 版本节 —— **它就是发布说明的唯一来源**（release.yml 从它抽取正文）
+3. 本地验证：`node scripts/build.cjs --test && node scripts/build.cjs && node scripts/package.cjs`，
+   并**解压打包产物用里面的 exe 实测**（烟测/崩溃恢复都能指定 exe 路径）
+4. `git tag -a vX.Y.Z -m "..." && git push origin main && git push origin vX.Y.Z`
+
+剩下的全自动：`.github/workflows/release.yml`（推 `v*` 触发）跑测试 + 门禁 +
+构建 + 打包 + 建 Release（tag 含 `-` 自动预发布）+ 传 3 个产物。
+**用 runner 自带 token，不依赖本机凭据 —— 本机无凭据时的正解就是这条路。**
+
+**本机特殊情况的兜底**（无凭据 / 网络抽风 / Edge 锁）：完整手册见
+`local-docs/handoff/RELEASE-RUNBOOK.md`。一句话版：
+**卡住时跑 `node local-docs/tools/publish-full-pipeline.cjs --watch`，守候会搞定。**
+
+**发布后回填**：VERSION_PLAN 的事实面板与发布记录（见第 3 节收工清单）。
+
 ## 3. 收工：必须更新的文档
 
 **"改完代码不更新交接文档"= 把烂摊子留给下一棒。** 按此表勾一遍：
