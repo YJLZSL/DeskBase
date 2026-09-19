@@ -93,22 +93,34 @@ for (const a of artifacts) {
   if (!fs.existsSync(a)) issues.push(`缺产物：${path.relative(ROOT, a)}（先跑 node scripts/package.cjs）`);
 }
 
-const dirty = git(['status', '--porcelain']);
-if (dirty) issues.push(`工作区不干净，先提交：\n${dirty}`);
-
-const ahead = (() => {
+// 待推送提交数：**不看 origin/main 这个本地引用**。
+// 本机的 .git 有个怪毛病：fetch 报「new branch main -> origin/main」，
+// 但 refs/remotes/origin/main 实际没落盘（`.git/refs/remotes` 是空的）。
+// 依赖它会让这里静默显示「待推送 0 个」—— 绿勾是真的，覆盖是假的。
+// 所以直接问远端要 main 的 SHA，读不到就老实说"未知"。
+const pending = (() => {
   try {
-    return git(['log', '--oneline', 'origin/main..main']).split('\n').filter(Boolean);
+    const out = execFileSync('git', ['ls-remote', 'origin', 'refs/heads/main'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    }).trim();
+    const sha = out ? out.split(/\s+/)[0] : null;
+    if (!sha) return '未知（远端没有 main 分支？）';
+    const n = git(['rev-list', '--count', `${sha}..main`]);
+    return `${n} 个提交`;
   } catch {
-    return [];
+    return '未知（读不到远端，可能没网）';
   }
 })();
+
+const dirty = git(['status', '--porcelain']);
+if (dirty) issues.push(`工作区不干净，先提交：\n${dirty}`);
 
 console.log(`发布 ${tag}  →  ${owner}/${repo}`);
 console.log(`  正文   ${path.relative(ROOT, notesPath)}`);
 console.log(`  产物   ${artifacts.map((a) => path.basename(a)).join('\n         ')}`);
 console.log(`  预发布 ${prerelease ? '是' : '否'}`);
-console.log(`  待推送 ${ahead.length} 个提交${skipPush ? '（--skip-push，忽略）' : ''}`);
+console.log(`  待推送 ${pending}${skipPush ? '（--skip-push，忽略）' : ''}`);
 
 if (issues.length) {
   console.error('');
