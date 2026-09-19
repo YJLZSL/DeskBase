@@ -1,0 +1,179 @@
+# DeskBase · 发布流水线
+#
+# 存在的理由（来自 MAA 调研，见 local-docs/reference/24 第 3.1 节）：
+#   在此之前，发一次版要在**本机**手工做四件事 —— 构建、打包、建 Release、传产物。
+#   本机环境又特殊（MSVC 路径在 E 盘、SDK 要靠扫盘找、reg.exe 被安全策略拦），
+#   步骤越多越容易漏。已经漏过一次：Cargo.lock 里的版本号没跟着 Cargo.toml 走，
+#   足以让 `cargo build --locked` 直接失败。
+#
+#   现在改成 MAA 那种做法：**推送一个 v* 标签，整条链自己跑完。**
+#
+# 另一层好处：CI 用自带的 GITHUB_TOKEN，**不依赖本机有没有 git 凭据** ——
+#   本机恰恰就卡在这个上（wincred 里没有 GitHub 凭据，github.com:443 时通时不通）。
+#
+# 与 ci.yml 的分工：ci.yml 管"每次提交都别退步"，本文件只管"发版"。
+
+name: 发布
+
+on:
+  push:
+    tags: ['v*']
+  # 允许补发（例如标签早就推上去了，Release 没建成功）
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的标签（必须已存在于仓库）'
+        required: true
+
+# 建 Release 与传产物需要写权限；默认 token 只有读权限
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与 ci.yml 一致：零警告是硬标准，只有变成硬失败才守得住
+  RUSTFLAGS: -D warnings
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 生成发布说明要读提交历史与标签，浅克隆不够
+          fetch-depth: 0
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ---------- 版本一致性：三处必须完全一样 ----------
+      # 这不是形式主义。2026-09-19 就真踩过一次：Cargo.toml 改成 0.2.1、
+      # Cargo.lock 里还是 0.2.0-beta.3，足以让 `cargo build --locked` 直接失败；
+      # 而如果只是标签写错（标签 v0.3.0、Cargo.toml 还是 0.2.1），
+      # 会**安静地发出一个名字对不上的包** —— 那种错在用户下载时才暴露。
+      - name: 校验标签与 Cargo 元数据一致
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          VER="${TAG#v}"
+          TOML_VER=$(grep -m1 '^version' app/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          LOCK_VER=$(grep -A1 '^name = "deskbase"' app/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          echo "标签=$VER  Cargo.toml=$TOML_VER  Cargo.lock=$LOCK_VER"
+          [ "$VER" = "$TOML_VER" ] || { echo "::error::标签与 app/Cargo.toml 的版本不一致"; exit 1; }
+          [ "$VER" = "$LOCK_VER" ] || { echo "::error::app/Cargo.lock 没跟上版本（先本地 cargo 跑一次再提交）"; exit 1; }
+
+      # ---------- 发版前的门槛，一道都不许跳 ----------
+      # 发出去的包比提交更容易被人拿到，所以这里的检查不少于 ci.yml
+      - name: 跑测试
+        working-directory: app
+        run: cargo test --all-targets
+
+      - name: 静态门禁（动效 / 对比度 / 接线）
+        shell: bash
+        run: |
+          set -e
+          node scripts/check-motion.cjs
+          node scripts/check-contrast.cjs
+          node scripts/check-wiring.cjs
+
+      - name: 构建 release
+        working-directory: app
+        run: cargo build --release --locked
+
+      - name: 体积守卫
+        run: node scripts/check-size.cjs
+
+      - name: 打包（便携包 + SHA-256 + SBOM）
+        run: node scripts/package.cjs
+
+      # ---------- 发布说明 ----------
+      # 三级取用，越靠前越"像是人写的"：
+      #   ① dist/release-notes/<tag>.md —— 手写的一份（注意 dist/ 被 gitignore，
+      #      所以这条路只有在有人特意提交到这个位置时才会命中，留着是为了将来）
+      #   ② CHANGELOG.md 里该版本的正文 —— **正常路径**。它本来就是单一事实来源，
+      #      再复制一份到别处只会两处漂移
+      #   ③ 从提交历史自动生成的草稿 —— 兜底，且明显标着"草稿"
+      - name: 准备发布说明
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          VER="${TAG#v}"
+          OUT="$(mktemp -d)/release-body.md"
+
+          if [ -f "dist/release-notes/${TAG}.md" ]; then
+            echo "① 用手写的发布说明"
+            cp "dist/release-notes/${TAG}.md" "$OUT"
+          elif node scripts/gen-changelog.cjs --extract "$VER" > "$OUT" 2>/dev/null && [ -s "$OUT" ]; then
+            echo "② 用 CHANGELOG.md 里 [${VER}] 一节作为发布说明"
+          else
+            echo "③ CHANGELOG 里没有这一版，退回自动生成的草稿"
+            node scripts/gen-changelog.cjs --to "$TAG" > "$OUT"
+          fi
+
+          [ -s "$OUT" ] || { echo "::error::发布说明是空的"; exit 1; }
+          echo "body=$OUT" >> "$GITHUB_OUTPUT"
+          echo "---- 正文前 20 行 ----"
+          head -20 "$OUT"
+
+      # ---------- 建 Release 并传产物 ----------
+      # 只用**当前版本**的产物：dist/ 里还留着历史版本的包，通配符会全抓进来
+      - name: 建 Release 并上传产物
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          BODY: ${{ steps.notes.outputs.body }}
+        run: |
+          set -e
+          VER="${TAG#v}"
+          FILES=(
+            "dist/deskbase-${VER}-windows-x64-portable.zip"
+            "dist/deskbase-${VER}-windows-x64-portable.zip.sha256"
+            "dist/deskbase-${VER}.cdx.json"
+          )
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || { echo "::error::缺产物 $f"; exit 1; }
+          done
+
+          # 版本号带后缀（如 v0.2.0-beta.1）算预发布；v0.2.1 这种不带后缀的不算
+          PRE=""
+          case "$TAG" in *-*) PRE="--prerelease" ;; esac
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 已经建过（补发场景）：只补传产物，不重复建
+            echo "Release $TAG 已存在，补传产物"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file "$BODY" \
+              $PRE \
+              "${FILES[@]}"
+          fi
+
+      - name: 打印结果
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release view "$TAG" --json url,assets --jq '{url, assets: [.assets[].name]}'
