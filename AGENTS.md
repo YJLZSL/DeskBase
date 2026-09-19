@@ -140,9 +140,20 @@ DeskBase/
 构建 + 打包 + 建 Release（tag 含 `-` 自动预发布）+ 传 3 个产物。
 **用 runner 自带 token，不依赖本机凭据 —— 本机无凭据时的正解就是这条路。**
 
-**本机特殊情况的兜底**（无凭据 / 网络抽风 / Edge 锁）：完整手册见
-`local-docs/handoff/RELEASE-RUNBOOK.md`。一句话版：
-**卡住时跑 `node local-docs/tools/publish-full-pipeline.cjs --watch`，守候会搞定。**
+**本机特殊情况**（无凭据 / 网络抽风 / Edge 锁 / shim 改写删除命令）——
+**完整手册：`local-docs/handoff/RELEASE-RUNBOOK.md`。四个硬坑速记：**
+
+1. **代理端口每会话变**（53248→61827…）：动态读 `$https_proxy`，**绝不写死**；
+   HTTPS 一律加 `--ssl-no-revoke`；git 另需 **成对**的
+   `-c http.schannelCheckRevoke=false -c http.sslBackend=schannel`
+2. **仓库 Actions 默认权限必须是 write** —— 否则声明 `contents: write` 的
+   workflow **0 job 直接失败**（`PUT /repos/{o}/{r}/actions/permissions/workflow`）
+3. **workflow 注册缓存可能坏**（name 显示为路径 + 恒 0 job）→ 别恋战，**走 API 直发**
+4. **禁用 `git rm`**：本机 shim 会把它变成递归删除（2026-09-19 真删过整个 `.github/`）。
+   删文件一律 Node `fs.unlinkSync` + `git add <明确路径>`
+
+**发布的两条落地路**：① 推 tag → CI（`release-publish.yml`）全自动；
+② CI 不可用 → `node local-docs/tools/publish-via-api.cjs`（API 直发 + 本地产物，实测可用）。
 
 **发布后回填**：VERSION_PLAN 的事实面板与发布记录（见第 3 节收工清单）。
 
