@@ -145,6 +145,11 @@
       const item = el("button", { class: "db-table-item", type: "button" });
       if (t.name === state.current) item.setAttribute("aria-current", "true");
       const title = el("span", { class: "t" }, t.name);
+      const ren = el("button", { class: "del", type: "button", title: "给表 " + t.name + " 改名" }, "改名");
+      ren.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        promptRenameTable(t.name);
+      });
       const del = el("button", { class: "del", type: "button", title: "删除表 " + t.name }, "删除");
       del.addEventListener("click", (ev) => {
         ev.stopPropagation();
@@ -155,7 +160,7 @@
       const n = t.row_estimate < 0 ? "未知" : "约 " + t.row_estimate + " 行";
       sub.append(el("span", { class: "n" }, n));
       if (t.comment) sub.appendChild(document.createTextNode(" · " + t.comment));
-      item.append(del, title, sub);
+      item.append(ren, del, title, sub);
       item.addEventListener("click", () => openTable(t.name));
       listEl.appendChild(item);
     }
@@ -1252,6 +1257,8 @@
   document.getElementById("btn-db-refresh").addEventListener("click", () => refreshTables());
   // 备份按钮：进「数据库」页就能点，不需要先打开某张表
   document.getElementById("btn-db-backup").addEventListener("click", () => { openBackupDialog(); });
+  // 表结构按钮：需要一个当前表，没有就由对话框自己提示
+  document.getElementById("btn-db-schema").addEventListener("click", () => { openSchemaDialog(); });
   tabsEl.addEventListener("click", (ev) => {
     const b = ev.target.closest(".db-tab");
     if (b) showTab(b.dataset.tab);
@@ -1368,9 +1375,183 @@
     refresh();
   }
 
+  // ============================================================
+  // 表结构编辑（v0.3.0 · F 包）
+  // ============================================================
+  // 三个入口：表项上的「改名」、侧栏的「表结构」、对话框里的加列/删列/表注释。
+  // 所有暗礁（主键、NOT NULL 默认值、被索引引用）都在 Rust 层拦 ——
+  // 界面只负责把操作送过去、把错误原样说给人听，不自己预判。
+
+  function fmtColType(decl) {
+    // 声明类型是 SQLite 的宽松原文（可能为空），翻译成人能看懂的
+    const t = (decl || "").toUpperCase();
+    if (t.includes("MONEY") || t.includes("BIGINT")) return "金额";
+    if (t.includes("DATETIME")) return "日期时间";
+    if (t.includes("DATE")) return "日期";
+    if (t.includes("BOOL")) return "是/否";
+    if (t.includes("INT")) return "整数";
+    if (t.includes("REAL") || t.includes("FLOA") || t.includes("DOUB")) return "小数";
+    if (t.includes("BLOB")) return "二进制";
+    return "文本";
+  }
+
+  function promptRenameTable(oldName) {
+    const dlg = buildDialog(
+      "db-dialog-rename",
+      "给表改名",
+      "数据、索引和注释都会跟着新名字走，别的什么都不用动。"
+    );
+    dlg.textContent = "";
+    dlg.append(el("h3", null, "给表改名"));
+    dlg.append(el("p", { class: "hint" }, "把「" + oldName + "」改成："));
+    const input = el("input", { class: "input", type: "text", value: oldName });
+    const errLine = el("p", { class: "hint", style: "color: #b00" }, "");
+    const actions = el("div", { class: "db-dialog-actions" });
+    const btnOk = el("button", { class: "btn btn-primary", type: "button" }, "确认改名");
+    const btnCancel = el("button", { class: "btn", type: "button" }, "取消");
+    actions.append(btnOk, btnCancel);
+    btnOk.addEventListener("click", async () => {
+      const newName = input.value.trim();
+      if (!newName || newName === oldName) { dlg.close("cancel"); return; }
+      btnOk.disabled = true;
+      try {
+        await call("schema.renameTable", { old: oldName, new: newName });
+        dlg.close("ok");
+        toast("已改名：" + oldName + " → " + newName);
+        if (state.current === oldName) state.current = newName;
+        await refreshTables();
+      } catch (e) {
+        errLine.textContent = errText(e);
+        btnOk.disabled = false;
+      }
+    });
+    btnCancel.addEventListener("click", () => dlg.close("cancel"));
+    dlg.append(input, errLine, actions);
+    dlg.showModal();
+  }
+
+  async function openSchemaDialog() {
+    if (!state.current) {
+      toast("先在左侧选一张表，再看它的结构", "error");
+      return;
+    }
+    const tname = state.current;
+    const dlg = buildDialog(
+      "db-dialog-schema",
+      "表结构 · " + tname,
+      "加字段、删字段、改表注释都在这里。删字段不可恢复 —— " +
+        "重要的表先去侧栏点「备份数据库」。"
+    );
+    dlg.textContent = "";
+    dlg.append(el("h3", null, "表结构 · " + tname));
+
+    // 表注释
+    let info;
+    try {
+      info = await call("schema.getTable", { name: tname });
+    } catch (e) {
+      toast("读表结构失败：" + errText(e), "error");
+      return;
+    }
+    const commentBox = el("div", { class: "db-schema-comment" });
+    const commentInput = el("input", { class: "input", type: "text", value: info.comment || "", placeholder: "这张表是干什么用的（表注释）" });
+    const btnComment = el("button", { class: "btn btn-ghost", type: "button" }, "保存注释");
+    commentBox.append(commentInput, btnComment);
+
+    // 列清单
+    const list = el("div", { class: "db-schema-list" });
+    for (const c of info.columns || []) {
+      const row = el("div", { class: "db-schema-col" });
+      const tags = [
+        c.pk ? "主键" : "",
+        c.not_null ? "必填" : "",
+        c.default != null && c.default !== "" ? "默认 " + c.default : "",
+      ].filter(Boolean).join(" · ");
+      row.append(
+        el("span", { class: "n" }, c.name),
+        el("span", { class: "t" }, fmtColType(c.decl_type) + (tags ? "（" + tags + "）" : ""))
+      );
+      if (c.pk) {
+        row.append(el("span", { class: "s" }, "主键不可删"));
+      } else {
+        const btnDel = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "删列");
+        btnDel.addEventListener("click", async () => {
+          if (!confirm("删掉字段「" + c.name + "」？这一列的数据会一起消失，且不可恢复。")) return;
+          try {
+            await call("schema.dropColumn", { table: tname, column: c.name });
+            toast("已删字段「" + c.name + "」");
+            dlg.close("ok");
+            openSchemaDialog(); // 重新打开 = 刷新内容
+            openTable(tname);   // 网格也要跟着变
+          } catch (e) {
+            toast(errText(e), "error");
+          }
+        });
+        row.append(btnDel);
+      }
+      list.append(row);
+    }
+
+    // 加列表单
+    await ensureTypes();
+    const addBox = el("div", { class: "db-schema-add" });
+    const nameInput = el("input", { class: "input", type: "text", placeholder: "字段名" });
+    const typeSel = el("select", { class: "select" });
+    for (const [v, label] of TYPES || []) typeSel.appendChild(el("option", { value: v }, label));
+    const nnChk = el("input", { type: "checkbox" });
+    const defInput = el("input", { class: "input", type: "text", placeholder: "默认值（可选，如 0）" });
+    const cmtInput = el("input", { class: "input", type: "text", placeholder: "字段说明（可选）" });
+    const btnAdd = el("button", { class: "btn btn-primary", type: "button" }, "加字段");
+    const addErr = el("p", { class: "hint", style: "color: #b00" }, "");
+    addBox.append(
+      el("p", { class: "hint" }, "加一个新字段（已有的行会用默认值填充）："),
+      nameInput, typeSel,
+      el("label", { class: "hint" }, " 必填 ", nnChk),
+      defInput, cmtInput, btnAdd, addErr
+    );
+    btnAdd.addEventListener("click", async () => {
+      const cname = nameInput.value.trim();
+      if (!cname) { addErr.textContent = "先给字段起个名"; return; }
+      btnAdd.disabled = true;
+      try {
+        await call("schema.addColumn", {
+          table: tname,
+          column: {
+            name: cname,
+            ty: typeSel.value,
+            not_null: nnChk.checked,
+            default: defInput.value.trim() === "" ? null : defInput.value.trim(),
+            primary_key: false,
+            comment: cmtInput.value.trim() === "" ? null : cmtInput.value.trim(),
+          },
+        });
+        toast("已加字段「" + cname + "」");
+        dlg.close("ok");
+        openSchemaDialog();
+        openTable(tname);
+      } catch (e) {
+        addErr.textContent = errText(e);
+        btnAdd.disabled = false;
+      }
+    });
+
+    btnComment.addEventListener("click", async () => {
+      try {
+        await call("schema.setTableComment", { table: tname, comment: commentInput.value });
+        toast("表注释已保存");
+      } catch (e) {
+        toast(errText(e), "error");
+      }
+    });
+
+    dlg.append(commentBox, el("p", { class: "hint" }, "字段（" + (info.columns || []).length + " 个）："), list, addBox);
+    dlg.showModal();
+  }
+
   window.DeskBaseDb = {
     onShow: onShow,
     openBackupDialog: openBackupDialog,
+    openSchemaDialog: openSchemaDialog,
     refreshTables: refreshTables,
     openImportDialog: openImportDialog,
   };

@@ -1450,7 +1450,6 @@ pub fn create_table(conn: &Connection, spec: &TableSpec) -> Result<()> {
 // 终止条件：**建表向导二期（表结构编辑）接线时，这里一个 allow 都不能留**。
 // 它们各自带着完整的校验与测试，删掉等于丢掉已经想清楚的边界条件。
 
-#[allow(dead_code)]
 pub fn rename_table(conn: &Connection, from: &str, to: &str) -> Result<()> {
     validate_identifier(from)?;
     validate_user_table_name(to)?;
@@ -1510,7 +1509,6 @@ pub fn drop_table(conn: &Connection, name: &str, confirm_name: &str) -> Result<(
 /// 两处提前拦下的 SQLite 限制（报错原文不好懂，这里给人话）：
 ///   - 不能加主键列；
 ///   - 要求非空就必须给默认值（已有的行要用它填值）。
-#[allow(dead_code)]
 pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()> {
     validate_identifier(table)?;
     let real = ensure_user_table(conn, table)?;
@@ -1550,8 +1548,49 @@ pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()>
     tx.commit().map_err(sqlite_msg)
 }
 
+/// 删列。SQLite 3.35+ 的 DROP COLUMN；主键列与最后一个字段删不得；
+/// 被索引 / 视图 / 触发器引用时 SQLite 会拒绝 —— 翻译成人话并指出常见原因。
+/// 删掉的列在注释表里的记录一并清掉 —— 留着就是幽灵注释。
+pub fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
+    validate_identifier(table)?;
+    let real = ensure_user_table(conn, table)?;
+    validate_column_name(column)?;
+    let cols = table_columns(&conn, &real)?;
+    if column.eq_ignore_ascii_case(ROWID_COLUMN) {
+        return Err("「_rowid」是行标识，不能删".into());
+    }
+    let Some(info) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(column)) else {
+        return Err(format!("表「{real}」没有字段「{column}」"));
+    };
+    if info.pk {
+        return Err(format!(
+            "「{column}」是主键字段，删了整张表的行标识就没了 —— 不允许"
+        ));
+    }
+    if cols.len() <= 1 {
+        return Err("一张表至少要留一个字段".into());
+    }
+    ensure_meta_tables(conn)?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
+    if let Err(e) = tx.execute_batch(&format!(
+        "ALTER TABLE {} DROP COLUMN {}",
+        quote_ident(&real),
+        quote_ident(column)
+    )) {
+        return Err(format!(
+            "删不掉「{column}」：{}。常见原因是这个字段正被索引、视图或触发器引用 —— 先删掉引用它的东西再试。",
+            sqlite_msg(e)
+        ));
+    }
+    tx.execute(
+        "DELETE FROM _db_column_comment WHERE table_name = ?1 AND column_name = ?2",
+        [real.as_str(), column],
+    )
+    .map_err(sqlite_msg)?;
+    tx.commit().map_err(sqlite_msg)
+}
+
 /// 改表注释。
-#[allow(dead_code)]
 pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;
     let real = ensure_user_table(conn, table)?;
@@ -4328,5 +4367,177 @@ mod tests {
             .unwrap();
         assert_eq!(note.as_deref(), Some(""), "手动编辑：文本列空串保持空串");
         assert_eq!(qty, None, "手动编辑：数字列空串 = 清空 → NULL");
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// 每个测试自己的内存库：两张业务表里的一张带注释、带数据，
+    /// 元数据表用 ensure_meta_tables 建出来（与真实路径同一套）。
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t1(名称 TEXT NOT NULL, 金额 INTEGER DEFAULT 0, 日期 TEXT);",
+        )
+        .unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        conn.execute("INSERT INTO _db_table_comment VALUES ('t1', '客户台账')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO _db_column_comment VALUES ('t1', '金额', '应收金额，按分存', 'money')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO t1 VALUES ('甲', 100, '2026-01-01')", [])
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn 表结构_改表名后数据与注释都跟着走() {
+        let conn = db();
+        rename_table(&conn, "t1", "客户").unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM 客户", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "数据要跟着新表名走");
+        let c: String = conn
+            .query_row(
+                "SELECT comment FROM _db_table_comment WHERE table_name = '客户'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(c, "客户台账", "表注释要搬到新名下");
+        let cc: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _db_column_comment WHERE table_name = '客户'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cc, 1, "列注释也要跟着走");
+        assert!(
+            object_type(&conn, "t1").unwrap().is_none(),
+            "旧名不应再存在"
+        );
+    }
+
+    #[test]
+    fn 表结构_改名到已存在的名字要被拒() {
+        let conn = db();
+        conn.execute_batch("CREATE TABLE t2(x INTEGER);").unwrap();
+        let e = rename_table(&conn, "t1", "t2").unwrap_err();
+        assert!(e.contains("已经有"), "要说清是重名：{e}");
+    }
+
+    #[test]
+    fn 表结构_加列_带默认值与注释() {
+        let conn = db();
+        add_column(
+            &conn,
+            "t1",
+            &ColumnDef {
+                name: "已结清".into(),
+                ty: ColType::Boolean,
+                not_null: true,
+                default: Some("0".into()),
+                primary_key: false,
+                comment: Some("是否结清".into()),
+            },
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM t1 WHERE 已结清 = 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "已有行应被默认值填充");
+        let c: String = conn
+            .query_row(
+                "SELECT comment FROM _db_column_comment WHERE table_name='t1' AND column_name='已结清'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(c, "是否结清", "注释应写上");
+    }
+
+    #[test]
+    fn 表结构_加列_主键与无默认的必填都要被拦() {
+        let conn = db();
+        let pk = add_column(
+            &conn,
+            "t1",
+            &ColumnDef {
+                name: "x".into(),
+                ty: ColType::Integer,
+                not_null: false,
+                default: None,
+                primary_key: true,
+                comment: None,
+            },
+        )
+        .unwrap_err();
+        assert!(pk.contains("主键"), "{pk}");
+        let nn = add_column(
+            &conn,
+            "t1",
+            &ColumnDef {
+                name: "y".into(),
+                ty: ColType::Text,
+                not_null: true,
+                default: None,
+                primary_key: false,
+                comment: None,
+            },
+        )
+        .unwrap_err();
+        assert!(nn.contains("默认值"), "{nn}");
+    }
+
+    #[test]
+    fn 表结构_删列_数据仍在且注释被清掉() {
+        let conn = db();
+        drop_column(&conn, "t1", "日期").unwrap();
+        let cols = table_columns(&conn, "t1").unwrap();
+        assert_eq!(cols.len(), 2, "应剩两列");
+        assert!(cols.iter().all(|c| c.name != "日期"));
+        let n: i64 = conn
+            .query_row("SELECT 金额 FROM t1 WHERE 名称 = '甲'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 100, "别的列的数据不能丢");
+        let cc: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _db_column_comment WHERE table_name='t1' AND column_name='日期'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cc, 0, "被删字段的注释要清掉");
+    }
+
+    #[test]
+    fn 表结构_删列_主键和最后的字段都不许删() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE only(id INTEGER PRIMARY KEY, v TEXT);")
+            .unwrap();
+        let e1 = drop_column(&conn, "only", "id").unwrap_err();
+        assert!(e1.contains("主键"), "{e1}");
+        let conn2 = Connection::open_in_memory().unwrap();
+        conn2.execute_batch("CREATE TABLE solo(唯一 TEXT NOT NULL);")
+            .unwrap();
+        let e2 = drop_column(&conn2, "solo", "唯一").unwrap_err();
+        assert!(e2.contains("至少"), "{e2}");
+    }
+
+    #[test]
+    fn 表结构_删列_被索引引用时报人话() {
+        let conn = db();
+        conn.execute_batch("CREATE INDEX idx_amount ON t1(金额);")
+            .unwrap();
+        let e = drop_column(&conn, "t1", "金额").unwrap_err();
+        assert!(e.contains("索引"), "要把常见原因说给用户听：{e}");
     }
 }

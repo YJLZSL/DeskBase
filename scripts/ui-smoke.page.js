@@ -229,6 +229,70 @@
     const dt = types.find((t) => t.name === "date_time" || t.name === "datetime");
     step("「日期时间」在清单里且名字可用", !!dt, dt ? dt.name : "缺失");
 
+    // ---------- 12. 表结构编辑：入口在 + IPC 串起来能跑 ----------
+    // 真实点击留给走查（改名要填对话框），这里盖的是"功能真的被接上了"：
+    // 建表 → 加列 → 删列 → 改名，每一步断言结果，而不是只看"没报错"。
+    {
+      const $sch = $("#btn-db-schema");
+      step("数据库页有「表结构」入口", !!$sch);
+      step(
+        "表结构的编程入口可用",
+        !!(window.DeskBaseDb && typeof window.DeskBaseDb.openSchemaDialog === "function")
+      );
+      const szProbe = "烟测结构表" + Date.now().toString(36);
+      try {
+        await ipc("schema.createTable", {
+          spec: {
+            name: szProbe,
+            comment: null,
+            columns: [
+              { name: "名称", ty: "text", not_null: false, default: null, primary_key: false, comment: null },
+            ],
+          },
+        });
+        await ipc("schema.addColumn", {
+          table: szProbe,
+          column: {
+            name: "金额",
+            ty: "money",
+            not_null: false,
+            default: "0",
+            primary_key: false,
+            comment: "金额（分）",
+          },
+        });
+        const i1 = await ipc("schema.getTable", { name: szProbe });
+        const c1 = (i1 && i1.columns) || [];
+        step("加列后字段数变成 2", c1.length === 2, c1.length + " 列");
+        await ipc("schema.dropColumn", { table: szProbe, column: "金额" });
+        const i2 = await ipc("schema.getTable", { name: szProbe });
+        const c2 = (i2 && i2.columns) || [];
+        step("删列后字段数回到 1", c2.length === 1, c2.length + " 列");
+        const newName = szProbe + "改过名";
+        await ipc("schema.renameTable", { old: szProbe, new: newName });
+        const list = await ipc("schema.listTables");
+        const names = (list || []).map((t) => (t && t.name) || "");
+        step(
+          "改名后新表名在列表里、旧名没了",
+          names.includes(newName) && !names.includes(szProbe),
+          "新=" + names.includes(newName) + " 旧残留=" + names.includes(szProbe)
+        );
+        const ip = await ipc("schema.getTable", { name: newName });
+        const pk = ((ip && ip.columns) || []).find((c) => c.pk);
+        if (pk) {
+          let rejected = false;
+          let why = "";
+          try { await ipc("schema.dropColumn", { table: newName, column: pk.name }); }
+          catch (e) { rejected = true; why = String((e && e.message) || e); }
+          step("删主键列被拒绝", rejected, why.slice(0, 80));
+        } else {
+          step("删主键列被拒绝", true, "该表无主键列，跳过");
+        }
+      } catch (e) {
+        step("表结构 IPC 串起来能跑", false, String(e));
+      }
+    }
+
     // ---------- 11. 备份：真实点击 → 对话框 → 生成 → 文件名约定 ----------
     // 为什么放在烟测里：备份是"用户主动保命"的动作，Rust 侧 5 个测试盖的是
     // 备份逻辑本身；这里盖的是"界面上真的点得到、点完真的多出一份"。

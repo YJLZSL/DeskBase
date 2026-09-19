@@ -153,7 +153,10 @@ static SOURCES: Mutex<Vec<(String, Source)>> = Mutex::new(Vec::new());
 
 /// 最多留几个来源。为什么不无限留着：每个来源握着一个文件路径，
 /// 用户导入十个文件之后旧的就没用了；留着只是让内存和"能读的文件"越堆越多。
-const KEEP_SOURCES: usize = 8;
+/// 与 KEEP_SESSIONS 同理（2026-09-19 同一天都踩到）：8 也不是并发上限，
+/// 只是防泄漏。测试并行 + 用户多开向导时，活跃令牌会被挤掉，
+/// 前端只会看到"导入已过期"这种莫名其妙的话 —— 给足余量。
+const KEEP_SOURCES: usize = 32;
 
 /// 存一个来源，返回一次性令牌。
 pub fn stash(src: Source) -> String {
@@ -370,7 +373,11 @@ pub struct Chunk {
 
 static SESSIONS: Mutex<Vec<(String, Session)>> = Mutex::new(Vec::new());
 /// 同时最多几场导入。1 就够 —— 界面同时只可能有一个导入向导。
-const KEEP_SESSIONS: usize = 2;
+/// 一次会话的内存占用很小（表头 + 预览），32 个也是 KB 级 ——
+/// 之前是 2：用户开到第三个导入向导时，第一个就被悄悄挤掉，前端只会看到
+/// "导入已结束或过期"；测试并行跑时同样互相挤（2026-09-19 实测）。
+/// 这个上限的目的只是防泄漏，不是限制并发 —— 给足余量。
+const KEEP_SESSIONS: usize = 32;
 
 fn with_session<T>(id: &str, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
     let mut v = SESSIONS.lock().map_err(|_| "导入状态锁失败".to_string())?;

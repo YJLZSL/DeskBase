@@ -653,3 +653,13 @@
 .db-backup-item { display: flex; justify-content: space-between; gap: 12px; padding: 6px 4px; }
 .db-backup-item .t { font-size: 12px; word-break: break-all; }
 .db-backup-item .s { font-size: 12px; opacity: 0.75; white-space: nowrap; }
+
+/* ---------- 表结构编辑（v0.3.0 · F 包） ---------- */
+/* 只做布局，颜色交给主题变量 —— 与备份列表同一条纪律 */
+.db-schema-comment { display: flex; gap: 8px; margin: 8px 0; }
+.db-schema-comment .input { flex: 1; }
+.db-schema-list { max-height: 200px; overflow: auto; margin: 8px 0; }
+.db-schema-col { display: flex; align-items: center; gap: 10px; padding: 6px 4px; }
+.db-schema-col .n { font-size: 13px; min-width: 6em; word-break: break-all; }
+.db-schema-col .t { font-size: 12px; opacity: 0.75; flex: 1; }
+.db-schema-add { display: grid; gap: 6px; margin-top: 8px; padding-top: 8px; }

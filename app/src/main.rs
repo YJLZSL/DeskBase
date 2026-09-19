@@ -1634,6 +1634,83 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // 表结构编辑（v0.3.0 · F 包）：改名 / 加列 / 删列 / 改表注释。
+        // 校验与 SQLite 暗礁（主键、NOT NULL 默认值、被索引引用）都在 schema 层拦。
+        "schema.renameTable" => {
+            let old = req.args.get("old").and_then(|v| v.as_str()).unwrap_or("");
+            let new = req.args.get("new").and_then(|v| v.as_str()).unwrap_or("");
+            if old.is_empty() || new.is_empty() {
+                return err(id, "改名参数不完整（old / new 都要给）");
+            }
+            match state.db.lock() {
+                Ok(d) => match schema::rename_table(d.conn(), old, new) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("表改名：{old} → {new}"));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.addColumn" => {
+            let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let parsed = req
+                .args
+                .get("column")
+                .and_then(|v| serde_json::from_value::<schema::ColumnDef>(v.clone()).ok());
+            let Some(col) = parsed else {
+                return err(id, "加列参数不完整或格式不对（column 要给全）");
+            };
+            match state.db.lock() {
+                Ok(d) => match schema::add_column(d.conn(), table, &col) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("加字段：{table}.{}", col.name));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.dropColumn" => {
+            let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = req.args.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            if table.is_empty() || column.is_empty() {
+                return err(id, "删列参数不完整（table / column 都要给）");
+            }
+            match state.db.lock() {
+                Ok(d) => match schema::drop_column(d.conn(), table, column) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("删字段：{table}.{column}"));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "schema.setTableComment" => {
+            let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let comment = req.args.get("comment").and_then(|v| v.as_str()).unwrap_or("");
+            if table.is_empty() {
+                return err(id, "要说明改哪张表（table）");
+            }
+            match state.db.lock() {
+                Ok(d) => match schema::set_table_comment(d.conn(), table, comment) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("改表注释：{table}"));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "schema.createTable" => {
             let parsed = req
                 .args
