@@ -40,6 +40,22 @@ rust_xlsxwriter = "0.99"
 # 提成直接依赖不新增任何包、不需要联网、也不改变体积（LTO 会剔掉未用到的表）。
 encoding_rs = "0.8"
 
+# 更新器用（app/src/updater.rs，见 docs/adr/0018）。
+#
+# 为什么敢把这两个提成直接依赖：**它们本来就在依赖树里**，提成直接依赖
+# 不新增任何包、不需要联网、体积代价接近零。与 encoding_rs 同一个理由。
+#   · sha2 ← wry 已经在用（SHA-256 校验下载到的包）
+#   · zip  ← calamine / rust_xlsxwriter 已经在用（检查包里确实有 deskbase.exe）
+#
+# 为什么不自己写 SHA-256：能写对，但没必要 —— 它是密码学原语，
+# 自研的每一次"我觉得这里不会出错"都是在赌；库有 NIST 测试向量兜着。
+#
+# 许可证：sha2 是 MIT OR Apache-2.0，zip 是 MIT，均与 Apache-2.0 兼容。
+# zip 关掉默认特性、只开 deflate —— 我们发的包就是 deflate 压缩的，
+# 多开的特性（zstd/bzip2 等）每一个都会拉新包。
+sha2 = "0.10"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
 # 原生文件选择框（导入 Excel、选备份目录等）。
 # 为什么必须是原生对话框而不是 <input type="file">：WebView2 里后者只给
 # `C:\fakepath\x.xlsx` 这种假路径，拿不到真实路径，Rust 侧无法打开文件。

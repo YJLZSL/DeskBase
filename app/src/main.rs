@@ -16,10 +16,21 @@ mod convert;
 mod csv_import;
 mod db;
 mod import_pipeline;
-mod import_plan;
 mod workspace;
 mod render;
 mod schema;
+// 导入计划内核（表头行与字段类型推断）：**调用方还没接上** ——
+// 读文件那一层（`xlsx.rs::plan`）与 IPC 命令要在下一步才写。
+//
+// 所以这里刻意**只在测试构建里编译**：
+//   · 它的 29 个测试照跑（测试是这个模块当前的全部价值）
+//   · release 构建里不存在这些符号 → 不会为了"零警告"去加 allow
+//   · 更重要的是**不会被误认为已经生效** —— 半接线的模块比没接线更危险（D-044）
+//
+// **启用方式**：接线完成时把这一行改回 `mod import_plan;`。
+#[cfg(test)]
+mod import_plan;
+mod updater;
 mod xlsx;
 
 use std::path::PathBuf;
@@ -53,18 +64,20 @@ const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
 ///   · 关于页的「打开项目仓库」会跳到 GitHub 的 404 页（未登录时）
 ///   · 「检查更新」的发布页同理
 /// 这是预期的 —— 地址本身是对的，只是还没公开。公开后无需改这一行。
-const PROJECT_REPO: &str = "https://github.com/YJLZSL/DeskBase";
-
 /// 允许用系统浏览器打开的地址。**白名单是硬编码的，前端改不了。**
 ///
 /// 为什么要有白名单：`app.openExternal` 一旦接受任意 URL，被注入的渲染层就能
 /// 拿它当"用系统默认程序打开任意东西"的跳板。这里只放项目自己的几个地址，
 /// 渲染层无论传什么，不在这张表里的都会被拒并记进日志。
+///
+/// ⚠️ 地址**不在这里写死** —— 仓库 slug 只在 `updater::REPO` 定义一次。
+/// 以前这里另有一个 `PROJECT_REPO` 常量，同一个仓库写两遍；
+/// 两边一旦不一致，就成了"界面指向的仓库"和"更新器检查的仓库"不是同一个。
 fn allowed_urls() -> Vec<String> {
     vec![
-        PROJECT_REPO.to_string(),
-        format!("{PROJECT_REPO}/releases"),
-        format!("{PROJECT_REPO}/tree/main/docs"),
+        updater::repo_url(),
+        updater::releases_url(),
+        updater::docs_url(),
     ]
 }
 
@@ -145,6 +158,55 @@ fn err(id: u64, message: impl Into<String>) -> String {
 }
 
 fn main() -> wry::Result<()> {
+    // ---------- 命令行模式（走在最前面，且不碰数据库）----------
+    //
+    // 这两个模式都在**旧进程可能还占着数据库**的时候被调用，所以绝不能先开库。
+    //
+    //   --version
+    //       给更新器用来核对"最终落地的那份 exe 自报的版本对不对"（ADR-0018 第 5 步）。
+    //       输出格式写死为 `deskbase <版本>` —— 改它就会打断更新器的校验。
+    //
+    //   --apply-update <暂存目录> --into <安装目录>
+    //       占位替换。由**新版本的 exe** 执行（旧 exe 退出后就没了，没法替换自己），
+    //       所以两个目录都必须显式传进来：新 exe 运行在暂存目录里，
+    //       `current_exe()` 指向的是暂存目录，拿它当默认值会覆盖错地方。
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("deskbase {}", updater::current_version());
+        return Ok(());
+    }
+
+    if let Some(i) = args.iter().position(|a| a == "--apply-update") {
+        let staged = match args.get(i + 1) {
+            Some(s) => PathBuf::from(s),
+            None => {
+                eprintln!("用法：deskbase --apply-update <暂存目录> --into <安装目录>");
+                std::process::exit(2);
+            }
+        };
+        let into = args
+            .iter()
+            .position(|a| a == "--into")
+            .and_then(|j| args.get(j + 1))
+            .map(PathBuf::from);
+        let Some(into) = into else {
+            // 不给默认值：默认到"当前 exe 所在目录"在这里一定是错的（那是暂存目录）
+            eprintln!("必须显式指定 --into <安装目录>，不提供默认值");
+            std::process::exit(2);
+        };
+        match updater::run_apply_update(&staged, &into) {
+            Ok(msg) => {
+                println!("{msg}");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("更新失败：{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // 数据目录：可用 DESKBASE_DATA_DIR 覆盖（便携版会用它）
     let data_dir = db::default_data_dir();
 
@@ -383,11 +445,11 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 id,
                 serde_json::json!({
                     "name": "DeskBase 桌库",
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": updater::current_version().to_string(),
                     "dataDir": state.data_dir.to_string_lossy(),
                     "noteCount": count,
                     "uptimeMs": state.started_at.elapsed().as_millis() as u64,
-                    "repo": PROJECT_REPO,
+                    "repo": updater::repo_url(),
                     "workspace": workspace,
                 }),
             )

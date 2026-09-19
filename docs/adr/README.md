@@ -115,8 +115,9 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0014](0014-attachment-encryption-vector-index-and-fts.md) | 附件加密与去重、向量索引存放、全文检索方案及 schema 同步 | 已接受 | 2026-09-17 |
 <!-- 下面这行与 118 行重复（同一份 ADR 的两种描述），保留后者，此行待清理 -->
 | [0015](0015-distribution-and-installer-strategy.md) | 分发形态与安装器策略（便携版 + Windows 安装版） | 提议 | 2026-09-17 |
-| [0016](0016-in-app-update-mechanism.md) | 程序内更新：默认关闭、显式开启、强制签名校验、更新不碰数据 | 提议 | 2026-09-18 |
+| [0016](0016-in-app-update-mechanism.md) | 程序内更新：默认关闭、显式开启、强制签名校验、更新不碰数据 | 已接受（「不做自替换」一条已被 0018 取代） | 2026-09-18 |
 | [0017](0017-ai-assistance-privacy-boundary.md) | AI 协助的隐私边界：默认本地、外部调用逐次授权、数据最小化、生成内容不自动执行 | 提议 | 2026-09-18 |
+| [0018](0018-unsigned-self-update.md) | 无签名前提下的自更新：五步校验链、默认关闭、三步确认、只走官方 API、数据零风险 | 已接受 | 2026-09-19 |
 
 ---
 
