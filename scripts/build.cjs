@@ -4,9 +4,11 @@
  * 为什么需要这个脚本：
  *
  * 本机有三处非标准，直接用 cargo 会踩坑：
- *   1. Windows SDK 装在非标准位置 D:\Windows Kits\10，而 reg.exe 被安全策略拉黑，
- *      vcvars64.bat 查不到注册表里的 KitsRoot10，导致 LIB 里缺 SDK 的库
- *      → 链接报 link.exe exit code 1181
+ *   1. Windows SDK 装在非标准位置（D:\ 或 E:\Windows Kits\10 之类），而 reg.exe
+ *      可能被安全策略拉黑，vcvars64.bat 查不到注册表里的 KitsRoot10，
+ *      导致 LIB 里缺 SDK 的库 → 链接报
+ *      `LNK1181: cannot open input file 'kernel32.lib'`
+ *      （这个报错离原因很远。脚本用"扫盘符"代替查注册表来兜住它）
  *   2. Node 的 spawnSync 直接调 cmd.exe 时内层引号会被转义坏
  *      → 报「'\"D:\...\vcvars64.bat\"' 不是内部或外部命令」
  *   3. Rust 的 default 工具链是 GNU，项目要用 MSVC
@@ -78,11 +80,22 @@ function findVcVars() {
 /** 找 Windows SDK 根目录 */
 function findSdkRoot() {
   if (process.env.DESKBASE_SDK_ROOT) return process.env.DESKBASE_SDK_ROOT;
-  return firstExisting([
+
+  // 为什么要把所有盘符都扫一遍，而不是只列几个常见位置：
+  //   SDK 允许装在任意盘（本机就在 `E:\Windows Kits\10`），而**自动发现它的
+  //   唯一可靠途径是注册表** —— vcvars64.bat 正是靠 `reg.exe` 查 KitsRoot10。
+  //   一旦 reg.exe 不可用（受限环境、组策略、或本机那种程序黑名单），
+  //   vcvars 就静默地不设 LIB，于是链接阶段报 `LNK1181: cannot open input
+  //   file 'kernel32.lib'` —— 报错离原因很远，极难定位。
+  //   扫盘符的成本是 26 次 existsSync，可以忽略；换来的是"装在哪儿都能构建"。
+  const roots = [
     path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Windows Kits', '10'),
     'C:\\Program Files (x86)\\Windows Kits\\10',
-    'D:\\Windows Kits\\10',
-  ]);
+  ];
+  for (let c = 'A'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
+    roots.push(`${String.fromCharCode(c)}:\\Windows Kits\\10`);
+  }
+  return firstExisting(roots);
 }
 
 /** SDK 版本目录：取 Lib 下版本号最大的那个，不写死 */

@@ -1147,6 +1147,43 @@ fn expr_is_safe(s: &str) -> bool {
     depth == 0
 }
 
+/// 金额列的默认值：界面按「元」输入，存储按「分」—— 这里做唯一一次换算。
+///
+/// 为什么不能把 `DEFAULT 12.34` 直接放进 DDL：`column_ddl` 会给金额列钉一条
+/// `CHECK (typeof(x) IN ('integer','null'))`，而 `DEFAULT 12.34` 往 INTEGER 列里
+/// 写的是 REAL —— **建表能过，第一次插入才报错**，而报错信息完全指不到"默认值"
+/// 这三个字上。这类"离现场很远"的报错正是本项目最想避免的。
+///
+/// 界面把用户填的「元」包成字符串字面量（`'12.34'`）交过来，这里剥壳后交给
+/// [`money_parse`] —— 顺带白拿了它全部的校验（超 2 位小数、非数字、超范围）。
+fn money_default_to_cents(literal: &str) -> Result<String> {
+    let v = literal.trim();
+    let upper = v.to_ascii_uppercase();
+    // 关键字原样放行：`NULL` 与 `CURRENT_*`（时间戳当金额没意义，但不该由这里拦）
+    if upper == "NULL" || upper.starts_with("CURRENT_") {
+        return Ok(v.to_string());
+    }
+    let inner = strip_sql_string_literal(v).unwrap_or(v);
+    let cents = money_parse(inner)?;
+    Ok(cents.to_string())
+}
+
+/// 剥掉 SQL 字符串字面量的外层引号（`'12.34'` → `12.34`），并把 `''` 还原成 `'`。
+/// 不是完整的字面量（缺一侧引号、长度不足）时返回 `None`，交给调用方按原样处理。
+fn strip_sql_string_literal(v: &str) -> Option<&str> {
+    let b = v.as_bytes();
+    if b.len() < 2 {
+        return None;
+    }
+    let q = b[0];
+    if (q != b'\'' && q != b'"') || b[b.len() - 1] != q {
+        return None;
+    }
+    // 单引号转义在 SQL 里是翻倍写法，这里不展开 —— money_parse 只认数字，
+    // 真有人往金额默认值里塞引号，让它在下面报"不是金额"更好。
+    Some(&v[1..v.len() - 1])
+}
+
 /// 单列的 DDL 片段。
 ///
 /// `inline_pk`：主键列在只有一列主键时写成列级 `PRIMARY KEY`；多列主键走表级约束
@@ -1165,6 +1202,13 @@ fn column_ddl(col: &ColumnDef, inline_pk: bool) -> Result<String> {
     }
     if let Some(d) = &col.default {
         if let Some(d) = normalize_default(d)? {
+            // 金额列的默认值按「元」写、按「分」存 —— 与界面录入、Excel 导入
+            // 是同一套约定。换算只走 money_parse 这一份实现（D-034）。
+            let d = if col.ty == ColType::Money {
+                money_default_to_cents(&d)?
+            } else {
+                d
+            };
             s.push_str(" DEFAULT ");
             s.push_str(&d);
         }
@@ -2401,8 +2445,10 @@ fn split_on_logical(sql: &str, kw: &str) -> Vec<String> {
 ///   - 判据说"读"但 SQLite 说会写库时，**不做提前截断**：截断会把一条写语句执行一半。
 ///   - 不记录 SQL 日志（docs/06 §9.3）。
 ///
-/// 不做的三件事（都是上层的活）：参数化查询的 `:参数名` 填值、查询超时/中断
-/// （可用 `Connection::get_interrupt_handle` 从另一个线程打断）、慢查询标记。
+/// 不做的三件事（都是上层的活）：参数化查询的 `:参数名` 填值、慢查询标记、
+/// 结果集导回文件。**超时与中断已经在 IPC 层接上了**（`main.rs` 的
+/// `run_query_async`：独立线程 + `get_interrupt_handle`，超时哨兵与"执行中
+/// 再点一次"共用同一个中断句柄，见 Q-042）。
 pub fn run_query(conn: &Connection, sql: &str, max_rows: usize) -> Result<QueryResult> {
     let (mode, _) = classify(sql)?;
     let cap = max_rows.max(1);
@@ -3798,6 +3844,225 @@ mod tests {
                  undefined（这个坑已经踩过一次，见 BUG_HUNT-2026-09-18.md P1-1）"
             );
         }
+    }
+
+    /// 金额列的默认值必须换算成整数分。
+    ///
+    /// 反例说明为什么值得测：`DEFAULT 12.34` 在 INTEGER 列上写的是 REAL，
+    /// 撞上建表时钉的 `CHECK (typeof(x) IN ('integer','null'))` ——
+    /// **建表会成功，第一次插入才报错**，而报错信息完全指不到"默认值"上。
+    #[test]
+    fn 金额列的默认值按元换算成整数分() {
+        // 界面会把用户填的「元」包成字符串字面量
+        assert_eq!(money_default_to_cents("'12.34'").unwrap(), "1234");
+        assert_eq!(money_default_to_cents("12.34").unwrap(), "1234");
+        assert_eq!(money_default_to_cents("-0.05").unwrap(), "-5");
+        assert_eq!(money_default_to_cents("0").unwrap(), "0");
+        // 关键字原样放行
+        assert_eq!(money_default_to_cents("NULL").unwrap(), "NULL");
+        assert_eq!(
+            money_default_to_cents("CURRENT_TIMESTAMP").unwrap(),
+            "CURRENT_TIMESTAMP"
+        );
+        // 校验白拿了 money_parse 的那一套
+        assert!(money_default_to_cents("'12.345'").is_err(), "三位小数必须被拒");
+        assert!(money_default_to_cents("'未结清'").is_err(), "非数字必须被拒");
+
+        // DDL 层面确认真的写成了整数，且原来的"12.34"字样不再出现
+        let col = ColumnDef {
+            default: Some("'12.34'".to_string()),
+            ..c("金额", ColType::Money)
+        };
+        let ddl = column_ddl(&col, true).unwrap();
+        assert!(ddl.contains("DEFAULT 1234"), "DDL 应为 DEFAULT 1234：{ddl}");
+        assert!(!ddl.contains("12.34"), "DDL 里不该出现实数：{ddl}");
+
+        // 端到端：建表后不给金额列赋值，默认值要能落成 1234 分
+        let mut conn = mem();
+        create_table(&conn, &spec("报销", vec![c("事项", ColType::Text), col])).unwrap();
+        ins(&mut conn, "报销", &["事项"], &[vec!["打车"]]);
+        let page = page_rows(&conn, "报销", None, false, None, 10).unwrap();
+        // rows[i] = [_rowid, 事项, 金额]
+        assert_eq!(
+            page.rows[0][2].as_i64(),
+            Some(1234),
+            "默认值应落成 1234 分，实际：{:?}",
+            page.rows[0][2]
+        );
+    }
+
+    /// 中断句柄能真的打断一条正在跑的查询（Q-042 的底层能力）。
+    ///
+    /// 为什么在**这里**测：IPC 那一层（`main.rs` 的 `run_query_async`）跑不了单测
+    /// —— 它需要一个事件循环与 WebView。但它成立的前提只有一条：另一个线程
+    /// 按住中断句柄能不能真的让 statement 停下来。这一条测住了，剩下的
+    /// （超时哨兵、执行中再点一次）就只是调度问题。
+    #[test]
+    fn 中断句柄能打断正在执行的查询() {
+        let conn = mem();
+        let long = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000000) \
+                    SELECT sum(x) FROM c";
+        // 先确认这个 SQL 本身合法：同一个形状把上限调小，必须能跑完。
+        // （否则"报错了"可能只是语法错，测不出中断到底有没有用。）
+        let short = long.replace("3000000", "1000");
+        assert!(
+            run_query(&conn, &short, 10).is_ok(),
+            "参照查询应当能跑完 —— 跑不完说明这条 SQL 本身有问题"
+        );
+
+        let handle = conn.get_interrupt_handle();
+        let killer = std::thread::spawn(move || {
+            // 给查询一点时间真正跑起来，再按中断
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            handle.interrupt();
+        });
+        let r = run_query(&conn, long, 10);
+        killer.join().unwrap();
+        assert!(
+            r.is_err(),
+            "被中断的查询必须返回错误，而不是继续跑到底 —— 说明 interrupt 没接上"
+        );
+    }
+
+    /// 读一个界面脚本的源码（字段名核对用）。
+    fn ui_src(name: &str) -> String {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui")
+            .join(name);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 app/ui/{name}：{e}"))
+    }
+
+    /// 去掉 JS 的**行注释**（`//` 到行尾），字符串里的 `//` 不算。
+    ///
+    /// 为什么要去注释：注释里为了讲清这个坑，会**写出错误的字段名**
+    /// （"不能写成 `elapsedMs`"）。不去掉，门禁会被自己的说明文字弄红 ——
+    /// 那等于逼着后来者删掉说明，是本项目的红线（D-040 的精神）。
+    fn strip_line_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        for line in src.lines() {
+            let b: Vec<char> = line.chars().collect();
+            let mut quote: Option<char> = None;
+            let mut cut = b.len();
+            let mut i = 0;
+            while i < b.len() {
+                let c = b[i];
+                match quote {
+                    Some(q) => {
+                        if c == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if c == q {
+                            quote = None;
+                        }
+                    }
+                    None => {
+                        if c == '"' || c == '\'' || c == '`' {
+                            quote = Some(c);
+                        } else if c == '/' && i + 1 < b.len() && b[i + 1] == '/' {
+                            cut = i;
+                            break;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            out.extend(b[..cut].iter());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// `has_more` → `hasMore`
+    fn to_lower_camel(field: &str) -> String {
+        let mut out = String::new();
+        let mut up = false;
+        for ch in field.chars() {
+            if ch == '_' {
+                up = true;
+                continue;
+            }
+            if up {
+                out.extend(ch.to_uppercase());
+                up = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// 跨语言字段名的**通用**门禁：凡是用 serde 默认（snake_case）序列化的结构体字段，
+    /// 界面里都不允许出现它的驼峰写法。
+    ///
+    /// 上面那个 `分页应答的字段名…` 测试只钉住 `Page` 的两个字段；这一条把
+    /// 「凡是跨语言边界传字段都要逐个核对」变成机器可查。它已经被踩过两次：
+    ///   · `Page.has_more` 写成 `hasMore` → 超过一页的表永远翻不动
+    ///   · `QueryResult.elapsed_ms` 写成 `elapsedMs` → 每条语句的耗时与总耗时永远不显示
+    /// 两次都是"测试全绿、自检全绿、界面看起来正常"。
+    ///
+    /// 只查 `db.js` / `sql.js`（直接读 IPC 应答的两个文件）。`grid.js` 不查：
+    /// 它吃的是 `db.js` 转好的**驼峰**对象，那是刻意的内部契约，不是 Rust 那侧的名字。
+    #[test]
+    fn 跨语言字段名不得在界面里写成驼峰() {
+        const FIELDS: &[&str] = &[
+            "has_more",
+            "next_cursor",
+            "elapsed_ms",
+            "row_estimate",
+            "decl_type",
+            "not_null",
+        ];
+
+        for file in ["db.js", "sql.js"] {
+            let code = strip_line_comments(&ui_src(file));
+            for f in FIELDS {
+                let camel = to_lower_camel(f);
+                if camel == *f {
+                    continue; // 没有下划线的字段不存在这个问题
+                }
+                let bad = format!(".{camel}");
+                assert!(
+                    !code.contains(&bad),
+                    "app/ui/{file} 里出现了 `{bad}` —— Rust 侧序列化出来的是 `{f}`。\
+                     写成驼峰不会报错，只会静默拿到 undefined（这个坑踩过两次，\
+                     见 BUG_HUNT-2026-09-18.md）"
+                );
+            }
+        }
+
+        // 反向：Rust 侧序列化出来的键必须就是这些名字（防止有人给结构体加 rename_all）
+        let q = QueryResult {
+            columns: vec!["a".into()],
+            rows: Vec::new(),
+            truncated: false,
+            elapsed_ms: 1,
+            affected: 0,
+        };
+        let qv = serde_json::to_value(&q).unwrap();
+        let qo = qv.as_object().unwrap();
+        for k in ["columns", "rows", "truncated", "elapsed_ms", "affected"] {
+            assert!(qo.contains_key(k), "QueryResult 缺少字段 {k}：界面会读到 undefined");
+        }
+        let t = TableInfo {
+            name: "t".into(),
+            comment: None,
+            columns: Vec::new(),
+            row_estimate: -1,
+        };
+        let tv = serde_json::to_value(&t).unwrap();
+        assert!(tv.as_object().unwrap().contains_key("row_estimate"));
+
+        // 该按 snake 读的地方确实读了 —— 否则上面两条只要把读法删掉就能过
+        let db = strip_line_comments(&ui_src("db.js"));
+        for probe in ["page.has_more", "page.next_cursor", "t.row_estimate"] {
+            assert!(db.contains(probe), "app/ui/db.js 里没有 `{probe}`");
+        }
+        let sql = strip_line_comments(&ui_src("sql.js"));
+        assert!(
+            sql.contains("res.elapsed_ms"),
+            "app/ui/sql.js 里没有 `res.elapsed_ms`：耗时徽章会永远不显示"
+        );
     }
 
     #[test]

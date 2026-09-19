@@ -58,9 +58,82 @@ for (const m of motionSrc.matchAll(/path\.join\(ROOT,\s*'app',\s*'ui',\s*'([^']+
   targets.add(m[1]);
 }
 
-/** main.rs 的 dispatch() 里出现的命令字符串 */
+/**
+ * 去掉 Rust 源码里的注释（字符串内容保留 —— 命令名本身就是字符串）。
+ *
+ * 为什么必须去注释：注释里提到一句 `// "schema.runQuery" => ...` 就会让
+ * 第 4 项检查显示"有分支"。这正是本项目最忌讳的那种通过 ——
+ * 绿勾是真的，覆盖是假的（D-040：门禁必须被负向验证过）。
+ */
+function stripRustComments(src) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    // 行注释
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') i++;
+      continue;
+    }
+    // 块注释（保留一个空格，免得把两侧的 token 粘在一起）
+    if (c === '/' && src[i + 1] === '*') {
+      i += 2;
+      while (i < src.length - 1 && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    // 字符串：整段原样保留
+    if (c === '"') {
+      out += '"';
+      i++;
+      while (i < src.length) {
+        const d = src[i];
+        if (d === '\\') {
+          out += src.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += d;
+        i++;
+        if (d === '"') break;
+      }
+      continue;
+    }
+    // 字符字面量（'a' / '\n'）。生命周期（&'static）不在这里处理 ——
+    // 只认"紧跟一个字符再跟一个引号"的形态，避免把 'a 之后的整段代码吃掉。
+    if (c === "'") {
+      if (src[i + 1] === '\\' && src[i + 3] === "'") {
+        out += src.slice(i, i + 4);
+        i += 4;
+        continue;
+      }
+      if (src[i + 2] === "'") {
+        out += src.slice(i, i + 3);
+        i += 3;
+        continue;
+      }
+      out += c;
+      i++;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** main.rs 的 dispatch() 里出现的命令字符串（注释已剔除） */
+const mainCode = stripRustComments(mainSrc);
 const ipcCommands = new Set();
-for (const m of mainSrc.matchAll(/"([a-z]+\.[a-zA-Z]+)"\s*=>/g)) {
+for (const m of mainCode.matchAll(/"([a-z]+\.[a-zA-Z]+)"\s*=>/g)) {
+  ipcCommands.add(m[1]);
+}
+/* 也认 `req.cmd == "x.y"` 这种形式。异步命令（如 schema.runQuery 的
+   run_query_async）不一定写成 match 分支 —— 只认 `"x" =>` 会误报
+   "命令没有分支"，逼着人改代码去迎合门禁。门禁该适配代码，不是反过来。
+   （main.rs 里目前是 match 形式；这条是给后来者的余地。） */
+for (const m of mainCode.matchAll(/cmd\s*==\s*"([a-z]+\.[a-zA-Z]+)"/g)) {
   ipcCommands.add(m[1]);
 }
 

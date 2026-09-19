@@ -22,20 +22,29 @@ mod schema;
 mod xlsx;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
 
 use db::Db;
 
-/// tools/icon 产出的窗口图标边长（`ui/brand/icon-rgba-256.bin` 是 256×256×4）
+/// tools/icon 产出的窗口图标边长（`ui/brand/icon-rgba-256.png` → `icon-rgba-256.bin`）
 const ICON_SIZE: u32 = 256;
+
+/// 单条 SQL 的默认硬超时（毫秒）。0 表示不设超时。
+///
+/// 为什么要有它：`schema::run_query` 只限制返回行数，不限制时间。一条带全表扫描
+/// 的谓词能让查询跑上几分钟，而这期间用户除了看"执行中"什么也做不了（Q-042）。
+/// 30 秒是个经验值 —— 正常办公量级的查询远低于它，超过就基本意味着缺索引或
+/// 条件写错了。中断后 SQLite 会回滚这条语句，**不会留下半截写入**。
+const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
 
 /// 项目仓库地址。**只在这里定义一次**，界面里的链接与「打开发布页」都用它。
 ///
@@ -58,15 +67,52 @@ fn allowed_urls() -> Vec<String> {
     ]
 }
 
+/// 事件循环的自定义事件。**唯一用途**：工作线程干完活以后把主线程叫醒。
+///
+/// 为什么要绕这一道：`wry::WebView` 只能在创建它的线程上求值脚本，所以
+/// 「把结果交回前端」这件事必须在主线程做；而 SQL 执行又必须离开主线程
+/// （否则慢查询会把界面连同"中断"按钮一起冻住）。于是工作线程只负责算，
+/// 算完发一个事件，主线程收到后统一回传。
+enum AppEvent {
+    /// 有应答要回传（内容在 [`SqlJob::pending`] 里，主线程按序取走）
+    Reply,
+}
+
+/// 一次 SQL 执行的中断状态与应答队列。
+///
+/// 与 `Db` 分开放在一个独立的结构里，是刻意的：工作线程**只**拿到这一份的
+/// `Arc`，不去碰 `AppState`（那里握着 `WebView`，跨线程分享既没必要也不安全）。
+#[derive(Default)]
+struct SqlJob {
+    /// 正在执行的查询：`(代号, 中断句柄)`。
+    ///
+    /// 代号（generation）用来防止"上一条查询的超时哨兵"误伤下一条：
+    /// 哨兵睡醒后先比对代号，不是自己那一代就不动手。否则一条查询超时、
+    /// 用户立刻重试，前一次的哨兵可能在几百毫秒后把新查询打断。
+    running: Mutex<Option<(u64, rusqlite::InterruptHandle)>>,
+    /// 中断原因（`"user"` / `"timeout"`）。发起方写、工作线程读走后清空，
+    /// 用来把 SQLite 那句干巴巴的 `interrupted` 翻译成人话。
+    cause: Mutex<Option<&'static str>>,
+    next_gen: AtomicU64,
+    /// 待回传的应答。工作线程 push，主线程 drain。用 `Vec` 而不是单槽：
+    /// 极端情况下（用户中断后立刻重试）可能有两条应答先后到达。
+    pending: Mutex<Vec<String>>,
+}
+
 /// 应用全局状态。IPC 处理器与主线程共享它。
 struct AppState {
-    db: Mutex<Db>,
+    /// `Arc` 而不是裸 `Mutex`：SQL 工作线程需要独占一个克隆去执行查询。
+    db: Arc<Mutex<Db>>,
     data_dir: PathBuf,
     /// WebView 句柄在 build 之后才能拿到，所以先用 Option 占位。
     webview: Mutex<Option<wry::WebView>>,
     started_at: std::time::Instant,
     /// 前端最近一次上报的工作区状态。退出前的最后一道保存用它兜底落盘。
     last_workspace: Mutex<Option<workspace::WorkspaceState>>,
+    /// SQL 执行的中断状态与应答队列（见 [`SqlJob`]）
+    sql: Arc<SqlJob>,
+    /// 事件循环代理：工作线程用它叫醒主线程
+    proxy: Mutex<Option<EventLoopProxy<AppEvent>>>,
 }
 
 impl AppState {
@@ -134,15 +180,18 @@ fn main() -> wry::Result<()> {
         }
     };
 
+    // 事件循环带自定义事件类型：SQL 工作线程靠它把主线程叫醒（见 AppEvent）
+    let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build();
+
     let state = Arc::new(AppState {
-        db: Mutex::new(database),
+        db: Arc::new(Mutex::new(database)),
         data_dir: data_dir.clone(),
         webview: Mutex::new(None),
         started_at: std::time::Instant::now(),
         last_workspace: Mutex::new(None),
+        sql: Arc::new(SqlJob::default()),
+        proxy: Mutex::new(Some(event_loop.create_proxy())),
     });
-
-    let event_loop = EventLoop::new();
     // 窗口与任务栏图标：用 tools/icon 生成的 256×256 原始 RGBA 直接构造，
     // 不需要在 Rust 侧解码 PNG（见 tools/icon/build-icons.cjs）
     let window_icon = tao::window::Icon::from_rgba(
@@ -185,15 +234,22 @@ fn main() -> wry::Result<()> {
     let ipc_state = Arc::clone(&state);
     let ipc_handler = move |req: wry::http::Request<String>| {
         let body = req.body().clone();
+        // `dispatch` 返回 None = 这条命令是异步的（目前只有 SQL 执行），应答稍后
+        // 由工作线程通过事件循环交回来 —— 这里**不能**立刻回，否则前端会先拿到
+        // 一个空应答，真正的结果回来时已经没人认领了。
         let payload = match serde_json::from_str::<Request>(&body) {
             Ok(r) => dispatch(&ipc_state, r),
-            Err(e) => serde_json::json!({
-                "id": 0, "ok": false,
-                "error": format!("请求格式错误: {e}")
-            })
-            .to_string(),
+            Err(e) => Some(
+                serde_json::json!({
+                    "id": 0, "ok": false,
+                    "error": format!("请求格式错误: {e}")
+                })
+                .to_string(),
+            ),
         };
-        ipc_state.respond(&payload);
+        if let Some(p) = payload {
+            ipc_state.respond(&p);
+        }
     };
 
     let webview = WebViewBuilder::new()
@@ -229,6 +285,14 @@ fn main() -> wry::Result<()> {
             return;
         }
 
+        // 工作线程干完了活：把攒下的应答一次性交回前端。
+        // 必须在主线程做 —— 求值脚本只能在创建 WebView 的那个线程上执行。
+        if let Event::UserEvent(AppEvent::Reply) = event {
+            flush_replies(&state);
+            *control_flow = ControlFlow::Wait;
+            return;
+        }
+
         *control_flow = ControlFlow::Wait;
         if let Event::WindowEvent {
             event: WindowEvent::CloseRequested,
@@ -253,7 +317,22 @@ fn main() -> wry::Result<()> {
     });
 }
 
+/// 把工作线程攒下的应答取出来回传给前端。只在主线程调用。
+fn flush_replies(state: &AppState) {
+    let batch: Vec<String> = match state.sql.pending.lock() {
+        Ok(mut g) => g.drain(..).collect(),
+        Err(_) => return, // 锁中毒：直接放弃这一批，总比 panic 好
+    };
+    for payload in batch {
+        state.respond(&payload);
+    }
+}
+
 /// 退出前的最后一道保存：用前端最近一次上报的工作区状态兜底落盘。
+///
+/// 用 `try_lock` 而不是 `lock`：如果此刻正好有一条慢查询占着数据库连接，
+/// 阻塞等待会把"关窗口"这件事一起卡住（用户点了关闭却半分钟没反应）。
+/// 存不下就跳过 —— 这条本来就是兜底，前面 `workspace.save` 已经存过一次。
 fn finalize_workspace(state: &AppState) {
     let last = state
         .last_workspace
@@ -261,14 +340,29 @@ fn finalize_workspace(state: &AppState) {
         .ok()
         .and_then(|g| g.clone());
     if let Some(ws) = last {
-        if let Ok(guard) = state.db.lock() {
+        if let Ok(guard) = state.db.try_lock() {
             let _ = workspace::save(guard.conn(), &ws);
         }
     }
 }
 
 /// 命令分发。所有前端能做的事都在这里，一一显式列出，不做通配。
-fn dispatch(state: &AppState, req: Request) -> String {
+///
+/// 返回 `None` 表示**这条命令是异步的**，应答稍后由工作线程交回来 ——
+/// 目前只有 `schema.runQuery` 一条（慢查询必须能中断，且不能占住主线程，
+/// 见 [`run_query_async`]）。其余命令一律同步返回 `Some(应答)`。
+fn dispatch(state: &AppState, req: Request) -> Option<String> {
+    match req.cmd.as_str() {
+        // 唯一一条异步命令。写成 match 分支而不是 `if`，是因为
+        // `scripts/check-wiring.cjs` 靠这个形式认出"命令确实有处理方"——
+        // 写成 `if req.cmd == "..."` 门禁会误报（它只认分支形式）。
+        "schema.runQuery" => run_query_async(state, req),
+        _ => Some(dispatch_sync(state, req)),
+    }
+}
+
+/// 同步命令的分发（除 SQL 执行以外的全部）。
+fn dispatch_sync(state: &AppState, req: Request) -> String {
     let id = req.id;
     match req.cmd.as_str() {
         "app.info" => {
@@ -992,50 +1086,9 @@ fn dispatch(state: &AppState, req: Request) -> String {
             }
         }
 
-        "schema.runQuery" => {
-            let Some(sql) = req.args.get("sql").and_then(|v| v.as_str()) else {
-                return err(id, "缺少参数 sql");
-            };
-            let max_rows = req
-                .args
-                .get("maxRows")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(5000)
-                .clamp(1, 100_000) as usize;
-            let confirmed = req
-                .args
-                .get("confirmed")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            // **策略层闸门**（交接清单点名要做的那一层）：危险语句必须带着
-            // 显式确认回来才执行。sql.js 自己的粗判只覆盖它认得出的情形；
-            // 这一道在 IPC 边界上再拦一次，漏网的（WHERE 藏在子查询里、
-            // 前端粗判被绕过）在这里被接住。确认对话由前端拿 needsConfirm 弹出。
-            if !confirmed {
-                if let Some(reason) = schema::needs_confirm(sql) {
-                    return ok(id, serde_json::json!({ "needsConfirm": reason }));
-                }
-            }
-
-            match state.db.lock() {
-                Ok(d) => match schema::run_query(d.conn(), sql, max_rows) {
-                    Ok(r) => {
-                        // 不记录 SQL 内容（docs/06 §9.3：查询日志默认关闭）；
-                        // 只记"发生过写"这个事实，供审计页计数。
-                        if confirmed || r.affected > 0 {
-                            log_line(
-                                &state.data_dir,
-                                &format!("SQL 编辑器执行了写操作，影响 {} 行", r.affected),
-                            );
-                        }
-                        ok(id, serde_json::to_value(r).unwrap_or_default())
-                    }
-                    Err(e) => err(id, e),
-                },
-                Err(_) => err(id, "数据库锁失败"),
-            }
-        }
+        // ⚠️ `schema.runQuery` **不在这里** —— 它是唯一的异步命令，
+        // 由 `dispatch()` 直接转给 `run_query_async()`。慢查询必须离开主线程，
+        // 否则界面（连同"中断"按钮）会被一起冻住（Q-042）。
 
         "note.list" => match state.db.lock() {
             Ok(d) => match d.list_notes() {
@@ -1113,21 +1166,242 @@ fn dispatch(state: &AppState, req: Request) -> String {
                 Ok(s) => s,
                 Err(e) => return err(id, format!("工作区状态格式不对: {e}")),
             };
-            // 兜底：记住最近一次上报的状态，退出前再用它落一次盘
+            // 兜底：记住最近一次上报的状态，退出前再用它落一次盘。
+            // 放在拿数据库锁之前 —— 就算这次存不进去，退出前那次还有机会。
             if let Ok(mut g) = state.last_workspace.lock() {
                 *g = Some(ws.clone());
             }
-            match state.db.lock() {
+            // `try_lock`：这条命令每 5 秒被前端调一次（app.js 的周期性兜底）。
+            // 若此刻有慢查询占着连接，阻塞等待会把主线程连同界面一起按住 ——
+            // 每一次都按 5 秒。存不下就跳过，工作区状态已经记在 last_workspace 里。
+            match state.db.try_lock() {
                 Ok(d) => match workspace::save(d.conn(), &ws) {
                     Ok(()) => ok(id, serde_json::json!({})),
                     Err(e) => err(id, e),
                 },
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    ok(id, serde_json::json!({ "skipped": "busy" }))
+                }
                 Err(_) => err(id, "数据库锁失败"),
             }
         }
 
         other => err(id, format!("未知命令: {other}")),
     }
+}
+
+/// `schema.runQuery` 的异步实现（Q-042）。
+///
+/// 为什么必须异步：`schema::run_query` 只限制返回行数，不限制时间。慢查询
+/// （全表扫、缺索引、写错的条件）会把调用线程占住几分钟。以前它跑在主线程上，
+/// 也就是 WebView 的事件线程 —— 界面点不动、连"中断"这件事都点不了。
+///
+/// 现在的分工：
+///   · 主线程 —— 解析参数、过危险语句闸门、登记中断句柄、起线程，立刻返回 `None`
+///     （表示"应答稍后给"）。同时保持可响应：`{ interrupt: true }` 就是在这条路上
+///     被接住的，这就是"执行中再点一次 = 中断"。
+///   · 工作线程 —— 独占数据库连接跑查询，跑完把应答塞进队列、发事件叫醒主线程。
+///   · 超时哨兵 —— 睡够 `timeoutMs` 后若这一代查询还在跑，就替用户按下中断。
+///
+/// 忙时**明确拒绝**而不是排队：排队会让"哪条结果对应界面上哪个结果块"变得
+/// 不可预测（用户看不出第二条是在等第一条还是在跑自己）。
+fn run_query_async(state: &AppState, req: Request) -> Option<String> {
+    let id = req.id;
+
+    // ---------- ① 中断请求 ----------
+    if req
+        .args
+        .get("interrupt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        let hit = match state.sql.running.lock() {
+            Ok(g) => match g.as_ref() {
+                Some((_, handle)) => {
+                    handle.interrupt();
+                    true
+                }
+                None => false,
+            },
+            Err(_) => false,
+        };
+        if !hit {
+            return Some(err(id, "当前没有正在执行的查询"));
+        }
+        // 先写原因再返回：工作线程是靠它把 interrupted 翻译成人话的。
+        // 若哨兵已经写了 "timeout"，不覆盖 —— 让用户看到"自动中断"这个真相。
+        if let Ok(mut c) = state.sql.cause.lock() {
+            if c.is_none() {
+                *c = Some("user");
+            }
+        }
+        log_line(&state.data_dir, "用户中断了正在执行的 SQL");
+        return Some(ok(id, serde_json::json!({ "interrupted": true })));
+    }
+
+    // ---------- ② 参数 ----------
+    let Some(sql) = req.args.get("sql").and_then(|v| v.as_str()) else {
+        return Some(err(id, "缺少参数 sql"));
+    };
+    let sql = sql.to_string();
+    let max_rows = req
+        .args
+        .get("maxRows")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000)
+        .clamp(1, 100_000) as usize;
+    let confirmed = req
+        .args
+        .get("confirmed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let timeout_ms = req
+        .args
+        .get("timeoutMs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_QUERY_TIMEOUT_MS);
+
+    // ---------- ③ 策略层闸门（仍在主线程问，此时界面空闲，确认框能正常弹）----------
+    if !confirmed {
+        if let Some(reason) = schema::needs_confirm(&sql) {
+            return Some(ok(id, serde_json::json!({ "needsConfirm": reason })));
+        }
+    }
+
+    // ---------- ④ 占住执行位并取中断句柄 ----------
+    let my_gen = {
+        let mut slot = match state.sql.running.lock() {
+            Ok(g) => g,
+            Err(_) => return Some(err(id, "查询状态锁失败")),
+        };
+        if slot.is_some() {
+            return Some(err(id, "上一条查询还在执行 —— 先点「中断」，或等它跑完"));
+        }
+        let guard = match state.db.lock() {
+            Ok(g) => g,
+            Err(_) => return Some(err(id, "数据库锁失败")),
+        };
+        // 句柄内部握着连接的 Arc，因此脱离这把锁之后依然有效
+        let handle = guard.conn().get_interrupt_handle();
+        drop(guard);
+        let gen = state.sql.next_gen.fetch_add(1, Ordering::SeqCst);
+        *slot = Some((gen, handle));
+        gen
+    };
+    if let Ok(mut c) = state.sql.cause.lock() {
+        *c = None; // 新一代查询，清掉上一条留下的原因
+    }
+
+    // ---------- ⑤ 超时哨兵 ----------
+    if timeout_ms > 0 {
+        let slot = Arc::clone(&state.sql);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+            if let Ok(g) = slot.running.lock() {
+                if let Some((gen, handle)) = g.as_ref() {
+                    if *gen == my_gen {
+                        if let Ok(mut c) = slot.cause.lock() {
+                            if c.is_none() {
+                                *c = Some("timeout");
+                            }
+                        }
+                        handle.interrupt();
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- ⑥ 工作线程 ----------
+    let proxy = match state.proxy.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => None,
+    };
+    let Some(proxy) = proxy else {
+        if let Ok(mut slot) = state.sql.running.lock() {
+            *slot = None;
+        }
+        return Some(err(id, "事件循环未就绪，无法调度查询"));
+    };
+
+    let db = Arc::clone(&state.db);
+    let slot = Arc::clone(&state.sql);
+    let log_dir = state.data_dir.clone();
+
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let outcome = match db.lock() {
+            Ok(guard) => schema::run_query(guard.conn(), &sql, max_rows),
+            Err(_) => Err("数据库锁失败".to_string()),
+        };
+        let elapsed_ms = started.elapsed().as_millis();
+
+        // 收尾：先确认这一代还是自己的再清（否则可能把后来者清掉）
+        if let Ok(mut g) = slot.running.lock() {
+            let mine = match g.as_ref() {
+                Some((gen, _)) => *gen == my_gen,
+                None => false,
+            };
+            if mine {
+                *g = None;
+            }
+        }
+        let cause = slot.cause.lock().ok().and_then(|mut c| c.take());
+
+        let payload = match outcome {
+            Ok(r) => {
+                // 不记录 SQL 内容（docs/06 §9.3：查询日志默认关闭）；
+                // 只记"发生过写"这个事实，供审计页计数。
+                if confirmed || r.affected > 0 {
+                    log_line(
+                        &log_dir,
+                        &format!("SQL 编辑器执行了写操作，影响 {} 行", r.affected),
+                    );
+                }
+                ok(id, serde_json::to_value(r).unwrap_or_default())
+            }
+            Err(e) => match cause {
+                Some("timeout") => {
+                    log_line(
+                        &log_dir,
+                        &format!("SQL 执行超过 {} 秒，已被自动中断", timeout_ms / 1000),
+                    );
+                    err(
+                        id,
+                        format!(
+                            "这条查询跑了 {} ms 还没完，已按 {} 秒的上限自动中断。\
+                             常见原因是条件列没有索引、或者写成了全表扫描 —— \
+                             可以先用 LIMIT 看看数据长什么样，再决定要不要建索引。",
+                            elapsed_ms,
+                            timeout_ms / 1000
+                        ),
+                    )
+                }
+                Some(_) => {
+                    log_line(&log_dir, "SQL 执行被用户中断");
+                    err(
+                        id,
+                        format!(
+                            "查询已中断（跑了 {} ms）。SQLite 会回滚这一条语句，\
+                             不会留下写了一半的数据。",
+                            elapsed_ms
+                        ),
+                    )
+                }
+                None => err(id, e),
+            },
+        };
+
+        if let Ok(mut g) = slot.pending.lock() {
+            g.push(payload);
+        }
+        // 叫醒主线程去回传。注意不能用 `log_dir` 之外的 AppState ——
+        // 工作线程只持有这几份 Arc，不碰 WebView。
+        let _ = proxy.send_event(AppEvent::Reply);
+    });
+
+    // 应答在路上：这条命令到此为止，什么也不回
+    None
 }
 
 /// 用系统默认浏览器打开一个 http(s) 链接。
@@ -1272,5 +1546,504 @@ fn log_line(data_dir: &std::path::Path, msg: &str) {    let dir = data_dir.join(
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         use std::io::Write;
         let _ = writeln!(f, "[{stamp}] {msg}");
+    }
+}
+
+// ============================================================
+// 数据库页验收（`local-docs/handoff/ENV_SETUP.md` 第 4 节）
+// ============================================================
+//
+// 那一节原本写着"由下一位接手者自己点一遍"（16 步）。上一任就是卡在这里：
+// 手点一次只能证明"这一次是好的"，下次改代码没人会再点一遍。
+//
+// 这里把 1–15 步里**能用 IPC 表达的那部分**变成可重复运行的测试 —— 而且是走
+// `dispatch()` 这个真正的入口，因此连"Rust 序列化出来的字段名与界面读的是不是
+// 同一个"也一起钉住了（`has_more` / `elapsed_ms` 两次静默失效都发生在这条边界上）。
+//
+// 覆盖不到的部分（如实说明）：
+//   · 异步的那半截（真正把 SQL 丢给工作线程）—— 需要 tao 事件循环，
+//     它只能在主线程创建，单测里拿不到。实机运行时验证。
+//   · 纯视觉的部分（NULL 的灰色占位、排序箭头、按钮文案）。
+#[cfg(test)]
+mod acceptance {
+    use super::*;
+    use serde_json::json;
+
+    /// 临时数据目录 + 一个可用的 AppState。
+    ///
+    /// `proxy` 留 `None`：这是有意的 —— 异步 SQL 需要真事件循环，而本模块
+    /// 只测同步路径。`run_query_async` 在拿不到 proxy 时会明确报错而不是静默挂起。
+    fn fixture(tag: &str) -> (Arc<AppState>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "deskbase_accept_{}_{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let db = Db::open(&dir, &dir.join("data").join("main.db")).unwrap();
+        let state = Arc::new(AppState {
+            db: Arc::new(Mutex::new(db)),
+            data_dir: dir.clone(),
+            webview: Mutex::new(None),
+            started_at: std::time::Instant::now(),
+            last_workspace: Mutex::new(None),
+            sql: Arc::new(SqlJob::default()),
+            proxy: Mutex::new(None),
+        });
+        (state, dir)
+    }
+
+    /// 走真正的分发入口，把 IPC 应答解成 JSON。
+    fn call(
+        state: &AppState,
+        cmd: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let raw = dispatch(
+            state,
+            Request {
+                id: 1,
+                cmd: cmd.to_string(),
+                args,
+            },
+        )
+        .expect("这条命令应当是同步的（异步的那条在单测里拿不到事件循环）");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("应答必须是合法 JSON");
+        if v["ok"].as_bool() == Some(true) {
+            Ok(v["data"].clone())
+        } else {
+            Err(v["error"].as_str().unwrap_or("未知错误").to_string())
+        }
+    }
+
+    fn col(name: &str, ty: &str) -> serde_json::Value {
+        json!({
+            "name": name, "ty": ty, "not_null": false,
+            "default": null, "primary_key": false, "comment": null,
+        })
+    }
+
+    /// 验收 1 + 2 + 5 + 6：建表（含金额列）→ 录一行 → 金额按分存 → 三位小数被拒。
+    #[test]
+    fn 验收_建表录行与金额往返() {
+        let (state, dir) = fixture("money");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "验收台账", "comment": null, "columns": [
+                col("名称", "text"), col("数量", "integer"), col("金额", "money"),
+                col("日期", "date"), col("已结清", "boolean"),
+            ]}}),
+        )
+        .unwrap();
+
+        // 表出现在左栏列表里
+        let tables = call(&state, "schema.listTables", json!({})).unwrap();
+        assert!(
+            tables
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "验收台账"),
+            "新建的表没有出现在列表里：{tables}"
+        );
+
+        // 录一行：金额写「元」
+        let r = call(
+            &state,
+            "schema.insertRows",
+            json!({
+                "table": "验收台账",
+                "columns": ["名称", "数量", "金额", "日期", "已结清"],
+                "rows": [["甲", "3", "12.34", "2026-09-19", "1"]],
+            }),
+        )
+        .unwrap();
+        assert_eq!(r["inserted"], 1);
+
+        let page = call(&state, "schema.pageRows", json!({"table":"验收台账","limit":10})).unwrap();
+        // 第 0 列恒为 _rowid（界面靠它调 updateCell / deleteRows）
+        assert_eq!(page["columns"][0], "_rowid");
+        assert_eq!(page["rows"][0][3].as_i64(), Some(1234), "金额应按分存 1234：{page}");
+        assert_eq!(page["rows"][0][1], "甲");
+        assert_eq!(page["has_more"], false);
+
+        // 三位小数必须被拒 —— 金额按分记账，不能静默四舍五入
+        let bad = call(
+            &state,
+            "schema.insertRows",
+            json!({
+                "table": "验收台账",
+                "columns": ["名称", "金额"],
+                "rows": [["乙", "12.345"]],
+            }),
+        );
+        assert!(bad.is_err(), "三位小数必须报错，实际：{bad:?}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 验收 3 + 4：**超过一页的表必须能翻到第二页**。
+    ///
+    /// 这一步专门留了测试：v0.2.0-beta.1 的 P1 就是这里坏的
+    /// （`has_more` 被读成 `hasMore`，值恒为 undefined，"加载更多"永不出现）。
+    #[test]
+    fn 验收_超过一页的表能翻到第二页且不重不漏() {
+        let (state, dir) = fixture("paging");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "台账", "comment": null, "columns": [col("名称", "text")] }}),
+        )
+        .unwrap();
+        let rows: Vec<Vec<String>> = (1..=250).map(|i| vec![format!("行{i}")]).collect();
+        let r = call(
+            &state,
+            "schema.insertRows",
+            json!({ "table": "台账", "columns": ["名称"], "rows": rows }),
+        )
+        .unwrap();
+        assert_eq!(r["inserted"], 250);
+
+        let p1 = call(&state, "schema.pageRows", json!({"table":"台账","limit":200})).unwrap();
+        assert_eq!(p1["rows"].as_array().unwrap().len(), 200);
+        assert_eq!(p1["has_more"], true, "还有 50 行没取，has_more 必须是 true");
+        let cursor = p1["next_cursor"].as_str().expect("有下一页就该给游标").to_string();
+
+        let p2 = call(
+            &state,
+            "schema.pageRows",
+            json!({"table":"台账","limit":200,"cursor":cursor}),
+        )
+        .unwrap();
+        assert_eq!(p2["rows"].as_array().unwrap().len(), 50);
+        assert_eq!(p2["has_more"], false, "取完了就不该说还有");
+
+        // 两页不重不漏：把 rowid 收起来比对
+        let mut ids: Vec<i64> = Vec::new();
+        for p in [&p1, &p2] {
+            for r in p["rows"].as_array().unwrap() {
+                ids.push(r[0].as_i64().unwrap());
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 250, "两页合起来必须正好 250 行、不重不漏");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 验收 7 + 8：表头排序（升 / 降）与列筛选。
+    #[test]
+    fn 验收_排序与筛选() {
+        let (state, dir) = fixture("sortfilter");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "库存", "comment": null, "columns": [
+                col("名称", "text"), col("数量", "integer")
+            ]}}),
+        )
+        .unwrap();
+        let rows: Vec<Vec<String>> = [("甲", "3"), ("乙", "1"), ("丙", "2")]
+            .iter()
+            .map(|(a, b)| vec![a.to_string(), b.to_string()])
+            .collect();
+        call(
+            &state,
+            "schema.insertRows",
+            json!({ "table": "库存", "columns": ["名称","数量"], "rows": rows }),
+        )
+        .unwrap();
+
+        let asc = call(
+            &state,
+            "schema.pageRows",
+            json!({"table":"库存","orderBy":"数量","desc":false,"limit":10}),
+        )
+        .unwrap();
+        let names: Vec<&str> = asc["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[1].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["乙", "丙", "甲"], "升序不对：{names:?}");
+
+        let desc = call(
+            &state,
+            "schema.pageRows",
+            json!({"table":"库存","orderBy":"数量","desc":true,"limit":10}),
+        )
+        .unwrap();
+        let names: Vec<&str> = desc["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[1].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["甲", "丙", "乙"], "降序不对：{names:?}");
+
+        // 筛选：列关键词包含匹配
+        let f = call(
+            &state,
+            "schema.pageRows",
+            json!({"table":"库存","limit":10,"filters":[["名称","甲"]]}),
+        )
+        .unwrap();
+        assert_eq!(f["rows"].as_array().unwrap().len(), 1, "筛选应只剩 1 行：{f}");
+
+        // 筛选不存在的列必须报错，不能静默当成"没有这个条件"
+        let bad = call(
+            &state,
+            "schema.pageRows",
+            json!({"table":"库存","limit":10,"filters":[["不存在的列","x"]]}),
+        );
+        assert!(bad.is_err(), "筛选不存在的列应当报错");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 验收 9 + 10：改单元格（含设为 NULL）与批量删行。
+    #[test]
+    fn 验收_改单元格与删行() {
+        let (state, dir) = fixture("edit");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "名册", "comment": null, "columns": [
+                col("姓名", "text"), col("备注", "text")
+            ]}}),
+        )
+        .unwrap();
+        call(
+            &state,
+            "schema.insertRows",
+            json!({ "table":"名册","columns":["姓名","备注"],"rows":[["甲","旧"],["乙",""],["丙","x"]]}),
+        )
+        .unwrap();
+
+        let page = call(&state, "schema.pageRows", json!({"table":"名册","limit":10})).unwrap();
+        let rowid_甲 = page["rows"][0][0].as_i64().unwrap();
+
+        // 改内容
+        call(
+            &state,
+            "schema.updateCell",
+            json!({"table":"名册","rowid":rowid_甲,"column":"备注","value":"新"}),
+        )
+        .unwrap();
+        // 设为 NULL：JSON null → 数据库 NULL（与空串是两回事）
+        call(
+            &state,
+            "schema.updateCell",
+            json!({"table":"名册","rowid":rowid_甲,"column":"备注","value":null}),
+        )
+        .unwrap();
+
+        let after = call(&state, "schema.pageRows", json!({"table":"名册","limit":10})).unwrap();
+        assert!(after["rows"][0][2].is_null(), "设成 NULL 之后应回 null：{after}");
+
+        // 批量删两行
+        let ids: Vec<i64> = after["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|r| r[0].as_i64().unwrap())
+            .collect();
+        let r = call(
+            &state,
+            "schema.deleteRows",
+            json!({"table":"名册","rowids":ids}),
+        )
+        .unwrap();
+        assert_eq!(r["deleted"], 2, "应当报告删掉 2 行");
+
+        let left = call(&state, "schema.pageRows", json!({"table":"名册","limit":10})).unwrap();
+        assert_eq!(left["rows"].as_array().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 验收 11 + 12 + 13：SQL 执行与**危险语句闸门**。
+    ///
+    /// 12 / 13 是这套验收里最要紧的两条：`DELETE FROM t` 与
+    /// `DELETE FROM t WHERE 1=1` 都必须弹确认。后者曾经能绕过（恒真谓词）。
+    #[test]
+    fn 验收_危险语句必须弹确认() {
+        let (state, dir) = fixture("gate");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "台账", "comment": null, "columns": [col("名称", "text")] }}),
+        )
+        .unwrap();
+        call(
+            &state,
+            "schema.insertRows",
+            json!({ "table":"台账","columns":["名称"],"rows":[["甲"],["乙"]] }),
+        )
+        .unwrap();
+
+        // 11：普通查询走同步闸门放行 → 到异步执行那一步才需要事件循环。
+        //     这里只能验证它**没有被闸门拦下**（返回的不是 needsConfirm）。
+        let allowed = call(
+            &state,
+            "schema.runQuery",
+            json!({"sql":"SELECT * FROM 台账 LIMIT 20"}),
+        );
+        // 单测里没有事件循环，所以这里要么是"事件循环未就绪"，要么是应答；
+        // 唯独不能是 needsConfirm。
+        if let Ok(v) = &allowed {
+            assert!(v.get("needsConfirm").is_none(), "普通 SELECT 不该被拦：{v}");
+        }
+
+        // 12：无 WHERE 的 DELETE
+        let r = call(&state, "schema.runQuery", json!({"sql":"DELETE FROM 台账"})).unwrap();
+        assert!(
+            r["needsConfirm"].is_string(),
+            "无 WHERE 的 DELETE 必须弹确认，实际：{r}"
+        );
+
+        // 13：恒真谓词 —— 也弹确认
+        let r = call(
+            &state,
+            "schema.runQuery",
+            json!({"sql":"DELETE FROM 台账 WHERE 1=1"}),
+        )
+        .unwrap();
+        assert!(
+            r["needsConfirm"].is_string(),
+            "WHERE 1=1 这种恒真写法必须弹确认（曾经能绕过），实际：{r}"
+        );
+
+        // 有真实过滤条件的可以放行
+        let r = call(
+            &state,
+            "schema.runQuery",
+            json!({"sql":"DELETE FROM 台账 WHERE 名称 = '甲'"}),
+        );
+        if let Ok(v) = &r {
+            assert!(v.get("needsConfirm").is_none(), "有条件就不该拦：{v}");
+        }
+
+        // 数据一行没少：闸门拦下的语句绝不能被执行
+        let page = call(&state, "schema.pageRows", json!({"table":"台账","limit":10})).unwrap();
+        assert_eq!(
+            page["rows"].as_array().unwrap().len(),
+            2,
+            "被拦下的 DELETE 不能真的删了数据"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 有查询在跑时，第二条查询必须**明确拒绝**而不是排队。
+    ///
+    /// 顺带证明"中断"这条路是通的：中断请求只看 `sql.running`，不碰数据库锁，
+    /// 所以它在慢查询期间一定能被处理（这正是 Q-042 要解决的事）。
+    #[test]
+    fn 忙时第二条查询被明确拒绝_而中断仍然可达() {
+        let (state, dir) = fixture("busy");
+        // 假装有一条正在跑的查询
+        let handle = {
+            let guard = state.db.lock().unwrap();
+            guard.conn().get_interrupt_handle()
+        };
+        *state.sql.running.lock().unwrap() = Some((1, handle));
+
+        let busy = call(&state, "schema.runQuery", json!({"sql":"SELECT 1"}));
+        assert!(busy.is_err(), "忙的时候第二条查询必须被拒绝");
+        assert!(
+            busy.unwrap_err().contains("还在执行"),
+            "拒绝理由要说清楚"
+        );
+
+        // 中断请求照样能进来（它不走数据库锁）
+        let r = call(&state, "schema.runQuery", json!({"interrupt": true})).unwrap();
+        assert_eq!(r["interrupted"], true);
+        assert_eq!(*state.sql.cause.lock().unwrap(), Some("user"));
+
+        *state.sql.running.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 验收 14 + 15：工作区状态存下去、重启后能读回来。
+    #[test]
+    fn 验收_工作区状态重启后能恢复() {
+        let (state, dir) = fixture("workspace");
+        call(
+            &state,
+            "workspace.save",
+            json!({
+                "view":"database","activeTable":"验收台账","sidebar":"rail",
+                "windowW":1280,"windowH":820,
+            }),
+        )
+        .unwrap();
+
+        // app.info 会把工作区带回来（界面启动时就读它）
+        let info = call(&state, "app.info", json!({})).unwrap();
+        assert_eq!(info["workspace"]["view"], "database");
+        assert_eq!(info["workspace"]["activeTable"], "验收台账");
+        assert_eq!(info["workspace"]["windowW"], 1280);
+
+        // 换一个 AppState 打开同一份库（= 关掉程序重开）
+        let db = Db::open(&dir, &dir.join("data").join("main.db")).unwrap();
+        let state2 = AppState {
+            db: Arc::new(Mutex::new(db)),
+            data_dir: dir.clone(),
+            webview: Mutex::new(None),
+            started_at: std::time::Instant::now(),
+            last_workspace: Mutex::new(None),
+            sql: Arc::new(SqlJob::default()),
+            proxy: Mutex::new(None),
+        };
+        let info2 = call(&state2, "app.info", json!({})).unwrap();
+        assert_eq!(
+            info2["workspace"]["activeTable"], "验收台账",
+            "重开之后工作区没恢复：{info2}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 建表向导的「默认值」输入框（v0.2.1 新增）。
+    #[test]
+    fn 建表默认值能落库() {
+        let (state, dir) = fixture("default");
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "报销", "comment": null, "columns": [
+                col("事项", "text"),
+                json!({"name":"状态","ty":"text","not_null":false,
+                       "default":"'未结清'","primary_key":false,"comment":null}),
+                json!({"name":"金额","ty":"money","not_null":false,
+                       "default":"'12.34'","primary_key":false,"comment":null}),
+            ]}}),
+        )
+        .unwrap();
+
+        // 只填事项，其余两列走默认值
+        call(
+            &state,
+            "schema.insertRows",
+            json!({ "table":"报销","columns":["事项"],"rows":[["打车"]] }),
+        )
+        .unwrap();
+
+        let page = call(&state, "schema.pageRows", json!({"table":"报销","limit":10})).unwrap();
+        // 列序：[_rowid, 事项, 状态, 金额]
+        assert_eq!(page["rows"][0][2], "未结清", "文本默认值没落上：{page}");
+        assert_eq!(
+            page["rows"][0][3].as_i64(),
+            Some(1234),
+            "金额默认值应按「元」换算成分：{page}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

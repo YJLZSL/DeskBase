@@ -323,6 +323,7 @@
       maxRows: 5000,
       listTables: () => call("schema.listTables"),
       runQuery: gatedRunQuery,
+      interruptQuery: interruptQuery,
     });
   }
 
@@ -347,6 +348,21 @@
       r = await call("schema.runQuery", { sql: sql, maxRows: maxRows, confirmed: true });
     }
     return r;
+  }
+
+  /**
+   * 中断正在执行的那条 SQL（Q-042）。
+   *
+   * 与 gatedRunQuery 走**同一条** IPC，只是带 `interrupt: true` —— Rust 侧收到
+   * 它不会去开一条新查询，而是直接按下正在跑那条语句的中断句柄。所以这里
+   * 不需要闸门、不需要排队，也不能被 `needsConfirm` 拦（它根本没有语句可问）。
+   *
+   * 为什么必须绕开 gatedRunQuery：那个函数会先发一次 `confirmed:false` 的请求，
+   * 而忙着的时候那条请求会被 Rust 明确拒绝（"上一条查询还在执行"）——
+   * 于是"中断"会变成一句莫名其妙的报错。
+   */
+  async function interruptQuery() {
+    return await call("schema.runQuery", { interrupt: true });
   }
 
   // ============================================================
@@ -376,6 +392,42 @@
     ["json", "JSON（进阶）"],
     ["blob", "二进制（进阶）"],
   ];
+
+  /** `DEFAULT` 里可以原样写的关键字（与 schema.rs 的 normalize_default 白名单一致） */
+  const KEYWORD_DEFAULTS = [
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+  ];
+
+  /**
+   * 用户填的「默认值」→ `DEFAULT` 子句允许的 SQL 片段。
+   *
+   * 为什么必须翻译这一层：白名单（schema.rs 的 `normalize_default`）只收数字
+   * 字面量、成对引号的字符串、以及上面那几个关键字。让用户自己去写 `'未结清'`
+   * 那种引号是不可接受的 —— 他只会写「未结清」。这层翻译就是把"人话"变成
+   * "合法的 DDL 片段"，而不是把规则抛给用户记。
+   *
+   * 金额列**不在这里做算术**：原样包成字符串交回去，由 Rust 的 `money_parse`
+   * 按「元」换算成分（D-034：金额换算全局只有那一份实现）。
+   */
+  function defaultLiteral(raw, ty) {
+    const v = String(raw == null ? "" : raw).trim();
+    if (!v) return { ok: true, value: null };
+    const kw = v.toUpperCase();
+    if (KEYWORD_DEFAULTS.indexOf(kw) >= 0) return { ok: true, value: kw };
+    if (ty === "integer" || ty === "real" || ty === "boolean") {
+      if (!/^-?\d+(\.\d+)?$/.test(v)) {
+        return { ok: false, why: "「" + v + "」不是数字，数字列的默认值只能是数字" };
+      }
+      return { ok: true, value: v };
+    }
+    // 文本 / 金额 / 日期 / JSON：包成字符串字面量，内部的单引号翻倍
+    return { ok: true, value: "'" + v.replace(/'/g, "''") + "'" };
+  }
 
   // ---------- 默认模板 ----------
   // 为什么要有模板：调研里最硬的一条是"非程序员可用性是生死线"，而空表对新手等于
@@ -446,7 +498,8 @@
     dlg.append(
       el("p", { class: "hint" },
         "字段名可以用中文、字母、数字、下划线，不能叫 rowid。金额按「分」存储：" +
-          "写入 12.34 存 1234，显示时自动换算回来。二进制列不能在表格里直接编辑。")
+          "写入 12.34 存 1234，显示时自动换算回来。二进制列不能在表格里直接编辑。" +
+          "「默认值」是新增行时自动填的内容，留空表示不填。")
     );
 
     const form = el("form", { novalidate: "novalidate" });
@@ -540,11 +593,18 @@
         const pk = inputs[2].checked;
         const nn = inputs[3].checked;
         if (!cname) continue; // 空行视为没填，跳过
+        // inputs[4] = 默认值输入框（顺序由 colRow 里 row.append 的顺序决定）
+        const def = defaultLiteral(inputs[4] ? inputs[4].value : "", type);
+        if (!def.ok) {
+          toast(def.why, "error");
+          if (inputs[4]) inputs[4].focus();
+          return;
+        }
         columns.push({
           name: cname,
           ty: type,
           not_null: nn || pk,
-          default: null,
+          default: def.value,
           primary_key: pk,
           comment: null,
         });

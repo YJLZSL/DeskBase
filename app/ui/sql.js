@@ -55,6 +55,8 @@
       静态文本判断不出条件恒真。子查询里出现 WHERE 也可能让 UPDATE 漏判。
    5. 单条 SQL 超过 60000 字符时关闭语法高亮（显示纯文本），避免每次按键
       都做全量词法分析导致输入卡顿。
+   6. 自动超时是**固定 30 秒**（在 Rust 侧 `DEFAULT_QUERY_TIMEOUT_MS`），
+      界面上还不能调 —— 等有人真的需要跑更久的报表再说。
    ============================================================ */
 (function () {
   "use strict";
@@ -935,7 +937,10 @@
     const toolbar = el("div", "dbsql-toolbar");
     const btnRun = el("button", "dbsql-btn dbsql-btn-primary", { type: "button" });
     btnRun.appendChild(svgNode(ICON.run));
-    btnRun.appendChild(cell("span", null, "执行"));
+    // 这个 span 会在执行期间被改成「停止」—— 执行中它不再是"执行"，而是
+    // "把正在跑的那条打断"（Q-042）
+    const btnRunLabel = cell("span", null, "执行");
+    btnRun.appendChild(btnRunLabel);
     btnRun.title = "执行光标所在的那一条（Ctrl+Enter）";
     const btnRunAll = el("button", "dbsql-btn", { type: "button" });
     btnRunAll.appendChild(svgNode(ICON.runAll));
@@ -1099,14 +1104,14 @@
       if (!state.busy) {
         btnRun.disabled = ro;
         btnRunAll.disabled = ro;
+        btnRun.title = ro
+          ? "只读模式：执行被禁用（判据在调用方的 runQuery）"
+          : "执行光标所在的那一条（Ctrl+Enter）";
+        setStatus("idle", ro ? "只读模式：执行已禁用" : "就绪");
       }
       state.emptyNote = ro
         ? "当前是只读模式：执行按钮被禁用了。SQL 仍然可以写、可以看着色，只是送不出去。"
         : "";
-      btnRun.title = ro
-        ? "只读模式：执行被禁用（判据在调用方的 runQuery）"
-        : "执行光标所在的那一条（Ctrl+Enter）";
-      if (!state.busy) setStatus("idle", ro ? "只读模式：执行已禁用" : "就绪");
       paintOut();
     }
 
@@ -1480,7 +1485,12 @@
       const head = el("div", "dbsql-res-head");
       if (total > 1) head.appendChild(cell("span", "dbsql-res-num", "#" + (idx + 1)));
       head.appendChild(cell("span", "dbsql-res-title", clip(st.sql.replace(/\s+/g, " "), TITLE_MAX)));
-      const ms = res.elapsedMs != null ? Number(res.elapsedMs) : null;
+      // ⚠️ `elapsed_ms` 是 Rust 侧 `QueryResult` 的 snake_case 字段名。
+      // 写成 `elapsedMs` 不会报错，只会永远拿到 undefined ——
+      // 表现是"每条语句的耗时徽章与总耗时都不显示"，界面看起来完全正常。
+      // 同一个坑在 db.js 的 has_more 上踩过一次（BUG_HUNT-2026-09-18.md P1-1），
+      // 不许再靠眼熟。schema.rs 有一条契约测试盯着这两个名字。
+      const ms = res.elapsed_ms != null ? Number(res.elapsed_ms) : null;
       const msText = ms == null ? "" : fmtMs(ms);
       if (msText) {
         const b = el("span", "dbsql-badge", { "data-kind": ms >= SLOW_MS ? "warn" : "" });
@@ -1610,6 +1620,23 @@
     }
 
     // ---------- 执行 ----------
+    /**
+     * 请求中断正在执行的那条语句。
+     *
+     * 只在 `state.busy` 时才会被调用（run() 的入口判断）。发过一次就不再发，
+     * 免得连点把"正在中断…"刷成一片；中断是否能立刻生效取决于 SQLite 是否
+     * 正好在语句执行中 —— 所以按钮会先变成"正在中断…"而不是立刻变回"执行"。
+     */
+    function requestInterrupt() {
+      if (state.interruptSent) return;
+      if (typeof cfg.interruptQuery !== "function") return;
+      state.interruptSent = true;
+      setBusy(true, "正在中断…");
+      Promise.resolve(cfg.interruptQuery()).catch(() => {
+        // 中断本身失败（比如查询刚好跑完了）不是错误，交给执行流程收尾
+      });
+    }
+
     function targetsFor(which) {
       if (!state.stmts.length) return [];
       if (which === "all") return state.stmts.slice();
@@ -1626,7 +1653,13 @@
     }
 
     async function run(which) {
-      if (state.busy) return;
+      if (state.busy) {
+        /* 执行中再点一次 = 中断（Q-042）。
+           以前这里直接 `return`，慢查询唯一的出路是等它跑完 —— 而"跑很久"
+           往往正是用户最需要停下来的时刻。 */
+        requestInterrupt();
+        return;
+      }
       flush(); // 先把编辑区的最新内容落定，别拿上一帧的语句去执行
       if (isReadonly()) {
         // 判据在调用方（runQuery），这里只负责禁用并解释清楚
@@ -1710,7 +1743,8 @@
           break;
         }
 
-        const ms = res && res.elapsedMs != null ? Number(res.elapsedMs) : null;
+        // 同样必须是 snake_case，见 resultBlock 里的说明
+        const ms = res && res.elapsed_ms != null ? Number(res.elapsed_ms) : null;
         if (ms != null && isFinite(ms)) state.totalMs += ms;
         resultList.appendChild(resultBlock(st, i, targets.length, res || {}));
         pushHistory(st.sql, true, ms, res && Array.isArray(res.rows) ? res.rows.length : null);

@@ -301,7 +301,10 @@
 }
 .db-col-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto auto auto;
+  /* 字段名 / 类型 / 主键 / 必填 / 默认值 / 移除 —— 六列，与 colRow() 里
+     row.append(...) 的顺序一一对应。改这里就要同步改那行，否则默认值输入框
+     会掉到第二行去。 */
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto auto minmax(0, 0.9fr) auto;
   gap: var(--sp-2);
   align-items: center;
 }
