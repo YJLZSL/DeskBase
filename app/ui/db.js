@@ -1250,6 +1250,8 @@
   const btnImport = document.getElementById("btn-db-import");
   if (btnImport) btnImport.addEventListener("click", openImportDialog);
   document.getElementById("btn-db-refresh").addEventListener("click", () => refreshTables());
+  // 备份按钮：进「数据库」页就能点，不需要先打开某张表
+  document.getElementById("btn-db-backup").addEventListener("click", () => { openBackupDialog(); });
   tabsEl.addEventListener("click", (ev) => {
     const b = ev.target.closest(".db-tab");
     if (b) showTab(b.dataset.tab);
@@ -1277,8 +1279,98 @@
   // `openImportDialog` 也暴露出去：烟测需要它（带 autoPick:false 才不会被
   // 原生文件对话框卡住，见那个函数的说明）。对外它是"程序化打开导入向导"的入口，
   // 命令面板将来加「导入 Excel」也可以用同一条路。
+  // ============================================================
+  // 备份（v0.3.0 · 不丢数据）
+  // ============================================================
+  // 为什么值得一个对话框：备份是"用户主动保命"的动作，必须让他看见三件事 ——
+  // 存到哪、多大、有没有校验过。只弹一个"成功"等于没说。
+  function fmtBytes(n) {
+    if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + " MB";
+    if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+    return n + " B";
+  }
+
+  function fmtStamp(ms) {
+    if (!ms) return "—";
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  async function openBackupDialog() {
+    const dlg = buildDialog(
+      "db-dialog-backup",
+      "备份数据库",
+      "备份是当前数据库的一份完整快照（VACUUM INTO，一致性快照而不是复制文件），" +
+        "放在数据目录的 backups/ 里。生成后会立刻校验：能独立打开 + 通过完整性检查 + 表数与当前库一致。"
+    );
+    dlg.textContent = "";
+    dlg.append(el("h3", null, "备份数据库"));
+    dlg.append(
+      el("p", { class: "hint" },
+        "备份是当前数据库的完整快照（VACUUM INTO，不是复制文件 —— 复制一个正在写入的库可能拿到半截状态）。" +
+          "每份备份生成后立刻三步校验：非空、能独立打开、通过 quick_check 且表数与当前库一致。")
+    );
+
+    const listBox = el("div", { class: "db-backup-list" });
+    const statusLine = el("p", { class: "hint" }, "正在读取备份列表…");
+    const actions = el("div", { class: "db-dialog-actions" });
+    const btnDo = el("button", { class: "btn btn-primary", type: "button" }, "立即备份");
+    const btnClose = el("button", { class: "btn", type: "button" }, "关闭");
+    actions.append(btnDo, btnClose);
+
+    async function refresh() {
+      try {
+        const r = await call("app.backupList");
+        const items = (r && r.items) || [];
+        listBox.textContent = "";
+        if (!items.length) {
+          listBox.appendChild(el("div", { class: "db-empty" }, "还没有备份。点「立即备份」生成第一份。"));
+          statusLine.textContent = "";
+        } else {
+          for (const it of items.slice(0, 10)) {
+            const row = el("div", { class: "db-backup-item" });
+            row.append(el("span", { class: "t" }, it.name));
+            row.append(el("span", { class: "s" }, fmtBytes(it.size) + " · " + fmtStamp(it.created_ms)));
+            listBox.append(row);
+          }
+          if (items.length > 10) {
+            listBox.append(el("p", { class: "hint" }, "只列最近 10 份；全部都在数据目录的 backups/ 里。"));
+          }
+          statusLine.textContent = "共 " + items.length + " 份备份（新的在上）";
+        }
+      } catch (e) {
+        statusLine.textContent = "读取备份列表失败：" + errText(e);
+      }
+    }
+
+    btnDo.addEventListener("click", async () => {
+      btnDo.disabled = true;
+      const old = btnDo.textContent;
+      btnDo.textContent = "备份中…";
+      try {
+        const info = await call("app.backupCreate");
+        toast("已备份 " + info.name + "（" + fmtBytes(info.size) + "，已校验）");
+        await refresh();
+      } catch (e) {
+        toast("备份失败：" + errText(e), "error");
+      } finally {
+        btnDo.disabled = false;
+        btnDo.textContent = old;
+      }
+    });
+    btnClose.addEventListener("click", () => dlg.close("cancel"));
+
+    dlg.append(listBox, statusLine, actions);
+    dlg.showModal();
+    refresh();
+  }
+
   window.DeskBaseDb = {
     onShow: onShow,
+    openBackupDialog: openBackupDialog,
     refreshTables: refreshTables,
     openImportDialog: openImportDialog,
   };

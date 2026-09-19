@@ -24,6 +24,7 @@ mod schema;
 // 导入计划内核（表头行与字段类型推断）。**已接线**（2026-09-19）：
 // `excel_import::build_plan` 调它生成列建议，界面在导入向导里显示并允许用户改。
 mod import_plan;
+mod backup;
 mod updater;
 mod xlsx;
 
@@ -1577,6 +1578,28 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 白名单 + 引号包裹），值一律参数绑定 —— 这一层只做参数搬运与锁管理，
         // 不拼任何 SQL。接口约定见 schema.rs 头注释：Page.columns[0] 恒为
         // `_rowid`，rows[i][0] 是行号，界面靠它调 updateCell / deleteRows。
+        // 备份（v0.3.0 · 不丢数据）：手动留一份 + 列出已有备份。
+        // 三步校验在 backup::create 里同步做完 —— 备份不校验等于没有备份。
+        "app.backupCreate" => match state.db.lock() {
+            Ok(d) => match backup::create(d.conn(), &state.data_dir) {
+                Ok(info) => {
+                    // 日志只记文件名，不记数据内容
+                    log_line(&state.data_dir, &format!("手动备份：{}", info.name));
+                    ok(
+                        id,
+                        serde_json::to_value(info).unwrap_or_else(|_| serde_json::json!({})),
+                    )
+                }
+                Err(e) => err(id, e),
+            },
+            Err(_) => err(id, "数据库锁失败"),
+        }
+
+        "app.backupList" => {
+            let items = backup::list(&state.data_dir);
+            ok(id, serde_json::json!({ "items": items }))
+        }
+
         "schema.listTables" => match state.db.lock() {
             Ok(d) => match schema::list_tables(d.conn()) {
                 Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),

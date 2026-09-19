@@ -229,6 +229,54 @@
     const dt = types.find((t) => t.name === "date_time" || t.name === "datetime");
     step("「日期时间」在清单里且名字可用", !!dt, dt ? dt.name : "缺失");
 
+    // ---------- 11. 备份：真实点击 → 对话框 → 生成 → 文件名约定 ----------
+    // 为什么放在烟测里：备份是"用户主动保命"的动作，Rust 侧 5 个测试盖的是
+    // 备份逻辑本身；这里盖的是"界面上真的点得到、点完真的多出一份"。
+    // 与导入向导不同，这个按钮可以放心点 —— 它只开一个 HTML dialog，
+    // 不会弹原生文件对话框（那个会同步卡住主线程，见 12 节的说明）。
+    {
+      const $bk = $("#btn-db-backup");
+      step("数据库页有「备份数据库」入口", !!$bk);
+      if ($bk) {
+        $bk.click();
+        const opened = await waitFor(() => !!$("#db-dialog-backup"), 4000);
+        step("点「备份数据库」能打开对话框", opened);
+        const bkDlg = $("#db-dialog-backup");
+        if (bkDlg) {
+          const bkBtns = [...bkDlg.querySelectorAll("button")];
+          const bkDo = bkBtns.find((b) => /立即备份/.test(b.textContent || ""));
+          step("对话框里有「立即备份」按钮", !!bkDo);
+          if (bkDo) {
+            bkDo.click();
+            // 备份 = VACUUM INTO + 三步校验，给足时间（同步 IPC）
+            // ⚠️ 断言要盯"刚生成的那份"，不能只看"列表非空"：
+            // 临时数据目录里本来就有一份迁移前的自动备份（before-v2-*.db），
+            // 列表非空会立刻成立，于是旧备份被当成新备份读走（2026-09-19 实测踩到）。
+            const appeared = await waitFor(() => {
+              const el0 = bkDlg.querySelector(".db-backup-item .t");
+              return !!el0 && /^deskbase-/.test(el0.textContent || "");
+            }, 10000);
+            step("点「立即备份」后列表里出现了刚生成的备份", appeared);
+            const nameEl = bkDlg.querySelector(".db-backup-item .t");
+            const nameTxt = nameEl ? (nameEl.textContent || "") : "";
+            step(
+              "备份文件名符合约定（deskbase-YYYYMMDD-HHMMSS.db）",
+              /^deskbase-\d{8}-\d{6}\.db$/.test(nameTxt),
+              nameTxt || "（没读到名字）"
+            );
+            const sizeEl = bkDlg.querySelector(".db-backup-item .s");
+            step(
+              "列表里显示了大小与时间",
+              !!sizeEl && /(KB|MB|B)/.test(sizeEl.textContent || ""),
+              sizeEl ? sizeEl.textContent : ""
+            );
+          }
+          const bkClose = bkBtns.find((b) => /关闭/.test(b.textContent || ""));
+          if (bkClose) bkClose.click();
+        }
+      }
+    }
+
     // ---------- 11. 导入向导：入口在、能开、控件齐 ----------
     const $imp = $("#btn-db-import");
     step("数据库页有「从 Excel 导入」入口", !!$imp);

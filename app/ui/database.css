@@ -646,3 +646,10 @@
     grid-column: 1 / -1;
   }
 }
+
+/* ---------- 备份列表（v0.3.0 · 备份基础） ---------- */
+/* 只做布局：不放颜色/动效，让主题变量与动效门禁继续管别处 */
+.db-backup-list { max-height: 220px; overflow: auto; margin: 8px 0; }
+.db-backup-item { display: flex; justify-content: space-between; gap: 12px; padding: 6px 4px; }
+.db-backup-item .t { font-size: 12px; word-break: break-all; }
+.db-backup-item .s { font-size: 12px; opacity: 0.75; white-space: nowrap; }
