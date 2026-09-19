@@ -12,30 +12,12 @@
 //! 一条贯穿的原则：**任何一步校验不过，就中止并保持程序原状态。**
 //! 宁可让用户继续用旧版本，也不能把一个没验证过的 exe 换上去。
 
-// ⚠️ 临时的死代码豁免 —— **有终止条件，接线时必须删掉这一行**。
-//
-// 下面这份清单是**实测出来的**，不是估的：把本行临时摘掉跑一次 release 构建，
-// rustc 报 28 个未使用警告，正好是"下载 / 暂存 / 校验"这一半 ——
-// 因为调用它们的那条 IPC（`app.updateDownload`）还没写。
-//
-//   下载与暂存：`download_and_stage` / `download_to` / `staging_dir` / `Staged` /
-//   `asset_api_url` / `asset_name` / `ASSET_PREFIX` / `ASSET_SUFFIX` / `ACCEPT_OCTET` /
-//   `DOWNLOAD_TIMEOUT_MS` / `usable_assets` / `version_from_asset_name` / `is_prerelease`
-//   五步校验：`verify_and_stage_zip` / `extract_managed` / `MANAGED_FILES` /
-//   `verify_sha256` / `sha256_file` / `parse_sha256_file` / `verify_zip_layout`
-//   替换计划：`plan_apply` / `plan_managed_files` / `same_path` / `ManagedPlan` /
-//   `pick_zip` / `pick_sha256` / `Asset` 与它的字段
-//
-// **已经接通的**（所以不在这份清单里）：`app.updateCheck` / `app.updateSettings` /
-// `--version` / `--apply-update` —— 版本比较、发布清单解析、通道挑选、
-// 设置读写、时钟与审计、替换与回滚都在真的跑。
-//
-// **终止条件**（写死在代码里）：IPC `app.updateDownload` 接通后删除本行 —— 一个都不许留。
-//
-// 已知代价：模块级豁免会**连带盖住将来新出现的死代码**，所以它必须尽快消失。
-// 之所以现在不动它：把这一半拆成子模块要跨 `impl` 边界搬代码，
-// 在当前改动量下风险大于收益。这条记在 OPEN_QUESTIONS 的 Q-046 里。
-#![allow(dead_code)]
+// 本模块曾经有一处临时的 `#![allow(dead_code)]`（下载/校验那一半还没接线时）。
+// **2026-09-19 已删除**：IPC `app.updateDownload` / `app.updateApply` 接通后，
+// 全部符号都有了真实调用方，release 构建零警告 —— 终止条件达成，一个都不留。
+// 当时刻意没用 allow 盖住问题，而是把它当成**待还的债**记进 OPEN_QUESTIONS Q-046，
+// 这条债现在结清了。顺带删掉两个确实多余的辅助函数（`version_from_asset_name` / `is_prerelease`）：
+// 严格同名匹配已经覆盖了它们的用途，留着就只是死代码。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -157,10 +139,6 @@ impl Version {
             (Some(a), Some(b)) => a > b,
         }
     }
-
-    pub fn is_prerelease(&self) -> bool {
-        self.pre.is_some()
-    }
 }
 
 impl std::fmt::Display for Version {
@@ -189,11 +167,10 @@ pub fn asset_name(version: &str) -> String {
     format!("{ASSET_PREFIX}{version}{ASSET_SUFFIX}")
 }
 
-/// 从一个资产名里读出它自报的版本。名字不严格匹配就返回 `None`。
-pub fn version_from_asset_name(name: &str) -> Option<Version> {
-    let mid = name.strip_prefix(ASSET_PREFIX)?.strip_suffix(ASSET_SUFFIX)?;
-    Version::parse(mid)
-}
+// 曾经有一个 `version_from_asset_name()`（从资产名反解版本）。**已删** ——
+// 它是多余的：`pick_zip()` 是拿"发布标签的版本"去拼出期望的名字再**要求完全相等**，
+// 所以"资产名里的版本 == 标签版本"这件事已经被它保证了。
+// 留着一个只有测试在用的函数就是死代码 —— 本项目不许用 `allow(dead_code)` 盖住它。
 
 /// 在资产清单里挑出目标版本的便携包。
 ///
@@ -1344,14 +1321,42 @@ pub fn run_apply_update(staged_dir: &Path, install_dir: &Path) -> Result<String,
         serde_json::from_str(&plan_text).map_err(|e| format!("替换计划不是合法 JSON：{e}"))?;
 
     let (backup, copied) = apply_update(&plan, staged_dir, install_dir)?;
+
+    // 替换完把程序重新拉起来 —— 少了这一步，用户看到的是"更新完成，程序自己没了"。
+    // 拉不起来**不算更新失败**（文件已经换好了），但必须如实说清让他手动打开。
+    let relaunch = relaunch(install_dir);
+
     Ok(format!(
-        "已从 {} 更新到 {}；替换了 {} 个文件（包内共 {} 个）；备份在 {}",
+        "已从 {} 更新到 {}；替换了 {} 个文件（包内共 {} 个）；备份在 {}{}",
         plan.from,
         plan.to,
         copied.len(),
         entries.len(),
-        backup.display()
+        backup.display(),
+        relaunch
     ))
+}
+
+/// 替换完成后重新启动程序。返回一句给人看的补充说明。
+fn relaunch(install_dir: &Path) -> String {
+    let exe = install_dir.join("deskbase.exe");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        return match std::process::Command::new(&exe)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+        {
+            Ok(_) => "；已重新启动".to_string(),
+            Err(e) => format!("；但自动重启失败（{e}），请手动打开 {}", exe.display()),
+        };
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = exe;
+        "; 请手动重新打开程序".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1383,10 +1388,9 @@ mod tests {
     fn 版本号解析认正式版与预发布() {
         let a = Version::parse("0.2.1").unwrap();
         assert_eq!((a.major, a.minor, a.patch), (0, 2, 1));
-        assert!(a.pre.is_none() && !a.is_prerelease());
+        assert!(a.pre.is_none(), "0.2.1 是正式版，没有预发布后缀");
         let b = Version::parse("0.2.0-beta.3").unwrap();
         assert_eq!(b.pre.as_deref(), Some("beta.3"));
-        assert!(b.is_prerelease());
     }
 
     #[test]
@@ -1421,13 +1425,12 @@ mod tests {
     // ---------- 资产挑选 ----------
 
     #[test]
-    fn 资产名生成与反解() {
+    fn 资产名按约定拼出来() {
         assert_eq!(asset_name("0.2.1"), "deskbase-0.2.1-windows-x64-portable.zip");
-        let got = version_from_asset_name("deskbase-0.2.0-beta.3-windows-x64-portable.zip").unwrap();
-        assert_eq!(got.to_string(), "0.2.0-beta.3");
-        // 别的平台 / 别的后缀一律不认
-        assert!(version_from_asset_name("deskbase-0.2.1-linux-x64.zip").is_none());
-        assert!(version_from_asset_name("MAA-v5.20.0-win-x64.zip").is_none());
+        assert_eq!(
+            asset_name("0.2.0-beta.3"),
+            "deskbase-0.2.0-beta.3-windows-x64-portable.zip"
+        );
     }
 
     #[test]
@@ -1992,6 +1995,20 @@ mod tests_stage {
         assert_eq!(plan.to, "0.2.2");
         assert!(plan.replace.contains(&"deskbase.exe".to_string()));
 
+        // 最后一环：**真的替换一次**。这一整条（造包 → 校验 → 暂存 → 替换）全是本地操作，
+        // 所以它能一直跑 —— 不依赖网络，也就不会"有时红有时绿"。
+        // 安装目录里先放一个"旧版本"。
+        std::fs::write(install.join("deskbase.exe"), b"OLD-EXE").unwrap();
+        std::fs::write(install.join("README.md"), b"OLD-README").unwrap();
+        let (backup, copied) = apply_update(&plan, &staging, &install).expect("替换应当成功");
+        assert_eq!(copied.len(), plan.replace.len());
+        // 装上去的正是校验过的那一份
+        assert_eq!(std::fs::read(install.join("deskbase.exe")).unwrap(), b"NEW-EXE");
+        assert_eq!(std::fs::read(install.join("README.md")).unwrap(), b"NEW-README");
+        // 旧的那份留了备份，可回滚
+        assert_eq!(std::fs::read(backup.join("deskbase.exe")).unwrap(), b"OLD-EXE");
+        assert_eq!(std::fs::read(backup.join("README.md")).unwrap(), b"OLD-README");
+
         let _ = std::fs::remove_dir_all(d);
     }
 
@@ -2195,6 +2212,26 @@ mod tests_e2e {
         // ⑤ 解出来的 exe 应当是个真 PE（头两字节 "MZ"）
         let head = std::fs::read(dir.join("deskbase.exe")).unwrap();
         assert_eq!(&head[..2], b"MZ", "解出来的应当是真正的 Windows 可执行文件");
+
+        // ⑥ 最后一步：**真的替换一次**。安装目录里先放一个"旧版本"。
+        //    这里直接调 `apply_update` 而不是 `run_apply_update` —— 后者会顺带把程序拉起来，
+        //    在这个测试里会弹出一个窗口。替换逻辑本身是同一个函数。
+        std::fs::write(install.join("deskbase.exe"), b"OLD-VERSION-BYTES").unwrap();
+        let (backup, copied) = apply_update(&plan, &dir, &install)
+            .unwrap_or_else(|e| panic!("替换失败：{e}"));
+        println!("✔ 替换了 {} 个文件，备份在 {}", copied.len(), backup.display());
+
+        // 装上去的 exe 与暂存里的一致（即校验过的那一份）
+        let staged_exe = std::fs::read(dir.join("deskbase.exe")).unwrap();
+        let installed = std::fs::read(install.join("deskbase.exe")).unwrap();
+        assert_eq!(installed, staged_exe, "装上去的应当正是校验过的那一份");
+        assert_eq!(&installed[..2], b"MZ");
+        // 旧的那份被备份下来了，可回滚
+        assert_eq!(
+            std::fs::read(backup.join("deskbase.exe")).unwrap(),
+            b"OLD-VERSION-BYTES",
+            "替换前的旧版本必须留在备份目录里，否则没法回滚"
+        );
 
         let _ = std::fs::remove_dir_all(d);
     }

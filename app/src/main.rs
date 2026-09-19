@@ -90,6 +90,12 @@ fn allowed_urls() -> Vec<String> {
 enum AppEvent {
     /// 有应答要回传（内容在 [`SqlJob::pending`] 里，主线程按序取走）
     Reply,
+    /// 更新已拉起来，现在该退出了。
+    ///
+    /// 为什么必须退出：Windows 上**运行中的 exe 不能被覆盖**（它的文件锁还在）。
+    /// 替换进程已经在等这个锁，所以主进程必须干脆地让出来 ——
+    /// 但**不能**用 `process::exit` 直接跳掉，那会绕过"退出前保存"。
+    Quit,
 }
 
 /// 一次 SQL 执行的中断状态与应答队列。
@@ -356,11 +362,23 @@ fn main() -> wry::Result<()> {
             return;
         }
 
+        // 更新器请求退出（见 [`AppEvent::Quit`]）。与"点关闭按钮"**走同一条收尾路径** ——
+        // 退出前保存一次都不能省，所以这里只是把"要不要开始退"并进同一个判断，
+        // 而不是另写一套。
+        let quit_for_update = matches!(event, Event::UserEvent(AppEvent::Quit));
+        if quit_for_update {
+            log_line(&data_dir, "更新已拉起，退出以让出程序文件锁");
+        }
+
         *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
+        if quit_for_update
+            || matches!(
+                event,
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                }
+            )
         {
             quitting = true;
             quit_at = Some(
@@ -375,9 +393,24 @@ fn main() -> wry::Result<()> {
                     );
                 }
             }
-            log_line(&data_dir, "收到关闭请求，通知前端保存，等待后退出");
+            log_line(
+                &data_dir,
+                if quit_for_update {
+                    "更新就绪：通知前端保存，等待后退出"
+                } else {
+                    "收到关闭请求，通知前端保存，等待后退出"
+                },
+            );
         }
     });
+}
+
+/// 取程序所在目录 —— 便携版的解压目录、安装版的安装目录都是它。
+/// 更新与替换都要用（替换只动这个目录里的程序文件，绝不碰数据目录）。
+fn current_exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 /// 把工作线程攒下的应答取出来回传给前端。只在主线程调用。
@@ -1328,6 +1361,167 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                     log_line(&state.data_dir, &format!("更新检查失败：{e}"));
                     err(id, e)
                 }
+            }
+        }
+
+        "app.updateState" => {
+            // 给界面用的一条只读汇总：档位、通道、当前版本、有没有已暂存好的更新。
+            match state.db.lock() {
+                Ok(d) => {
+                    let s = updater::load_settings(d.conn());
+                    let staged: Vec<String> = std::fs::read_dir(state.data_dir.join("updates"))
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok())
+                                .filter(|e| e.path().join("plan.json").exists())
+                                .map(|e| e.file_name().to_string_lossy().to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    ok(
+                        id,
+                        serde_json::json!({
+                            "mode": s.mode.as_str(),
+                            "channel": s.channel.as_str(),
+                            "current": updater::current_version().to_string(),
+                            "staged": staged,
+                        }),
+                    )
+                }
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "app.updateDownload" => {
+            // 这是"检查"之外的**第二次确认**（ADR-0018 第 3 条）。
+            let mode = match state.db.lock() {
+                Ok(d) => updater::load_settings(d.conn()).mode,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            if mode != updater::UpdateMode::DownloadAsk {
+                return err(
+                    id,
+                    "当前档位不允许下载 —— 要在设置里开到「检查并下载」",
+                );
+            }
+
+            let install_dir = match current_exe_dir() {
+                Some(d) => d,
+                None => return err(id, "取不到程序所在目录"),
+            };
+            let cur = updater::current_version();
+            log_line(&state.data_dir, "出站尝试：下载更新包（api.github.com）");
+
+            let channel = match state.db.lock() {
+                Ok(d) => updater::load_settings(d.conn()).channel,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            let r = updater::fetch_releases().and_then(|rs| match updater::check(&rs, &cur, channel) {
+                updater::CheckOutcome::Newer { tag, .. } => {
+                    let rel = rs
+                        .iter()
+                        .find(|r| r.tag == tag)
+                        .ok_or_else(|| format!("刚挑出来的 {tag} 不在清单里（清单变了？）"))?;
+                    updater::download_and_stage(rel, &install_dir, &state.data_dir, &cur)
+                }
+                other => Err(format!("没有可下载的更新：{other:?}")),
+            });
+
+            match r {
+                Ok(st) => {
+                    log_line(
+                        &state.data_dir,
+                        &format!("更新包已暂存：{} 字节 → {}", st.zip_bytes, st.dir),
+                    );
+                    ok(id, serde_json::to_value(st).unwrap_or_default())
+                }
+                Err(e) => {
+                    log_line(&state.data_dir, &format!("更新下载失败：{e}"));
+                    err(id, e)
+                }
+            }
+        }
+
+        "app.updateApply" => {
+            // **第三道确认**（ADR-0018 第 3 条）。替换是唯一会动程序文件的操作，
+            // 必须由用户显式点过；不带 confirmed 一律拒。
+            if req.args.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+                return err(id, "替换需要显式确认（confirmed: true）");
+            }
+            let mode = match state.db.lock() {
+                Ok(d) => updater::load_settings(d.conn()).mode,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            if mode != updater::UpdateMode::DownloadAsk {
+                return err(id, "当前档位不允许替换");
+            }
+
+            let staging = match req.args.get("dir").and_then(|v| v.as_str()) {
+                Some(s) => PathBuf::from(s),
+                None => return err(id, "缺少参数 dir（暂存目录）"),
+            };
+            // ⚠️ **只允许替换自己暂存下来的东西**：暂存目录必须在数据目录的 `updates/` 下。
+            // 少了这道检查，被注入的渲染层就能让我们去执行任意路径上的任意 exe ——
+            // 那等于把"更新器"变成一个执行器。
+            let updates_root = state.data_dir.join("updates");
+            if !staging.starts_with(&updates_root) {
+                log_line(
+                    &state.data_dir,
+                    &format!("拒绝替换：暂存目录不在 updates/ 下 → {}", staging.display()),
+                );
+                return err(id, "暂存目录不在数据目录的 updates/ 下 —— 拒绝执行");
+            }
+            if !staging.join("deskbase.exe").exists() {
+                return err(id, "暂存目录里没有新的 deskbase.exe");
+            }
+            if !staging.join("plan.json").exists() {
+                return err(id, "暂存目录里没有 plan.json（替换计划）");
+            }
+            let install_dir = match current_exe_dir() {
+                Some(d) => d,
+                None => return err(id, "取不到程序所在目录"),
+            };
+
+            // 拉起**新版本**的 exe 去干替换：旧 exe 退出后就没了，没法替换自己
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                let spawned = std::process::Command::new(staging.join("deskbase.exe"))
+                    .arg("--apply-update")
+                    .arg(&staging)
+                    .arg("--into")
+                    .arg(&install_dir)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+                match spawned {
+                    Ok(c) => log_line(
+                        &state.data_dir,
+                        &format!("已拉起替换进程 pid={}，准备退出让出文件锁", c.id()),
+                    ),
+                    Err(e) => return err(id, format!("拉不起替换进程：{e}")),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = install_dir;
+                return err(id, "替换目前只实现了 Windows");
+            }
+
+            // 让主进程退出，把 exe 的文件锁让出来（替换进程正在等它）。
+            // 走 `AppEvent::Quit` 而不是 `process::exit` —— 后者会绕过"退出前保存"。
+            let proxy = state.proxy.lock().ok().and_then(|g| g.clone());
+            match proxy {
+                Some(p) => {
+                    let _ = p.send_event(AppEvent::Quit);
+                    ok(
+                        id,
+                        serde_json::json!({
+                            "spawned": true,
+                            "note": "程序即将退出以完成替换，随后会自动重启",
+                        }),
+                    )
+                }
+                None => err(id, "事件循环未就绪，无法安排退出（替换进程已拉起，重启程序即可完成）"),
             }
         }
 
