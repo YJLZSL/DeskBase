@@ -34,7 +34,7 @@ mod updater;
 mod xlsx;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tao::{
@@ -44,6 +44,10 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::WebViewBuilder;
+// Windows 专属扩展：给 WebView2 追加命令行开关。**正常启动也要用**
+// （见 [`BASE_BROWSER_ARGS`]：其中一条修的是一启动就崩的真实缺陷）。
+#[cfg(target_os = "windows")]
+use wry::WebViewBuilderExtWindows;
 
 use db::Db;
 
@@ -96,7 +100,115 @@ enum AppEvent {
     /// 替换进程已经在等这个锁，所以主进程必须干脆地让出来 ——
     /// 但**不能**用 `process::exit` 直接跳掉，那会绕过"退出前保存"。
     Quit,
+    /// 界面烟测结束，可以退出了。
+    ///
+    /// 与 `Quit` 分开**是为了日志说实话**：两者走同一条退出路径
+    /// （保存一次都不能省），但原因不同，混用一条日志会把排查的人带偏。
+    SmokeDone,
+    /// 界面烟测：把脚本注入页面（见 [`fire_ui_smoke`]）。
+    ///
+    /// 为什么不直接在 `app.diag` 的 IPC 处理器里注入：那里正处在 WebView2
+    /// 的 `WebMessageReceived` 回调栈里。**同一次回调里再调 `ExecuteScript`
+    /// 会被静默吞掉** —— 第一次跑烟测就是这么失败的：日志写了"脚本已注入"，
+    /// 页面却毫无动静，连一行进度都没有。注入改走事件循环，与 IPC 回调栈解耦。
+    SmokeInject,
 }
+
+/// **所有启动**都要带给 WebView2 的命令行开关（正常启动与烟测一样）。
+///
+/// 为什么不是"只给烟测带"：这里的第二条不是测试专用的变通，它修的是一个
+/// **真实缺陷** —— 没有它，本机上的应用本身就跑不起来（见下面的实测记录）。
+///
+/// 实测（2026-09-19，WebView2 153.0.4234.32 / Windows 11）：
+///   不带任何参数 → 浏览器进程起 3 秒内 GPU 子进程连崩 9 次，随后浏览器进程
+///                 `FATAL: GPU process isn't usable. Goodbye.` 自杀。
+///                 CDP 探测：+3 秒页面还在，+13 秒已经问不到了（宿主 Rust 进程
+///                 却仍然活着）。这正是"烟测跑两步就不出声"的病根。
+///   `--disable-gpu`            → 无效，GPU 子进程照样连崩（它只是不给硬件加速，
+///                                子进程仍会为合成而启动）。
+///   `--disable-gpu-shader-disk-cache` → 无效。
+///   `--disable-features=SkiaGraphite` → 无效。
+///   `--disable-gpu-sandbox`    → **有效：0 次崩溃、0 次 FATAL**（对照组 9 次）。
+///
+/// 崩溃的直接症状是 GPU 子进程打不开自己的持久化缓存目录
+/// （`GPUPersistentCache\DawnGraphiteCache\...`，报"另一个程序正在使用此文件"
+/// 0x20），而根因是**沙箱化的 GPU 进程在本机拿不到那个目录**。关掉 GPU 进程
+/// 的沙箱后它能正常打开，整条崩溃链随之消失。
+///
+/// 代价与取舍（写清楚，便于将来重估）：GPU 沙箱是防御**图形驱动漏洞**的一层，
+/// 关掉它意味着 GPU 进程以用户权限运行。对本应用可接受，理由是攻击面极小：
+/// 渲染层只加载编译期固定的自有资源（`deskbase://`，见 `assets.rs`），
+/// 不加载任何远程网页、不接受用户提供的 HTML。若将来引入远程内容或插件，
+/// **必须重新评估这一条**。
+///
+/// ⚠️ 另外两点必须一起记住：
+///   · wry 默认会传 `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`，
+///     而一旦调用 `with_additional_browser_args`，**默认值就不再兜底** —— 得自己带上；
+///   · wry 的硬性约束："浏览器参数不同的实例必须用不同的用户数据目录"
+///     （同目录 + 不同参数会让 WebView2 创建直接失败）。
+#[cfg(target_os = "windows")]
+const BASE_BROWSER_ARGS: &str = concat!(
+    // wry 平时帮我们传的三项，这里必须自己带上（见上面的说明）
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+    // 修真实缺陷的那一条，理由与实测见上
+    " --disable-gpu-sandbox",
+);
+
+/// 烟测**额外**追加的开关（正常启动没有）。理由都是"让故障可观察"，不是让测试通过：
+///   · `--enable-logging` + `--log-file`：Chromium 自己的日志。上面那张实测表就是
+///     靠它读出来的 —— 没有它，"页面为什么不动"永远只能猜；
+///   · `--remote-debugging-port`：排查时可以**直接问页面本人**处于什么状态
+///     （`document.readyState`、有没有抛异常、`__deskbase` 在不在），
+///     而不用靠我们自己的日志反推。微软文档里它也是官方的自动化/诊断入口。
+#[cfg(target_os = "windows")]
+const SMOKE_EXTRA_ARGS: &str = " --enable-logging";
+
+/// 烟测期间开放的 CDP（DevTools 协议）端口。**只有烟测会开，正常启动没有。**
+#[cfg(target_os = "windows")]
+const SMOKE_DEBUG_PORT: u16 = 9222;
+
+/// 拼出**本次启动**要追加的完整命令行。
+///
+/// `log_path` 为 `Some` = 烟测模式（多带日志与 CDP 端口），`None` = 正常启动。
+///
+/// `DESKBASE_SMOKE_ARGS` 可以**整体替换**烟测那套参数（用空字符串 = 一个都不加）。
+/// 留这个口子是为了排参数问题时不用反复重新编译：改环境变量就能换一组参数再跑，
+/// 而每换一组都要几分钟编译的话，没人会去做二分。**它只影响烟测**，正常启动改不了。
+#[cfg(target_os = "windows")]
+fn browser_args(log_path: Option<&std::path::Path>) -> String {
+    match log_path {
+        Some(p) => {
+            if let Ok(custom) = std::env::var("DESKBASE_SMOKE_ARGS") {
+                return custom;
+            }
+            format!(
+                "{BASE_BROWSER_ARGS}{SMOKE_EXTRA_ARGS} --log-file={} \
+                 --remote-debugging-port={SMOKE_DEBUG_PORT} --remote-allow-origins=*",
+                p.display()
+            )
+        }
+        None => BASE_BROWSER_ARGS.to_string(),
+    }
+}
+
+/// windows 之外（理论上不存在 —— 本项目只发 Windows）保留同名空实现，
+/// 免得调用点到处都是 `#[cfg]`。
+#[cfg(not(target_os = "windows"))]
+fn browser_args(_log_path: Option<&std::path::Path>) -> String {
+    String::new()
+}
+
+/// 主线程心跳计数：**只要主线程还在处理任何事（IPC 回调、事件循环的一圈），
+/// 这个数就往上走。**
+///
+/// 存在的唯一理由是"分辨沉默"：烟测卡住时，"宿主主线程被卡死"与"页面侧不
+/// 出声"在日志里完全一样 —— 两边都是最后一行之后再无输出。有了它，看门狗
+/// 线程就能给出确定的答案：计数还在涨 = 宿主清白，问题在页面；计数不动 =
+/// 主线程死在某个调用里（而不是"页面不听话"）。
+///
+/// 为什么放静态而不是 `AppState` 里：看门狗线程拿不到 `AppState`（那里握着
+/// `WebView`，含原生指针、不是 `Send`）。一个 `AtomicU64` 谁都能读，代价是零。
+static MAIN_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// 一次 SQL 执行的中断状态与应答队列。
 ///
@@ -133,6 +245,11 @@ struct AppState {
     sql: Arc<SqlJob>,
     /// 事件循环代理：工作线程用它叫醒主线程
     proxy: Mutex<Option<EventLoopProxy<AppEvent>>>,
+    /// 界面烟测脚本路径（`DESKBASE_UI_SMOKE` 指定，见 [`fire_ui_smoke`]）。
+    /// 正常启动是 `None` —— 烟测的行为与 IPC 分支全部不存在。
+    smoke_script: Option<PathBuf>,
+    /// 烟测是否已经注入过。自检在 boot 末尾调一次，但防重入比"赌它只来一次"便宜。
+    smoke_fired: AtomicBool,
 }
 
 impl AppState {
@@ -230,6 +347,11 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    // 界面烟测：DESKBASE_UI_SMOKE=<页面脚本路径> 时，界面自检一完成就把脚本
+    // 注入 WebView 去真实点击，结果写到数据目录的 smoke-report.json 并退出。
+    // 由 scripts/ui-smoke.cjs 驱动；**正常启动完全不经过这里**（值为 None）。
+    let ui_smoke = std::env::var("DESKBASE_UI_SMOKE").ok().map(PathBuf::from);
+
     // 构建期用的图标光栅化模式，正常启动完全不经过这里
     if let Ok(out) = std::env::var("DESKBASE_RENDER") {
         return render::run(&PathBuf::from(out), &data_dir);
@@ -238,6 +360,9 @@ fn main() -> wry::Result<()> {
     let db_path = data_dir.join("data").join("main.db");
 
     log_line(&data_dir, &format!("启动，数据目录 = {}", data_dir.display()));
+    if let Some(p) = ui_smoke.as_ref() {
+        log_line(&data_dir, &format!("烟测模式：自检后将执行界面脚本 {}", p.display()));
+    }
 
     let database = match Db::open(&data_dir, &db_path) {
         Ok(d) => d,
@@ -260,6 +385,8 @@ fn main() -> wry::Result<()> {
         last_workspace: Mutex::new(None),
         sql: Arc::new(SqlJob::default()),
         proxy: Mutex::new(Some(event_loop.create_proxy())),
+        smoke_script: ui_smoke,
+        smoke_fired: AtomicBool::new(false),
     });
     // 窗口与任务栏图标：用 tools/icon 生成的 256×256 原始 RGBA 直接构造，
     // 不需要在 Rust 侧解码 PNG（见 tools/icon/build-icons.cjs）
@@ -302,6 +429,8 @@ fn main() -> wry::Result<()> {
 
     let ipc_state = Arc::clone(&state);
     let ipc_handler = move |req: wry::http::Request<String>| {
+        // 心跳：主线程又处理了一件事（见 MAIN_TICKS）
+        MAIN_TICKS.fetch_add(1, Ordering::Relaxed);
         let body = req.body().clone();
         // `dispatch` 返回 None = 这条命令是异步的（目前只有 SQL 执行），应答稍后
         // 由工作线程通过事件循环交回来 —— 这里**不能**立刻回，否则前端会先拿到
@@ -321,17 +450,98 @@ fn main() -> wry::Result<()> {
         }
     };
 
-    let webview = WebViewBuilder::new()
+    // 烟测模式下把页面加载/重载写进日志。第一件要排除的事就是
+    // "页面在注入后重载过"——那会连同脚本的执行上下文一起销毁，
+    // 外部看就是"注入成功但毫无动静"。
+    let load_log_dir = data_dir.clone();
+    let load_log_on = state.smoke_script.is_some();
+
+    // WebView2 的用户数据目录。烟测时挪到自己的地盘，两个理由任一条都成立：
+    //   · 烟测比正常启动多带几个浏览器开关（日志 / CDP），而 wry 硬性要求
+    //     "参数不同 → 数据目录必须不同"（同目录 + 不同参数会让创建直接失败）；
+    //   · 默认目录 `deskbase.exe.WebView2` 是**所有运行共用**的 —— 用户自己开着的
+    //     那个实例和烟测实例会互相踩（缓存、会话、配额都在一起）。
+    //
+    // 位置固定在 `%TEMP%\deskbase-smoke-webview2`：烟测的业务数据目录每次新建
+    // 是对的，WebView2 的 profile 则不必跟着换 —— 一个稳定的位置让排查时
+    // "上次那次跑留下的缓存"是可复现的，而不是每次都是一张白纸。
+    let smoke_profile = std::env::temp_dir().join("deskbase-smoke-webview2");
+    let mut web_context = wry::WebContext::new(if load_log_on {
+        Some(smoke_profile)
+    } else {
+        None
+    });
+    // 注意：这个绑定要活到本函数结束（也就是事件循环退出），别写成 `let _ =`。
+    // wry 的文档明确要求 WebContext 与 WebView 同生共死 —— 提前丢掉，
+    // 自定义协议之类的动作会跟着失效。这里不做任何引用，纯粹是"拿着不放"。
+    let _web_context_alive = &mut web_context;
+
+    let builder = WebViewBuilder::new_with_web_context(_web_context_alive)
         .with_custom_protocol(assets::SCHEME.to_string(), asset_handler)
         .with_url(assets::INDEX_URL)
         .with_ipc_handler(ipc_handler)
-        .build(&window)?;
+        .with_on_page_load_handler(move |ev, url| {
+            if load_log_on {
+                let what = match ev {
+                    wry::PageLoadEvent::Started => "开始加载",
+                    wry::PageLoadEvent::Finished => "加载完成",
+                };
+                log_line(&load_log_dir, &format!("烟测：页面{what} —— {url}"));
+            }
+        });
+    // 浏览器参数：**正常启动也要带**（`BASE_BROWSER_ARGS` 里那条 GPU 沙箱开关
+    // 修的是真实缺陷，不是测试变通 —— 理由与实测记录见它的文档注释）。
+    // 参数是 Windows 专属能力（`with_additional_browser_args` 只定义在 wry 的
+    // Windows 扩展 trait 上）。本项目只发 Windows，其余平台这里是空操作，
+    // 保留分支只是为了让代码仍然"到处都能编译"。
+    #[cfg(target_os = "windows")]
+    let builder = builder.with_additional_browser_args(browser_args(
+        load_log_on.then(|| data_dir.join("webview2.log")).as_deref(),
+    ));
+    let webview = builder.build(&window)?;
 
     // 把句柄交给状态，此后 IPC 才能回传结果
     if let Ok(mut guard) = state.webview.lock() {
         *guard = Some(webview);
     }
     log_line(&data_dir, "窗口与 WebView 就绪");
+
+    // 烟测看门狗：每 3 秒从**独立线程**写一行存活记录，并顺手 try_lock 数据库锁。
+    // 用途单一：给"突然不出声"留下可分辨的证据。心跳数在 IPC 回调与事件循环里
+    // 递增，所以：
+    //   · 心跳在涨            → 宿主在干活，问题在页面侧（或页面已死、无事件）；
+    //   · 心跳为 0 且锁空闲    → 既可能主线程真卡住，也可能是**页面已死导致
+    //                           根本没有事件** —— 这两者从心跳本身分不出来，
+    //                           要区分得看 WebView2 的日志或 CDP 探活；
+    //   · 数据库锁一直"被占"   → 主线程卡在某个持数据库锁的作用域里。
+    //
+    // ⚠️ 这段注释上一版写错过，值得记下来：当时把"心跳+0"直接读成"主线程停摆"，
+    // 于是把排查方向带到了宿主线程上。真实原因是 **WebView2 的浏览器进程因 GPU
+    // 崩溃自杀**（见 `BASE_BROWSER_ARGS` 的实测记录）——页面没了，事件循环自然
+    // 收不到任何事件，心跳当然不动。**"没有输出"永远要先问"还有没有在跑"。**
+    if state.smoke_script.is_some() {
+        let wd_db = Arc::clone(&state.db);
+        let wd_dir = data_dir.clone();
+        std::thread::spawn(move || {
+            let mut n = 0u32;
+            let mut last_tick = MAIN_TICKS.load(Ordering::Relaxed);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                n += 1;
+                let tick = MAIN_TICKS.load(Ordering::Relaxed);
+                let delta = tick.wrapping_sub(last_tick);
+                last_tick = tick;
+                let db = if wd_db.try_lock().is_ok() { "空闲" } else { "被占" };
+                log_line(
+                    &wd_dir,
+                    &format!(
+                        "烟测看门狗 #{n}：主线程心跳+{delta}，数据库锁={db}{}",
+                        if delta == 0 { " ← 无事件（页面可能已死）" } else { "" }
+                    ),
+                );
+            }
+        });
+    }
 
     // 退出前保存：先让前端把未保存的笔记落库 + 上报工作区状态，给 800ms 宽限，
     // 宽限到（或前端已上报）后用最近一次上报的状态再落一次盘，最后退出。
@@ -340,6 +550,8 @@ fn main() -> wry::Result<()> {
     let mut quit_at: Option<std::time::Instant> = None;
 
     event_loop.run(move |event, _, control_flow| {
+        // 心跳：事件循环又转了一圈（见 MAIN_TICKS）
+        MAIN_TICKS.fetch_add(1, Ordering::Relaxed);
         if quitting {
             // 已经点了关闭：等够 800ms 就收尾退出
             if let Some(t) = quit_at {
@@ -362,16 +574,32 @@ fn main() -> wry::Result<()> {
             return;
         }
 
-        // 更新器请求退出（见 [`AppEvent::Quit`]）。与"点关闭按钮"**走同一条收尾路径** ——
-        // 退出前保存一次都不能省，所以这里只是把"要不要开始退"并进同一个判断，
-        // 而不是另写一套。
+        // 烟测脚本注入（见 [`AppEvent::SmokeInject`]）。走事件循环而不是
+        // IPC 回调栈，是这次修的重点：注入必须发生在"当前这次回调已经结束"
+        // 之后，否则 ExecuteScript 会被 WebView2 吞掉。
+        if matches!(event, Event::UserEvent(AppEvent::SmokeInject)) {
+            if let Some(p) = state.smoke_script.clone() {
+                fire_ui_smoke(&state, &p);
+            }
+            *control_flow = ControlFlow::Wait;
+            return;
+        }
+
+        // 更新器 / 烟测请求退出（见 [`AppEvent::Quit`] 与 [`AppEvent::SmokeDone`]）。
+        // 与"点关闭按钮"**走同一条收尾路径** —— 退出前保存一次都不能省，
+        // 所以这里只是把"要不要开始退"并进同一个判断，而不是另写一套。
         let quit_for_update = matches!(event, Event::UserEvent(AppEvent::Quit));
+        let quit_for_smoke = matches!(event, Event::UserEvent(AppEvent::SmokeDone));
         if quit_for_update {
             log_line(&data_dir, "更新已拉起，退出以让出程序文件锁");
+        }
+        if quit_for_smoke {
+            log_line(&data_dir, "烟测报告已写出，退出");
         }
 
         *control_flow = ControlFlow::Wait;
         if quit_for_update
+            || quit_for_smoke
             || matches!(
                 event,
                 Event::WindowEvent {
@@ -397,6 +625,8 @@ fn main() -> wry::Result<()> {
                 &data_dir,
                 if quit_for_update {
                     "更新就绪：通知前端保存，等待后退出"
+                } else if quit_for_smoke {
+                    "烟测结束：通知前端保存，等待后退出"
                 } else {
                     "收到关闭请求，通知前端保存，等待后退出"
                 },
@@ -421,6 +651,47 @@ fn flush_replies(state: &AppState) {
     };
     for payload in batch {
         state.respond(&payload);
+    }
+}
+
+/// 把界面烟测脚本注入页面（仅烟测模式，见 `DESKBASE_UI_SMOKE`）。
+///
+/// 定位：它是**界面层的真实点击测试** —— 在真实 WebView 里点真实按钮、走真实
+/// IPC、读真实状态。比截图对比便宜，也不会"有时红有时绿"（网络结果的不确定性
+/// 由脚本自己容忍，见 `scripts/ui-smoke.page.js` 的口径）。
+/// 注入失败也要留下报告文件：驱动脚本按"报告 + 日志"给出原因，而不是干等超时。
+fn fire_ui_smoke(state: &AppState, path: &std::path::Path) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("烟测脚本读取失败：{e}（{}）", path.display());
+            log_line(&state.data_dir, &msg);
+            let report = serde_json::json!({ "steps": [], "failures": [msg] });
+            let _ = std::fs::write(
+                state.data_dir.join("smoke-report.json"),
+                serde_json::to_string_pretty(&report).unwrap_or_default(),
+            );
+            return;
+        }
+    };
+    if let Ok(guard) = state.webview.lock() {
+        if let Some(wv) = guard.as_ref() {
+            // 注入通道探针：`evaluate_script` 的返回值只说明"调用被受理"，
+            // 脚本执行的真实结果由回调带回（wry 在 Windows 上就是这么设计的）。
+            // 探针同时报出地址、文档状态、桥可用性 —— "注入成功但毫无动静"
+            // 这类问题的第一现场就在这三项里（上一轮只能靠猜）。
+            let probe_dir = state.data_dir.clone();
+            if let Err(e) = wv.evaluate_script_with_callback(
+                "'地址=' + location.href + ' 文档=' + document.readyState + ' 桥=' + typeof (window.__deskbase && window.__deskbase.call)",
+                move |v| {
+                    log_line(&probe_dir, &format!("烟测：注入通道探针 = {v}"));
+                },
+            ) {
+                log_line(&state.data_dir, &format!("烟测：探针注入失败 {e}"));
+            }
+            let _ = wv.evaluate_script(&src);
+            log_line(&state.data_dir, "烟测：脚本已注入，真实点击测试开始");
+        }
     }
 }
 
@@ -675,6 +946,18 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 )
             };
             log_line(&state.data_dir, &line);
+            // 界面烟测（仅烟测模式）：自检 = "界面初始化完成"，此刻安排注入最稳，
+            // 不用赌页面加载时机。但**不在这里直接注入** —— 这里还在 IPC 回调
+            // 栈里，ExecuteScript 会被吞掉（见 [`AppEvent::SmokeInject`]）；
+            // 所以只把"该注入了"这件事丢给事件循环，注入在回调结束之后发生。
+            if state.smoke_script.is_some() && !state.smoke_fired.swap(true, Ordering::SeqCst) {
+                match state.proxy.lock().ok().and_then(|g| g.clone()) {
+                    Some(px) => {
+                        let _ = px.send_event(AppEvent::SmokeInject);
+                    }
+                    None => log_line(&state.data_dir, "烟测：事件循环代理未就绪，无法安排注入"),
+                }
+            }
             ok(id, serde_json::json!({ "logged": true }))
         }
 
@@ -1525,6 +1808,58 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // 烟测进度播报（见 [`fire_ui_smoke`]）。脚本每一步都播报一次，卡住时
+        // app.log 直接指出卡在哪一步 —— 不然"注入成功但零产出"只能靠猜。
+        // 与报告通道同样只在烟测模式下可用。
+        "app.smokeProgress" => {
+            if state.smoke_script.is_none() {
+                return err(id, "烟测模式未开启（DESKBASE_UI_SMOKE 未设置）");
+            }
+            let msg = req
+                .args
+                .get("msg")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(空)");
+            log_line(&state.data_dir, &format!("烟测进度：{msg}"));
+            ok(id, serde_json::json!({ "logged": true }))
+        }
+
+        // 界面烟测的回报通道（见 [`fire_ui_smoke`]）。
+        // **只在设置过 DESKBASE_UI_SMOKE 时可用** —— 正常启动时这里直接拒绝、
+        // 不写任何文件。"报告能写出来"本身就是"烟测模式确实开着"的证明。
+        "app.smokeReport" => {
+            if state.smoke_script.is_none() {
+                return err(id, "烟测模式未开启（DESKBASE_UI_SMOKE 未设置）");
+            }
+            let n_fail = req
+                .args
+                .get("failures")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let n_steps = req
+                .args
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let path = state.data_dir.join("smoke-report.json");
+            let body = serde_json::to_string_pretty(&req.args).unwrap_or_else(|_| "{}".into());
+            let _ = std::fs::write(&path, body);
+            log_line(
+                &state.data_dir,
+                &format!(
+                    "烟测完成：{n_steps} 步 · {n_fail} 项失败 —— 报告 {}",
+                    path.display()
+                ),
+            );
+            // 走与"关闭窗口"相同的收尾路径退出（退出前保存一次都不能省）
+            if let Some(p) = state.proxy.lock().ok().and_then(|g| g.clone()) {
+                let _ = p.send_event(AppEvent::SmokeDone);
+            }
+            ok(id, serde_json::json!({ "written": true }))
+        }
+
         other => err(id, format!("未知命令: {other}")),
     }
 }
@@ -1876,7 +2211,8 @@ fn fmt_ms(ms: i64) -> String {    match time::OffsetDateTime::from_unix_timestam
 }
 
 /// GUI 程序没有控制台，日志写文件，便于排查。
-fn log_line(data_dir: &std::path::Path, msg: &str) {    let dir = data_dir.join("logs");
+fn log_line(data_dir: &std::path::Path, msg: &str) {
+    let dir = data_dir.join("logs");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("app.log");
     let stamp = time::OffsetDateTime::now_utc()
@@ -1929,6 +2265,8 @@ mod acceptance {
             last_workspace: Mutex::new(None),
             sql: Arc::new(SqlJob::default()),
             proxy: Mutex::new(None),
+            smoke_script: None,
+            smoke_fired: AtomicBool::new(false),
         });
         (state, dir)
     }
@@ -2339,6 +2677,8 @@ mod acceptance {
             last_workspace: Mutex::new(None),
             sql: Arc::new(SqlJob::default()),
             proxy: Mutex::new(None),
+            smoke_script: None,
+            smoke_fired: AtomicBool::new(false),
         };
         let info2 = call(&state2, "app.info", json!({})).unwrap();
         assert_eq!(

@@ -19,6 +19,7 @@
  *   node scripts/build.cjs --test     跑测试（用 debug）
  *   node scripts/build.cjs --run      构建后启动
  *   node scripts/build.cjs --check    只做 cargo check（最快）
+ *   node scripts/build.cjs --smoke    构建后跑界面烟测（真实点击，见 ui-smoke.cjs）
  */
 
 const { spawnSync } = require('child_process');
@@ -294,6 +295,15 @@ if (MODE !== 'test' && MODE !== 'check') {
       log('=== 启动 ===');
       const child = spawnSync(exe, [], { stdio: 'inherit', env });
       process.exit(child.status || 0);
+    }
+    if (has('--smoke')) {
+      log('');
+      log('=== 界面烟测（真实点击） ===');
+      const r2 = spawnSync(process.execPath, [path.join(__dirname, 'ui-smoke.cjs'), exe], {
+        stdio: 'inherit',
+        env,
+      });
+      process.exit(r2.status || 0);
     }
   } else {
     log('⚠ 未找到产物：' + exe);

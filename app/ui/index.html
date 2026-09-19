@@ -320,6 +320,7 @@
                 <dl class="kv kv-compact">
                   <dt>版本</dt><dd id="about-version-2">—</dd>
                   <dt>许可证</dt><dd>Apache License 2.0</dd>
+                  <dt>现有笔记</dt><dd id="about-count">—</dd>
                 </dl>
               </div>
             </div>
@@ -356,14 +357,49 @@
               <div class="hint">版本号形如 <code>0.1.0-alpha.1</code>。</div>
             </div>
             <div class="field">
-              <span>检查更新</span>
+              <label for="update-mode">联网检查更新</label>
+              <select id="update-mode" class="select">
+                <option value="never">从不（默认）</option>
+                <option value="notify">只检查并提醒我</option>
+                <option value="download_ask">检查并下载，替换前问我</option>
+              </select>
+              <div class="hint">
+                默认关闭。开启后程序会向 <code>api.github.com</code> 请求一份发布清单 ——
+                <b>只交换程序自己的版本与产物，不发送你的任何数据</b>。每次出站（包括被跳过的尝试）
+                都会记进下面的审计日志。
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="update-channel">更新通道</label>
+              <select id="update-channel" class="select">
+                <option value="stable">稳定版（只看正式版，默认）</option>
+                <option value="prerelease">测试版（连 beta 一起看）</option>
+              </select>
+              <div class="hint">稳定版不会把你带上 beta。测试版能看到更早的新功能，也更可能出问题。</div>
+            </div>
+
+            <div class="field">
+              <span>检查与安装</span>
               <div class="link-row">
-                <button class="btn" id="btn-check-update">打开发布页</button>
+                <button class="btn" id="btn-check-update" disabled>检查更新</button>
+                <button class="btn" id="btn-download-update" hidden>下载</button>
+                <button class="btn" id="btn-apply-update" hidden>替换并重启</button>
+                <button class="btn" id="btn-open-releases">打开发布页</button>
               </div>
               <div class="hint" id="update-hint">
-                <b>本程序不会自己联网检查更新</b>，这是刻意的：网络默认关闭是产品承诺之一。
-                点这个按钮会用你的系统浏览器打开项目的发布页，由浏览器去取 ——
-                程序本身不发出任何请求。每次打开都会记进审计日志。
+                三步各自要你点一次：<b>检查 → 下载 → 替换</b>。任何一步失败都不会改动现有程序。
+              </div>
+              <div class="hint" id="update-result" hidden></div>
+            </div>
+
+            <div class="field">
+              <span>已知限制</span>
+              <div class="hint">
+                <b>本程序没有代码签名证书</b>，所以自己下载的更新<b>无法验证发布者身份</b> ——
+                校验用的 SHA-256 与文件清单来自同一个 Release，账号一旦被攻破，这条链会一起失效。
+                换上来的新程序同样没有签名，运行时可能被 SmartScreen 拦。
+                想更稳妥就点上面的「打开发布页」手动下载，自己核对比对 <code>.sha256</code> 再覆盖。
               </div>
             </div>
             <div class="field">

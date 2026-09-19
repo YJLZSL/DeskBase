@@ -1001,7 +1001,16 @@
       cmds.push({
         id: "app.releases", title: "检查更新", group: "帮助", py: "jianchagengxin",
         shortcut: "",
-        run: () => $("#btn-check-update").click(),
+        run: () => {
+          // 默认档位是「不出网检查」，此时按钮是禁用的 —— 直接点会静默无反应。
+          // 与其让人以为坏了，不如说清为什么。
+          const b = $("#btn-check-update");
+          if (b.disabled) {
+            toast("联网检查更新默认关闭 —— 先在设置里开启，或点「打开发布页」手动下载。", "info");
+            return;
+          }
+          b.click();
+        },
       });
     }
 
@@ -1092,7 +1101,167 @@
         e.preventDefault();
         openLink(repo + "/tree/main/docs");
       });
-      $("#btn-check-update").addEventListener("click", () => openLink(repo + "/releases"));
+      // ---------- 更新（ADR-0018 / ADR-0019）----------
+      //
+      // 三段式：**检查 → 下载 → 替换，各要用户点一次**。
+      // 默认档位是「不出网检查」，所以检查按钮一开始就是禁用的 ——
+      // 这比"点了再弹一个拒绝提示"更清楚：看得见它现在不能点。
+      const $mode = $("#update-mode");
+      const $channel = $("#update-channel");
+      const $result = $("#update-result");
+      const $check = $("#btn-check-update");
+      const $download = $("#btn-download-update");
+      const $apply = $("#btn-apply-update");
+      let staged = null; // 已下载并通过五步校验的更新（含替换计划）
+
+      const showResult = (text, kind) => {
+        $result.hidden = false;
+        $result.textContent = text;
+        $result.dataset.kind = kind || "";
+      };
+
+      // 替换前必须让用户看清"要从哪个版本换到哪个版本、动哪些文件"。
+      // 组件库在就用它的模态框，不在就退回系统 confirm（闸门宁丑不缺）。
+      const confirmBox = (title, body) => {
+        const U = window.DeskBaseUI;
+        if (U && typeof U.confirm === "function") {
+          return U.confirm({
+            title,
+            body,
+            confirmText: "替换并重启",
+            cancelText: "取消",
+            danger: true,
+          });
+        }
+        return Promise.resolve(window.confirm(title + "\n\n" + body));
+      };
+
+      async function loadUpdateSettings() {
+        try {
+          const s = await call("app.updateState");
+          $mode.value = s.mode;
+          $channel.value = s.channel;
+          $check.disabled = s.mode === "never";
+          $check.title = s.mode === "never" ? "先在上面把「联网检查更新」打开" : "";
+          $download.hidden = true;
+          $apply.hidden = true;
+          staged = null;
+        } catch (e) {
+          showResult("读不到更新设置：" + e.message, "error");
+        }
+      }
+
+      $mode.addEventListener("change", async () => {
+        try {
+          await call("app.updateSettings", { mode: $mode.value, channel: $channel.value });
+          refreshAudit();
+          await loadUpdateSettings();
+          showResult(
+            $mode.value === "never"
+              ? "已关闭联网检查 —— 程序不会再发出任何请求。"
+              : "已开启。点「检查更新」试试。",
+            "ok"
+          );
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+
+      $channel.addEventListener("change", async () => {
+        try {
+          await call("app.updateSettings", { mode: $mode.value, channel: $channel.value });
+          showResult(
+            "通道已切换：" + $channel.options[$channel.selectedIndex].textContent,
+            "ok"
+          );
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      });
+
+      $check.addEventListener("click", async () => {
+        $check.disabled = true;
+        showResult("正在检查…");
+        try {
+          const r = await call("app.updateCheck");
+          refreshAudit();
+          const o = r.outcome;
+          if (!r.checked) {
+            // 没检查 ≠ 已是最新。这两件事对用户的意义完全不同，不能混着说。
+            showResult(r.reason || "这次没有检查。", "warn");
+          } else if (o && o.Newer) {
+            showResult(
+              `有新版：${o.Newer.version}${o.Newer.prerelease ? "（测试版）" : ""}`,
+              "ok"
+            );
+            $download.hidden = r.mode !== "download_ask";
+          } else if (o && o.OnlyPrerelease) {
+            showResult(
+              `还没有正式版；现在只有测试版 ${o.OnlyPrerelease.version}。` +
+                `想跟进就把上面的通道切到「测试版」。`,
+              "warn"
+            );
+          } else {
+            showResult("已经是最新。", "ok");
+          }
+        } catch (e) {
+          refreshAudit(); // 失败的出站尝试也会进审计，刷新一下让用户看得见
+          showResult("检查失败：" + e.message, "error");
+        } finally {
+          $check.disabled = $mode.value === "never";
+        }
+      });
+
+      $download.addEventListener("click", async () => {
+        $download.disabled = true;
+        showResult("正在下载并校验…（包有几 MB，慢网络要等一会儿）");
+        try {
+          staged = await call("app.updateDownload");
+          refreshAudit();
+          const files = (staged.plan && staged.plan.replace) || [];
+          showResult(
+            `已下载并通过五步校验：${staged.plan.to}（${(staged.zip_bytes / 1048576).toFixed(2)} MB）。` +
+              `将替换 ${files.length} 个文件：${files.join("、")}。` +
+              `你的数据目录不在替换范围内。`,
+            "ok"
+          );
+          $apply.hidden = false;
+        } catch (e) {
+          refreshAudit();
+          showResult("下载失败：" + e.message, "error");
+        } finally {
+          $download.disabled = false;
+        }
+      });
+
+      $apply.addEventListener("click", async () => {
+        if (!staged) {
+          showResult("先下载。", "warn");
+          return;
+        }
+        const plan = staged.plan || {};
+        const files = plan.replace || [];
+        const go = await confirmBox(
+          `把程序文件替换成 ${plan.to}`,
+          `从 ${plan.from} 换到 ${plan.to}，将替换 ${files.length} 个文件：\n` +
+            files.map((f) => "· " + f).join("\n") +
+            `\n\n你的数据在 ${plan.data_dir_note || "数据目录"}，不在替换范围内。\n` +
+            `替换后程序会自动退出并重启。\n\n继续？`
+        );
+        if (!go) return;
+        $apply.disabled = true;
+        showResult("已确认，正在启动替换进程…程序即将退出。");
+        try {
+          const r = await call("app.updateApply", { confirmed: true, dir: staged.dir });
+          showResult(r.note || "程序即将退出以完成替换。", "ok");
+        } catch (e) {
+          $apply.disabled = false;
+          showResult("替换启动失败：" + e.message, "error");
+        }
+      });
+
+      $("#btn-open-releases").addEventListener("click", () => openLink(repo + "/releases"));
+      await loadUpdateSettings();
       refreshAudit();
 
       // 命令面板留到最后注册：此时仓库地址已经拿到，

@@ -2,18 +2,22 @@
 /* ============================================================
    DeskBase 前端接线门禁（check-wiring.cjs）
    ============================================================
-   存在的理由：本项目吃过三次"文件写了、功能没有"的亏 ——
+   存在的理由：本项目吃过四次"文件写了、功能没有"的亏 ——
      ① 新样式表没进 check-motion 的 TARGETS（绿勾是真的，覆盖是假的）
      ② 代理留下的 help.js / db-onboard.js 文件齐全，却漏了 assets.rs
         登记与 index.html 挂载（页面照开，功能悄悄没有）
      ③ Rust 的 has_more 被 JS 读成 hasMore（字段名契约，见 schema.rs 的测试）
-   这三类都不是编译错误，全靠人肉发现太不划算，所以做成门禁。
+     ④ JS 取了 `$("#about-count")`，而那个元素在某次重构里被删了 ——
+        一次 TypeError 让**整个设置页的初始化**（含更新卡）全部跳过。
+        界面看起来"照常打开"，只是更新卡永远是死的。
+   这四类都不是编译错误，全靠人肉发现太不划算，所以做成门禁。
 
-   检查四项：
+   检查五项：
      1. index.html 引用的站内资源，是否都在 assets.rs 的 lookup() 里登记
      2. app/ui/*.js 是否都挂进了 index.html（写了没挂 = 死文件）
      3. app/ui/*.css 是否都进了 check-motion.cjs 的 TARGETS
      4. 前端调用的 IPC 命令，是否都在 main.rs 的 dispatch() 里有分支
+     5. 前端取的 DOM id，是否真的存在（HTML 里声明，或由 JS 自己建）
 
    用法：node scripts/check-wiring.cjs
    ============================================================ */
@@ -177,14 +181,59 @@ for (const f of jsFiles) {
   }
 }
 
+// ---------- 5. 前端取的 DOM id → 真的存在 ----------
+//
+// 为什么值得单列一项：`$("#x").textContent = v` 在 x 不存在时会抛 TypeError，
+// 而这类代码通常写在某个 async 初始化的 try 里 —— **一个缺失的 id 会让整段
+// 初始化被跳过**，而界面看起来照常打开。2026-09-19 就是这么坏的：
+// `#about-count` 在某次重构里被删掉，app.js 仍在取它，于是设置页里排在它
+// 后面的更新卡（监听器、审计摘要、命令注册）全部没有生效 —— 烟测 7 项失败，
+// 而人眼看着一切正常。
+//
+// 判据：id 要么在 index.html 里声明，要么由某个 JS **自己建**（`x.id = "..."`、
+// `{ id: "..." }`）。两者都不满足 = 一定是错的。
+const htmlIds = new Set([...html.matchAll(/id="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
+/** JS 运行时自己创建的 id（help.js 的 card.id = "db-help-card" 这类） */
+const jsCreatedIds = new Set();
+for (const f of jsFiles) {
+  const code = fs.readFileSync(path.join(UI, f), 'utf8');
+  for (const m of code.matchAll(/\bid\s*[:=]\s*["']([A-Za-z0-9_-]+)["']/g)) {
+    jsCreatedIds.add(m[1]);
+  }
+}
+const referencedIds = new Map(); // id -> 第一个引用它的文件
+for (const f of jsFiles) {
+  const code = fs.readFileSync(path.join(UI, f), 'utf8');
+  for (const m of code.matchAll(/\$\(\s*["']#([A-Za-z0-9_-]+)["']\s*\)/g)) {
+    if (!referencedIds.has(m[1])) referencedIds.set(m[1], f);
+  }
+  for (const m of code.matchAll(/getElementById\(\s*["']([A-Za-z0-9_-]+)["']\s*\)/g)) {
+    if (!referencedIds.has(m[1])) referencedIds.set(m[1], f);
+  }
+}
+if (referencedIds.size < 20) {
+  problems.push(`只扫到 ${referencedIds.size} 个 DOM id 引用，扫描逻辑可能失效了`);
+}
+for (const [id, f] of referencedIds) {
+  if (!htmlIds.has(id) && !jsCreatedIds.has(id)) {
+    problems.push(
+      `app/ui/${f} 取了 #${id}，但 index.html 里没有这个元素、也没有哪个 JS 创建它 —— ` +
+        `取不到会抛 TypeError，若写在某个初始化 try 里，**排在它后面的初始化会全部被跳过**`
+    );
+  }
+}
+
 // ---------- 输出 ----------
-console.log(`接线检查 · 资源登记 ${registered.size} 个 · 站内引用 ${referenced.length} 个 · UI 脚本 ${jsFiles.length} 个 · 样式表 ${cssFiles.length} 份 · IPC ${ipcCommands.size} 条\n`);
+console.log(
+  `接线检查 · 资源登记 ${registered.size} 个 · 站内引用 ${referenced.length} 个 · UI 脚本 ${jsFiles.length} 个 · ` +
+    `样式表 ${cssFiles.length} 份 · IPC ${ipcCommands.size} 条 · DOM id ${referencedIds.size} 个\n`
+);
 if (notes.length) notes.forEach((n) => console.log(`· ${n}`));
 
 if (problems.length) {
   console.error('✘ 接线有问题：\n');
   problems.forEach((p) => console.error(`  - ${p}`));
-  console.error('\n修完再提交。这四项都不是编译错误，漏了只能靠这道门禁。');
+  console.error('\n修完再提交。这五项都不是编译错误，漏了只能靠这道门禁。');
   process.exit(1);
 }
-console.log('✔ 通过（引用都已登记、脚本都已挂载、样式表都进门禁、IPC 都有分支）');
+console.log('✔ 通过（引用都已登记、脚本都已挂载、样式表都进门禁、IPC 都有分支、DOM id 都存在）');

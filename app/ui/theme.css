@@ -1590,6 +1590,19 @@ code {
   color: var(--warning);
 }
 
+/* 更新检查 / 下载 / 替换的结果提示：三档配色。
+   「没检查」与「已经是最新」在文案上就是分开的两件事（见 app.js），
+   颜色只是让这个区分在扫一眼时也成立。 */
+#update-result[data-kind="ok"] {
+  color: var(--success);
+}
+#update-result[data-kind="warn"] {
+  color: var(--warning);
+}
+#update-result[data-kind="error"] {
+  color: var(--danger);
+}
+
 /* 卡片窄了就改成上下排 —— 这是"设置面板跟着自己的宽度走" */
 @container card (max-width: 520px) {
   .field {
