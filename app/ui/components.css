@@ -562,3 +562,86 @@
 .dbui-scroll-io[data-dbui-bottom="true"]::after {
   opacity: 1;
 }
+
+/* ============================================================
+   进度条（长任务）
+   ============================================================
+   动效纪律（scripts/check-motion.cjs 守着的三条）：
+     · 填充用 transform: scaleX()，不用 width —— 宽度每帧触发布局
+     · 时长一律走 --dur-* token，不写死毫秒
+     · 不确定态那段循环只 translateX，不碰任何布局属性
+   ============================================================ */
+.dbui-prog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.dbui-prog-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+.dbui-prog-title {
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  font-weight: 600;
+}
+.dbui-prog-pct {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  /* 等宽 + 右对齐：百分比跳动时不会把标题挤来挤去 */
+  font-variant-numeric: tabular-nums;
+  min-width: 3.5em;
+  text-align: right;
+}
+.dbui-prog-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--paper-2);
+  border: var(--line-w) solid var(--line);
+  overflow: hidden;
+}
+.dbui-prog-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transform-origin: left center;
+  /* 默认 0：调用方通过 set() 更新 --dbui-prog-p */
+  transform: scaleX(var(--dbui-prog-p, 0));
+  transition: transform var(--dur-normal) var(--ease-standard),
+    background-color var(--dur-normal) var(--ease-standard);
+}
+/* 不确定态：整条循环滑动。**只有确定进度时才停** —— 假装有进度是撒谎。 */
+.dbui-prog[data-state="moving"] .dbui-prog-fill {
+  transform: scaleX(0.28);
+  animation: dbui-prog-slide var(--dur-slower) var(--ease-standard) infinite;
+}
+@keyframes dbui-prog-slide {
+  0% {
+    transform: translateX(-100%) scaleX(0.28);
+  }
+  100% {
+    transform: translateX(360%) scaleX(0.28);
+  }
+}
+.dbui-prog[data-state="ok"] .dbui-prog-fill {
+  background: var(--success);
+}
+.dbui-prog[data-state="error"] .dbui-prog-fill {
+  background: var(--danger);
+}
+.dbui-prog-hint {
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  min-height: 1.4em; /* 预留给文字，免得它出现时把下面的东西顶下去 */
+}
+.dbui-prog[data-state="error"] .dbui-prog-hint {
+  color: var(--danger);
+}
+.dbui-prog[data-state="ok"] .dbui-prog-hint {
+  color: var(--success);
+}

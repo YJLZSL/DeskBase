@@ -667,6 +667,46 @@ pub struct Report {
     pub warnings: Vec<Warning>,
 }
 
+/// 把整个 CSV/TSV 读成字符串行。**供导入建表用**（`xlsx::walk_rows` 的文本分支）。
+///
+/// 与 `inspect` 的区别只有一个：`inspect` 只取前若干行做预览，这里要**整表**。
+/// 解码（`decode`）与解析（`detect_delimiter_ex` + `parse_limited`）走的是
+/// **同一套实现** —— 这个一致性不能分叉：分叉了，用户就会在"确认过预览"之后
+/// 拿到一份不一样的数据，而那是最难查的一类问题。
+///
+/// 返回值：`(行, 实际行数, 最大列数)`。行会按最大列数补齐，免得调用方到处判越界。
+pub fn read_rows(path: &Path) -> Result<(Vec<Vec<String>>, usize, usize)> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件信息：{e}"))?;
+    check_size(meta.len())?;
+    let bytes = std::fs::read(path).map_err(|e| format!("读不出文件内容：{e}"))?;
+    if bytes.is_empty() {
+        return Err("这个文件是空的（0 字节），没有可导入的内容。".into());
+    }
+    let enc = detect_encoding(&bytes);
+    if enc == Encoding::Unknown {
+        return Err("这个文件里全是 NUL 之类的控制字节，不像是文本表格。\
+                    如果它确实是 CSV，请先用 Excel 或记事本打开，另存为「CSV UTF-8」再导入。"
+            .into());
+    }
+    let (text, _) = decode(&bytes, enc);
+    let (delim, _) = detect_delimiter_ex(&text);
+    let (mut rows, stats) = parse_limited(&text, delim, MAX_ROWS);
+    if stats.over_limit {
+        return Err(format!(
+            "文件超过 {MAX_ROWS} 行，超过单次导入上限。建议按年份或按月份拆成几个文件再导。"
+        ));
+    }
+    if rows.is_empty() {
+        return Err("这个文件里没有可用的数据行（只有空行）。".into());
+    }
+    let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    for r in rows.iter_mut() {
+        r.resize(width, String::new());
+    }
+    let n = rows.len();
+    Ok((rows, n, width))
+}
+
 /// 检查一个 CSV 文件：探测编码与分隔符、解析、给出告警与预览。
 /// **只读，不写任何东西** —— 用户的原件永远安全。
 pub fn inspect(path: &Path) -> Result<Report> {

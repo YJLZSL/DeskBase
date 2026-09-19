@@ -391,3 +391,258 @@
     margin-right: var(--sp-1);
   }
 }
+
+/* ============================================================
+   导入向导（从 Excel / CSV）
+   ============================================================
+   配色原则：**警告用 --warning、错误用 --danger、成功用 --success**，
+   全部走语义 token（11 个主题都过了对比度门禁），不写死颜色。
+   ============================================================ */
+.db-imp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.db-imp-prog {
+  /* 进度条与向导正文之间留一口气，但别在它出现时让内容跳 */
+  padding-bottom: var(--sp-2);
+}
+
+/* ---------- 文件信息 ---------- */
+.db-imp-file {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--paper-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+}
+.db-imp-name {
+  font-weight: 600;
+  color: var(--ink);
+  word-break: break-all;
+}
+.db-imp-meta {
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 字段行 ---------- */
+.db-imp-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.db-imp-field > label {
+  font-size: var(--fs-sub);
+  color: var(--ink-2);
+}
+.db-imp-field input[type="text"],
+.db-imp-field select {
+  font: inherit;
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+/* ---------- 警告区 ---------- */
+.db-imp-warn {
+  border: var(--line-w) solid var(--warning);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.db-imp-warn-h {
+  font-weight: 600;
+  color: var(--warning);
+  margin-bottom: var(--sp-1);
+}
+.db-imp-warn-i {
+  margin-top: var(--sp-1);
+}
+.db-imp-warn-i .t {
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  line-height: var(--lh-body);
+}
+.db-imp-warn-i .s {
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+/* ---------- 小节标题 ---------- */
+.db-imp-sec-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: calc(var(--sp-1) * -1);
+}
+.db-imp-sec-h > span:first-child {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ---------- 预览表 ---------- */
+.db-imp-preview {
+  max-height: 42vh;
+  overflow: auto;
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+}
+.db-imp-preview table {
+  border-collapse: collapse;
+  font-size: var(--fs-aux);
+  width: 100%;
+}
+.db-imp-preview td {
+  padding: 2px var(--sp-2);
+  border-bottom: var(--line-w) solid var(--line);
+  white-space: nowrap;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.db-imp-preview td.no {
+  color: var(--ink-3);
+  text-align: right;
+  /* 行号是"点这一行"的唯一提示，要显眼但不能抢内容 */
+  background: var(--paper-2);
+  position: sticky;
+  left: 0;
+}
+.db-imp-preview td.more {
+  color: var(--ink-3);
+}
+.db-imp-preview td[data-empty="true"] {
+  /* 空单元格与"值是空串"在视觉上分开，与数据网格同一口径 */
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    color-mix(in srgb, var(--ink-3) 18%, transparent) 4px,
+    color-mix(in srgb, var(--ink-3) 18%, transparent) 5px
+  );
+}
+.db-imp-preview tr {
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.db-imp-preview tr:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.db-imp-preview tr[data-head="true"] {
+  /* 表头行：整行高亮 + 左侧一道强调条（色盲也能靠位置分辨） */
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.db-imp-preview tr[data-head="true"] td {
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.db-imp-preview tr[data-above="true"] td {
+  color: var(--ink-3);
+  font-style: italic;
+}
+.db-imp-skip {
+  font-size: var(--fs-aux);
+  color: var(--warning);
+}
+
+/* ---------- 列清单 ---------- */
+.db-imp-cols {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.db-imp-col {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.1fr) minmax(0, 1fr) auto auto;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: var(--sp-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+.db-imp-col[data-off="true"] {
+  /* 不导入的列淡化但没有消失：用户可能只是想先看看 */
+  opacity: 0.45;
+}
+.db-imp-col .nm,
+.db-imp-col .ty {
+  font: inherit;
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  background: var(--paper);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+.db-imp-col .db-imp-col-meta {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  min-width: 0;
+}
+.db-imp-col .why {
+  min-width: 0;
+}
+.db-imp-col .samples {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.db-imp-col .nn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* 置信度徽标：低置信度必须显眼 —— 那正是最可能毁数据的地方 */
+.db-imp-badge {
+  font-size: var(--fs-aux);
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-sm);
+  border: var(--line-w) solid var(--line);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.db-imp-badge[data-c="低"] {
+  color: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}
+.db-imp-badge[data-c="中"] {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+/* 窄屏：列行改成两列，避免六个控件挤成一条糊线 */
+@media (max-width: 720px) {
+  .db-imp-col {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .db-imp-col .db-imp-col-meta {
+    grid-column: 1 / -1;
+  }
+}

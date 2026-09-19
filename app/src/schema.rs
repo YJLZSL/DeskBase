@@ -99,12 +99,69 @@ pub enum ColType {
     Money,
     Boolean,
     Date,
+    /// ⚠️ `rename_all = "snake_case"` 给出的规范名是 **`date_time`**（不是 `datetime`）。
+    ///
+    /// 这个别名是修一个真实缺陷：界面（`db.js` 的类型下拉）传的是 `datetime`，
+    /// 而 serde 反序列化只认 `date_time` —— 于是**用户在新建表里选「日期时间」
+    /// 会直接报"未知的类型"**。而此前没有任何测试用这个类型建过表，所以一直没暴露。
+    ///
+    /// 为什么用 `alias` 而不是改前端文字：两者都要能认。协议名以 serde 为准没错，
+    /// 但"少一个下划线就整条链路失败"这种脆弱性不该留给下一个人。
+    #[serde(alias = "datetime")]
     DateTime,
     Json,
     Blob,
 }
 
 impl ColType {
+    /// 从 snake_case 名字解析回类型（`"text"` / `"money"` …）。
+    ///
+    /// 为什么要它：导入流程里，用户可以在界面上改每列的类型，传回来的是字符串。
+    /// 让界面传中文标签再在这里做映射是**更差**的选择 —— 标签是给人看的，
+    /// 随时可能改文案，改文案不该动协议。所以协议就用这一组稳定的机器名，
+    /// 与 `#[serde(rename_all = "snake_case")]` 的序列化形式**逐字一致**
+    /// （有测试钉住这两者不许分叉）。
+    pub fn from_name(s: &str) -> Option<ColType> {
+        // 归一化：去掉 `-` `_` 与空格，转小写。
+        // 这样 `date_time` 与 `datetime`、`DateTime` 与 `date-time` 都能认。
+        // 为什么放宽到这一步：类型名是**跨语言边界传的协议值**，而这一层
+        // 已经因为"少一个下划线"失败过一次（见 `ColType::DateTime` 上的注释）。
+        // 归一化把这类脆弱性一次性消掉，代价只是多几次字符串操作。
+        let t: String = s
+            .trim()
+            .chars()
+            .filter(|c| *c != '-' && *c != '_' && *c != ' ')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        match t.as_str() {
+            "text" => Some(ColType::Text),
+            "integer" => Some(ColType::Integer),
+            "real" => Some(ColType::Real),
+            "money" => Some(ColType::Money),
+            "boolean" => Some(ColType::Boolean),
+            "date" => Some(ColType::Date),
+            "datetime" => Some(ColType::DateTime),
+            "json" => Some(ColType::Json),
+            "blob" => Some(ColType::Blob),
+            _ => None,
+        }
+    }
+
+    /// 界面用的中文标签。**只在界面层用**，不进协议。
+    pub fn label(self) -> &'static str {
+        match self {
+            ColType::Text => "文本",
+            ColType::Integer => "数字（整数）",
+            ColType::Real => "数字（小数）",
+            ColType::Money => "金额",
+            ColType::Boolean => "是 / 否",
+            ColType::Date => "日期",
+            ColType::DateTime => "日期时间",
+            ColType::Json => "JSON（进阶）",
+            ColType::Blob => "二进制（进阶）",
+        }
+    }
+
     /// 拼进 `CREATE TABLE` 的声明类型。
     pub fn declared_type(self) -> &'static str {
         match self {

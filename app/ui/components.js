@@ -870,6 +870,116 @@
   }
 
   // ============================================================
+  // 进度条（长任务的状态与进度）
+  // ============================================================
+
+  /**
+   * 一条会动的进度条 + 状态文字。给"要跑一会儿"的操作用（导入数据、批量转换）。
+   *
+   * ## 为什么要它，而不是继续用一句"正在处理…"
+   *
+   * 一句静止的文字在长任务里等于没有信息：用户看不出"在动"还是"死了"。
+   * 进度条的价值不在于好看，而在于**区分这两件事**。
+   *
+   * ## 三个状态各有各的颜色，而且都必须能被看见
+   *
+   * | 状态 | 颜色 | 什么时候 |
+   * |------|------|---------|
+   * | 进行中 | `--accent` | 有确定进度时按比例填充 |
+   * | 不确定 | `--accent` 循环滑动 | 还不知道总量（例如"正在读文件"） |
+   * | 成功 | `--success` | 完成后停在满格，不再动 |
+   * | 失败 | `--danger` | 填充条变红并停住，并给出下一步 |
+   *
+   * 颜色只是**加强**：状态文字始终写着"已完成 3,000 / 12,000 行"这种具体量，
+   * 色盲用户与高对比主题下也能读懂（`--accent` 这类语义 token 在 11 个主题里
+   * 都过了对比度门禁）。
+   *
+   * ## 动效只动 transform
+   *
+   * 填充用 `transform: scaleX()` 而不是 `width` —— 后者每帧触发布局，
+   * 前者走合成层。这一条是机器门禁（`check-motion.cjs`）在守的，不是自律。
+   * 不确定态用一段循环的 `translateX` 动画；动效档位调到「关」时，
+   * `motion.css` 会把时长压到 1ms，进度条就变成"静态但位置正确"——
+   * 信息（进度数值与状态色）一点不丢。
+   *
+   * @param {{title?: string, hint?: string, indeterminate?: boolean}} [opts]
+   * @returns {{set: Function, done: Function, fail: Function, remove: Function, el: Element}}
+   */
+  function progress(opts) {
+    injectStyles();
+    const cfg = opts || {};
+
+    const root = el("div", { class: "dbui-prog", role: "status", "aria-live": "polite" });
+    const head = el("div", { class: "dbui-prog-head" });
+    const titleEl = el("span", { class: "dbui-prog-title" }, cfg.title || "正在处理…");
+    const pctEl = el("span", { class: "dbui-prog-pct" }, "");
+    head.appendChild(titleEl);
+    head.appendChild(pctEl);
+
+    const track = el("div", { class: "dbui-prog-track" });
+    const fill = el("div", { class: "dbui-prog-fill" });
+    track.appendChild(fill);
+
+    const hintEl = el("div", { class: "dbui-prog-hint" }, cfg.hint || "");
+    root.appendChild(head);
+    root.appendChild(track);
+    root.appendChild(hintEl);
+
+    const setState = (s) => {
+      root.dataset.state = s;
+    };
+    setState(cfg.indeterminate ? "moving" : "idle");
+
+    /** 0..1 的数字 → 填充比例。拒绝 NaN/负数/超过 1，免得把条子拉坏。 */
+    const clamp01 = (v) => {
+      const n = Number(v);
+      if (!isFinite(n)) return 0;
+      return Math.max(0, Math.min(1, n));
+    };
+
+    return {
+      el: root,
+
+      /**
+       * 更新进度。`fraction` 省略 = 不确定态（滑动）。
+       * @param {number} [fraction] 0..1
+       * @param {string} [label] 覆盖状态文字；不传则用百分比
+       */
+      set(fraction, label) {
+        if (fraction == null) {
+          setState("moving");
+          pctEl.textContent = "";
+        } else {
+          const f = clamp01(fraction);
+          setState("run");
+          fill.style.setProperty("--dbui-prog-p", String(f));
+          pctEl.textContent = Math.round(f * 100) + "%";
+        }
+        if (label != null) hintEl.textContent = label;
+      },
+
+      /** 成功：停在满格。文字要说清"做完了什么"，不能只说"成功"。 */
+      done(label) {
+        setState("ok");
+        fill.style.setProperty("--dbui-prog-p", "1");
+        pctEl.textContent = "100%";
+        hintEl.textContent = label || "完成";
+      },
+
+      /** 失败：条子变红停住，并给下一步（只说"失败"等于没说）。 */
+      fail(label) {
+        setState("error");
+        pctEl.textContent = "";
+        hintEl.textContent = label || "出错了，请重试";
+      },
+
+      remove() {
+        if (root.parentNode) root.parentNode.removeChild(root);
+      },
+    };
+  }
+
+  // ============================================================
   // 导出
   // ============================================================
   window.DeskBaseUI = {
@@ -881,6 +991,7 @@
     switchControl,
     tooltip,
     scrollShadow,
+    progress,
   };
 
   // 默认就把样式注进去：调用方只写一个 <script src="components.js"> 也能用。

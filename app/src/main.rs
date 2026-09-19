@@ -15,20 +15,13 @@ mod capture;
 mod convert;
 mod csv_import;
 mod db;
+mod excel_import;
 mod import_pipeline;
 mod workspace;
 mod render;
 mod schema;
-// 导入计划内核（表头行与字段类型推断）：**调用方还没接上** ——
-// 读文件那一层（`xlsx.rs::plan`）与 IPC 命令要在下一步才写。
-//
-// 所以这里刻意**只在测试构建里编译**：
-//   · 它的 29 个测试照跑（测试是这个模块当前的全部价值）
-//   · release 构建里不存在这些符号 → 不会为了"零警告"去加 allow
-//   · 更重要的是**不会被误认为已经生效** —— 半接线的模块比没接线更危险（D-044）
-//
-// **启用方式**：接线完成时把这一行改回 `mod import_plan;`。
-#[cfg(test)]
+// 导入计划内核（表头行与字段类型推断）。**已接线**（2026-09-19）：
+// `excel_import::build_plan` 调它生成列建议，界面在导入向导里显示并允许用户改。
 mod import_plan;
 mod updater;
 mod xlsx;
@@ -250,6 +243,14 @@ struct AppState {
     smoke_script: Option<PathBuf>,
     /// 烟测是否已经注入过。自检在 boot 末尾调一次，但防重入比"赌它只来一次"便宜。
     smoke_fired: AtomicBool,
+    /// 端到端验收用的源文件令牌（`DESKBASE_E2E_SOURCE` 指定）。
+    ///
+    /// **只在设置了那个环境变量时才有值**（也就是只有测试驱动会设它）。
+    /// 存在的理由：端到端验收要在真实 WebView 里跑一遍"导入一个真实文件"，
+    /// 而文件路径**必须由 Rust 侧持有** —— 让渲染层传路径就等于给了它
+    /// "读任意文件"的能力。所以路径由启动进程给出、在这里换成一次性令牌，
+    /// 前端只能拿到令牌（`app.e2eSource`，不接受任何参数）。
+    e2e_source: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -352,6 +353,21 @@ fn main() -> wry::Result<()> {
     // 由 scripts/ui-smoke.cjs 驱动；**正常启动完全不经过这里**（值为 None）。
     let ui_smoke = std::env::var("DESKBASE_UI_SMOKE").ok().map(PathBuf::from);
 
+    // 端到端验收的源文件（见 `AppState::e2e_source`）：路径由**启动进程**给出，
+    // 在一次性的令牌命令里换成令牌交给前端。未设置时是 None，那条 IPC 直接拒绝。
+    //
+    // ⚠️ 这里存的必须是**路径原文**，不是令牌 —— 令牌由 `app.e2eSource` 每次现发
+    // （验收里要模拟"同一个文件导两次"来验证重名保护，而收尾会把令牌用掉）。
+    // 开发时这里一度写成了存令牌，症状是"打不开文件：系统找不到指定的文件"：
+    // 拿一个 ULID 当路径去开。**变量名与它装的东西必须一致。**
+    let e2e_source: Option<String> = std::env::var("DESKBASE_E2E_SOURCE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| {
+            log_line(&data_dir, &format!("端到端验收：源文件已登记 {p}"));
+            p
+        });
+
     // 构建期用的图标光栅化模式，正常启动完全不经过这里
     if let Ok(out) = std::env::var("DESKBASE_RENDER") {
         return render::run(&PathBuf::from(out), &data_dir);
@@ -387,6 +403,7 @@ fn main() -> wry::Result<()> {
         proxy: Mutex::new(Some(event_loop.create_proxy())),
         smoke_script: ui_smoke,
         smoke_fired: AtomicBool::new(false),
+        e2e_source: Mutex::new(e2e_source),
     });
     // 窗口与任务栏图标：用 tools/icon 生成的 256×256 原始 RGBA 直接构造，
     // 不需要在 Rust 侧解码 PNG（见 tools/icon/build-icons.cjs）
@@ -1235,6 +1252,237 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }))
         }
 
+        // 字段类型清单：**唯一来源是 Rust 的 `ColType`**。
+        //
+        // 为什么要有这条 IPC：界面（建表向导、导入向导）都需要"9 种类型 + 中文标签"。
+        // 以前它抄在 `db.js` 的 `TYPES` 数组里 —— 那就等于同一份清单有两个来源，
+        // 加一种类型时会漏改一边（而症状是"下拉框里没有那个选项"，很难联想到协议）。
+        // `name` 是协议值（snake_case，与 `ColType::from_name` 逐字一致），
+        // `label` 只用于显示。
+        "schema.columnTypes" => {
+            use schema::ColType::*;
+            let all = [
+                Text, Integer, Real, Money, Boolean, Date, DateTime, Json, Blob,
+            ];
+            let list: Vec<serde_json::Value> = all
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": serde_json::to_value(t).unwrap_or_default(),
+                        "label": t.label(),
+                        "decl": t.declared_type(),
+                    })
+                })
+                .collect();
+            ok(id, serde_json::json!({ "types": list }))
+        }
+
+        // ============================================================
+        // Excel / CSV 导入建表（v0.3.0 第一优先级）
+        // ============================================================
+        //
+        // 三段式，与 `convert.*` 同一套纪律：
+        //   pickAndPlan → 选文件 + 给建议（**路径只留在 Rust 侧**，只回一个令牌）
+        //   preview     → 用户改了工作表/表头行之后的重新建议（只读前若干行）
+        //   run         → 真正落库
+        "import.pickAndPlan" => {
+            let picked = rfd::FileDialog::new()
+                .set_title("选择一个表格文件（Excel 或 CSV）")
+                .add_filter("表格文件", &["xlsx", "xls", "xlsm", "csv", "tsv", "txt"])
+                .add_filter("Excel", &["xlsx", "xls", "xlsm"])
+                .add_filter("CSV / 文本", &["csv", "tsv", "txt"])
+                .pick_file();
+            let Some(path) = picked else {
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+            let file_name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            match excel_import::build_plan(&path, 0) {
+                Ok(plan) => {
+                    let token =
+                        excel_import::stash(excel_import::Source { path: path.clone() });
+                    log_line(
+                        &state.data_dir,
+                        &format!("导入：已选文件 {file_name}，识别出 {} 列", plan.columns.len()),
+                    );
+                    ok(
+                        id,
+                        serde_json::json!({ "cancelled": false, "planId": token, "plan": plan }),
+                    )
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 用户改了工作表或表头行 → 重新给建议。**只读前若干行**，不读整表。
+        "import.preview" => {
+            let plan_id = req.args.get("planId").and_then(|v| v.as_str()).unwrap_or("");
+            let path = match excel_import::source(plan_id) {
+                Ok(p) => p,
+                Err(e) => return err(id, e),
+            };
+            let sheet = req
+                .args
+                .get("sheetIndex")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            match excel_import::build_plan(&path, sheet) {
+                Ok(plan) => ok(id, serde_json::json!({ "plan": plan })),
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 按用户最终确认的列与类型落库。
+        //
+        // 三段式（begin / chunk / finish）：**由前端驱动循环**，每批一次 IPC。
+        // 为什么不一口气写完：IPC 处理器在主线程上，一次写 20 万行会把界面连同
+        // 进度条一起冻住 —— 那比没有进度条更糟（进度条暗示"还在动"，实际是死的）。
+        "import.begin" => {
+            let plan_id = req.args.get("planId").and_then(|v| v.as_str()).unwrap_or("");
+            let path = match excel_import::source(plan_id) {
+                Ok(p) => p,
+                Err(e) => return err(id, e),
+            };
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if table.is_empty() {
+                return err(id, "请先给这张表起个名字");
+            }
+            let sheet = req
+                .args
+                .get("sheetIndex")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let header_row = req
+                .args
+                .get("headerRow")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            // 解析失败要说清是"格式不对"，不能吞掉当成"没选列"（踩过一次）
+            let columns: Vec<excel_import::FinalColumn> = match req.args.get("columns") {
+                Some(v) => match serde_json::from_value(v.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return err(
+                            id,
+                            format!("列的格式不对（{e}）—— 请重新打开导入向导再试"),
+                        )
+                    }
+                },
+                None => Vec::new(),
+            };
+
+            let t0 = std::time::Instant::now();
+            let guard = match state.db.lock() {
+                Ok(g) => g,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            match excel_import::begin_import(
+                guard.conn(),
+                &path,
+                sheet,
+                header_row,
+                &table,
+                &columns,
+            ) {
+                Ok((session_id, begun)) => {
+                    log_line(
+                        &state.data_dir,
+                        &format!(
+                            "导入开始：表「{table}」，待写 {} 行（读文件用了 {} ms）",
+                            begun.total,
+                            t0.elapsed().as_millis()
+                        ),
+                    );
+                    ok(
+                        id,
+                        serde_json::json!({ "sessionId": session_id, "begun": begun }),
+                    )
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 写一批。前端循环调它，直到 `done`。
+        "import.chunk" => {
+            let sid = req
+                .args
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let batch = req
+                .args
+                .get("batch")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2000) as usize;
+            let mut guard = match state.db.lock() {
+                Ok(g) => g,
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            match excel_import::write_chunk(guard.conn_mut(), sid, batch) {
+                Ok(c) => ok(id, serde_json::to_value(c).unwrap_or_default()),
+                Err(e) => {
+                    // 写不进去就把表删掉，别留半张（用户会以为那张表是好的）
+                    let _ = excel_import::abort_import(guard.conn(), sid);
+                    err(id, format!("{e}\n这批数据已经清理掉，库里没有留下半张表。"))
+                }
+            }
+        }
+
+        // 收尾：拿到最终结果，并丢掉来源（不再握着文件路径）。
+        "import.finish" => {
+            let sid = req
+                .args
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let plan_id = req.args.get("planId").and_then(|v| v.as_str()).unwrap_or("");
+            let skipped_above = req
+                .args
+                .get("skippedAbove")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            match excel_import::finish_import(sid, skipped_above) {
+                Ok(out) => {
+                    let _guard = state.db.lock().ok();
+                    log_line(
+                        &state.data_dir,
+                        &format!("导入完成：{} 行 → 表「{}」", out.inserted, out.table),
+                    );
+                    excel_import::drop_source(plan_id);
+                    ok(id, serde_json::to_value(out).unwrap_or_default())
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // 用户取消或出错：把表删掉，不留半张。
+        "import.abort" => {
+            let sid = req
+                .args
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let _guard = state.db.lock().ok();
+            match _guard.as_ref() {
+                Some(g) => match excel_import::abort_import(g.conn(), sid) {
+                    Ok(t) => {
+                        log_line(&state.data_dir, &format!("导入已取消，表「{t}」已清理"));
+                        ok(id, serde_json::json!({ "cleaned": t }))
+                    }
+                    Err(e) => err(id, e),
+                },
+                None => err(id, "数据库锁失败"),
+            }
+        }
+
         // 列出未跑完的导入作业 —— 上次崩在中间的作业会在这里出现，
         // 让用户看到"已导入多少、还剩多少"，而不是自动回滚
         "import.pending" => {
@@ -1860,6 +2108,38 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             ok(id, serde_json::json!({ "written": true }))
         }
 
+        // 端到端验收专用的源文件令牌（见 `AppState::e2e_source`）。
+        //
+        // ⚠️ **刻意不接受任何参数**：它只给出"启动进程通过环境变量指定的那个文件"
+        // 的令牌。渲染层拿不到也传不进路径 —— 否则它就有了"读任意文件"的能力，
+        // 而那是本项目的核心安全属性之一（docs/08「渲染层无文件系统直访」）。
+        // 未设置环境变量时（正常启动）这条直接拒绝。
+        //
+        // 每次调用都**重新登记一份**（返回新令牌）：验收里要模拟"同一个文件导两次"
+        // 来验证重名保护，而第一次导入收尾时会把令牌用掉。
+        "app.e2eSource" => {
+            let path = match state.e2e_source.lock() {
+                Ok(g) => g.as_ref().map(PathBuf::from),
+                Err(_) => None,
+            };
+            match path {
+                Some(p) => {
+                    let t = excel_import::stash(excel_import::Source { path: p });
+                    // `expectRows` 由**启动进程**给出（不是后端算出来的）：
+                    // 压力测试要用它做独立断言 —— 期望值如果来自被测方，就成了自己证明自己。
+                    let expect = std::env::var("DESKBASE_E2E_ROWS")
+                        .ok()
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                        .unwrap_or(0);
+                    ok(
+                        id,
+                        serde_json::json!({ "token": t, "expectRows": expect }),
+                    )
+                }
+                None => err(id, "端到端验收模式未开启（DESKBASE_E2E_SOURCE 未设置）"),
+            }
+        }
+
         other => err(id, format!("未知命令: {other}")),
     }
 }
@@ -2267,6 +2547,7 @@ mod acceptance {
             proxy: Mutex::new(None),
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
+            e2e_source: Mutex::new(None),
         });
         (state, dir)
     }
@@ -2679,6 +2960,7 @@ mod acceptance {
             proxy: Mutex::new(None),
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
+            e2e_source: Mutex::new(None),
         };
         let info2 = call(&state2, "app.info", json!({})).unwrap();
         assert_eq!(
@@ -2721,6 +3003,169 @@ mod acceptance {
             page["rows"][0][3].as_i64(),
             Some(1234),
             "金额默认值应按「元」换算成分：{page}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **九种字段类型都必须能建出来**（走真正的 IPC 入口）。
+    ///
+    /// 为什么专门加这一条：2026-09-19 发现「日期时间」这个类型**选了会失败** ——
+    /// serde 的 `rename_all = "snake_case"` 把 `DateTime` 序列化成 `date_time`，
+    /// 而界面传的是 `datetime`，反序列化直接报"未知的类型"。此前没有任何测试
+    /// 用这个类型建过表，所以它一直躺在那里没人碰。
+    /// **类型清单是一份跨语言协议，每一种都要有覆盖。**
+    #[test]
+    fn 九种字段类型都能建表() {
+        let (state, dir) = fixture("types");
+
+        // 类型清单来自 Rust（唯一来源），界面就是按这批名字传的
+        let types = call(&state, "schema.columnTypes", json!({})).unwrap();
+        let names: Vec<String> = types["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 9, "类型清单应当有 9 项：{names:?}");
+
+        for (i, ty) in names.iter().enumerate() {
+            let tname = format!("类型测试{i}");
+            call(
+                &state,
+                "schema.createTable",
+                json!({ "spec": { "name": tname, "comment": null,
+                                   "columns": [col("值", ty)] } }),
+            )
+            .unwrap_or_else(|e| panic!("类型「{ty}」建表失败：{e}"));
+            let info = call(&state, "schema.getTable", json!({ "name": tname })).unwrap();
+            let decl = info["columns"][0]["decl_type"].as_str().unwrap_or("");
+            assert!(!decl.is_empty(), "类型「{ty}」的声明类型是空的");
+        }
+
+        // 别名也要继续被接受（界面历史写法，见 ColType::DateTime 的注释）
+        call(
+            &state,
+            "schema.createTable",
+            json!({ "spec": { "name": "别名测试", "comment": null,
+                               "columns": [col("值", "datetime")] } }),
+        )
+        .expect("datetime 这个写法必须继续被接受");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 导入建表：**走真实 IPC 的端到端路径**（选文件之后的 preview + run）。
+    ///
+    /// 用 CSV 打底：它是最容易在测试里生成的表格格式，且与 xlsx 走的是
+    /// 并列的两条读路径（`csv_import::read_rows`）—— 这条覆盖了，xlsx 那侧
+    /// 由 `xlsx.rs` 自己的往返测试覆盖。
+    #[test]
+    fn 导入建表走完整路径() {
+        let (state, dir) = fixture("import");
+        // 造一个带"表头上面还有标题行"的 CSV —— 这是中文台账最常见的形态
+        let csv = dir.join("客户台账.csv");
+        std::fs::write(
+            &csv,
+            "客户台账\n2026-09-01 导出\n客户名称,联系电话,金额,是否结清\n甲,13800000000,1234.50,是\n乙,13900000000,88,否\n",
+        )
+        .unwrap();
+
+        // 直接往来源仓库里塞一条（跳过原生文件对话框 —— 单测里点不了它）
+        let token = crate::excel_import::stash(crate::excel_import::Source { path: csv.clone() });
+
+        // ① 取计划
+        let p = call(
+            &state,
+            "import.preview",
+            json!({ "planId": token, "sheetIndex": 0 }),
+        )
+        .unwrap();
+        let plan = &p["plan"];
+        assert_eq!(plan["header_row"], 2, "表头应在第 3 行：{plan}");
+        assert_eq!(plan["skipped_above"], 2, "上面两行必须如实报告会被跳过");
+        assert_eq!(plan["data_rows"], 2);
+        let cols = plan["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 4);
+        assert_eq!(cols[1]["ty"], "text", "电话列必须是文本");
+        assert_eq!(cols[2]["ty"], "money");
+
+        // ② 按计划落库（把建议原样交回去）—— **走界面的真实三段路径**
+        let final_cols: Vec<serde_json::Value> = cols
+            .iter()
+            .map(|c| {
+                json!({
+                    "source_index": c["source_index"],
+                    "name": c["name"],
+                    "ty": c["ty"],
+                    "not_null": false,
+                })
+            })
+            .collect();
+        let beg = call(
+            &state,
+            "import.begin",
+            json!({ "planId": token, "table": "客户台账", "sheetIndex": 0,
+                     "headerRow": 2, "columns": final_cols }),
+        )
+        .unwrap();
+        let sid = beg["sessionId"].as_str().unwrap().to_string();
+        assert_eq!(beg["begun"]["total"], 2, "进度条的分母：{beg}");
+        assert_eq!(beg["begun"]["skipped_above"], 2);
+
+        // 循环写批（界面就是这么做的）
+        let mut last = serde_json::Value::Null;
+        for _ in 0..10 {
+            last = call(&state, "import.chunk", json!({ "sessionId": sid })).unwrap();
+            if last["done"] == true {
+                break;
+            }
+        }
+        assert_eq!(last["written"], 2, "应当写完 2 行：{last}");
+        assert_eq!(last["done"], true);
+
+        let out = call(
+            &state,
+            "import.finish",
+            json!({ "sessionId": sid, "planId": token, "skippedAbove": 2 }),
+        )
+        .unwrap();
+        assert_eq!(out["inserted"], 2, "应当导入 2 行：{out}");
+        assert_eq!(out["skipped_above"], 2);
+
+        // ③ 数据真的在库里，且金额按「分」存
+        let page = call(&state, "schema.pageRows", json!({"table":"客户台账","limit":10})).unwrap();
+        assert_eq!(page["rows"].as_array().unwrap().len(), 2);
+        // columns = [_rowid, 客户名称, 联系电话, 金额, 是否结清]
+        assert_eq!(page["rows"][0][1], "甲");
+        assert_eq!(page["rows"][0][3].as_i64(), Some(123450), "1234.50 元 = 123450 分");
+        assert_eq!(page["rows"][0][4].as_i64(), Some(1), "「是」应存成 1");
+        // 表头上面那两行绝不能进库
+        for r in page["rows"].as_array().unwrap() {
+            assert_ne!(r[1].as_str().unwrap_or(""), "客户台账");
+        }
+
+        // ④ 令牌用掉就该失效（来源被丢弃，不再握着文件路径）
+        let again = call(
+            &state,
+            "import.begin",
+            json!({ "planId": token, "table": "又一张", "sheetIndex": 0,
+                     "headerRow": 2, "columns": [] }),
+        );
+        assert!(again.is_err(), "用完的令牌不该还能用");
+
+        // ⑤ 唯一约束：同一份数据导两次要明确拒绝（第二次换个表名）
+        let token2 = crate::excel_import::stash(crate::excel_import::Source { path: csv.clone() });
+        let dup = call(
+            &state,
+            "import.begin",
+            json!({ "planId": token2, "table": "客户台账", "sheetIndex": 0,
+                     "headerRow": 2, "columns": final_cols }),
+        );
+        assert!(dup.is_err(), "重名必须拒绝而不是覆盖");
+        assert!(
+            dup.unwrap_err().contains("已经有一张叫"),
+            "报错要告诉用户为什么"
         );
 
         let _ = std::fs::remove_dir_all(dir);

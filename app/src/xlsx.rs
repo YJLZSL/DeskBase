@@ -354,6 +354,194 @@ fn fmt_number(f: f64) -> String {
 }
 
 // ============================================================
+// 导入：把整表读成字符串
+// ============================================================
+//
+// `inspect` 只给前 8 行让人"看一眼"。导入建表要的是**整表**，所以另开这一组。
+//
+// 为什么提供两条路（`read_rows` 与 `for_each_row`）：大文件的峰值内存几乎
+// 全在"把整张表转成字符串"这一步。预览只要几十行，用 `read_rows` 带 limit；
+// 真正落库时用 `for_each_row` 逐行回调 —— 一次只持有一行，峰值只剩 calamine
+// 自己那份（它无论如何都要把 sheet 读进来）。
+//
+// 两条路的**单元格转换必须是同一套**（都走 `cell_text`）：
+// 预览看到什么、导进去就是什么。这一条如果分叉，用户会在"预览明明是对的"
+// 之后拿到一份不一样的数据 —— 属于最难查的那类问题。
+
+/// 一次「读成字符串」的结果。
+pub struct SheetRows {
+    pub rows: Vec<Vec<String>>,
+    /// 表的实际行数（不受 `limit` 影响）—— 界面要显示"共 N 行"
+    pub total_rows: usize,
+    pub total_cols: usize,
+    /// 因为 `limit` 只读了一部分
+    pub truncated: bool,
+    pub warnings: Vec<Warning>,
+}
+
+/// 工作簿里的工作表名。CSV 这类纯文本没有工作表概念，返回空表。
+pub fn sheet_names(path: &Path) -> Result<Vec<String>> {
+    if sniff(path)? == FileKind::Text {
+        return Ok(Vec::new());
+    }
+    let wb = open_workbook_auto(path)
+        .map_err(|e| format!("打不开这个表格文件：{e}\n如果是老版本 .xls，请先另存为 .xlsx。"))?;
+    Ok(wb.sheet_names().to_vec())
+}
+
+/// 读第 `sheet_index` 张表（CSV 忽略这个参数）。`limit` 为 `None` 表示读全表。
+pub fn read_rows(path: &Path, sheet_index: usize, limit: Option<usize>) -> Result<SheetRows> {
+    let mut out = SheetRows {
+        rows: Vec::new(),
+        total_rows: 0,
+        total_cols: 0,
+        truncated: false,
+        warnings: Vec::new(),
+    };
+    let mut push = |r: Vec<String>| -> Result<()> {
+        if limit.map(|l| out.rows.len() < l).unwrap_or(true) {
+            out.rows.push(r);
+        } else {
+            out.truncated = true;
+        }
+        Ok(())
+    };
+    walk_rows(path, sheet_index, &mut out.warnings, &mut out.total_rows, &mut out.total_cols, &mut push)?;
+    Ok(out)
+}
+
+/// 逐行遍历，**不把整表攒在内存里**。回调返回 `Err` 即中止（用于"插到一半失败"）。
+pub fn for_each_row<F>(
+    path: &Path,
+    sheet_index: usize,
+    mut f: F,
+) -> Result<(usize, usize, Vec<Warning>)>
+where
+    F: FnMut(usize, &[String]) -> Result<()>,
+{
+    let mut warnings = Vec::new();
+    let (mut total_rows, mut total_cols) = (0usize, 0usize);
+    let mut row_no = 0usize;
+    let mut cb = |r: Vec<String>| -> Result<()> {
+        let r = r;
+        let res = f(row_no, &r);
+        row_no += 1;
+        res
+    };
+    walk_rows(path, sheet_index, &mut warnings, &mut total_rows, &mut total_cols, &mut cb)?;
+    Ok((total_rows, total_cols, warnings))
+}
+
+/// 两条读路径的共同实现：把 sheet 逐行转成字符串交给 `sink`。
+///
+/// 闸门（体积/行数/单元格数）在这一层，与 `inspect` 保持一致 —— 预览能拦住
+/// 的东西，导入不能放过去。
+fn walk_rows<F>(
+    path: &Path,
+    sheet_index: usize,
+    warnings: &mut Vec<Warning>,
+    total_rows: &mut usize,
+    total_cols: &mut usize,
+    sink: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Result<()>,
+{
+    let kind = sniff(path)?;
+    let meta = std::fs::metadata(path).map_err(|e| format!("读不到文件信息：{e}"))?;
+
+    if kind == FileKind::Html {
+        return Err(
+            "这个文件其实是 HTML 表格，不是真正的 Excel 文件。\
+             请用 Excel 或 WPS 打开它，另存为 .xlsx 之后再导入。"
+                .into(),
+        );
+    }
+
+    // ---- CSV / TSV：交给 `csv_import` 自己的读路径 ----
+    // 为什么不在本模块里重写一遍解码与解析：**同一份数据只能有一套解析实现**。
+    // 预览走 `csv_import::inspect`、导入走 `csv_import::read_rows`，两者共用
+    // 同一个 `decode` + `parse_limited`；在这里另写一份，就等于把"预览与导入
+    // 不一致"这个坑埋进代码里。
+    if kind == FileKind::Text {
+        let (rows, n, w) = crate::csv_import::read_rows(path)?;
+        *total_rows = n;
+        *total_cols = w;
+        for r in rows {
+            sink(r)?;
+        }
+        return Ok(());
+    }
+
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "文件 {:.1} MB，超过单次导入上限 {} MB。建议按年份拆成几个文件再导。",
+            meta.len() as f64 / 1048576.0,
+            MAX_FILE_BYTES / 1048576
+        ));
+    }
+
+    let mut wb = open_workbook_auto(path)
+        .map_err(|e| format!("打不开这个表格文件：{e}\n如果是老版本 .xls，请先另存为 .xlsx。"))?;
+    let names = wb.sheet_names().to_vec();
+    let name = names
+        .get(sheet_index)
+        .ok_or_else(|| format!("这张工作簿没有第 {} 张表（共 {} 张）", sheet_index + 1, names.len()))?
+        .clone();
+    let range = wb
+        .worksheet_range(&name)
+        .map_err(|e| format!("读不出工作表「{name}」：{e}"))?;
+    let (h, w) = (range.height(), range.width());
+
+    if h.saturating_mul(w) > MAX_CELLS {
+        return Err(format!(
+            "工作表「{name}」有 {h} 行 × {w} 列（约 {:.0} 万个单元格），超过单次导入上限 {} 万。\
+             这通常意味着表里有大片空白格式区。建议在 Excel 里删掉数据区右侧与下方的空行空列，另存后再导。",
+            h as f64 * w as f64 / 10000.0,
+            MAX_CELLS / 10000
+        ));
+    }
+    if h > MAX_ROWS {
+        return Err(format!(
+            "工作表「{name}」有 {h} 行，超过单次导入上限 {MAX_ROWS} 行。建议按年份拆成几个文件。"
+        ));
+    }
+    if kind == FileKind::Ole2 && h >= XLS_ROW_LIMIT {
+        warnings.push(Warning {
+            kind: "xls_row_limit".into(),
+            count: h,
+            samples: vec![format!("{name}: {h} 行")],
+            advice: format!(
+                "这是老的 .xls 格式，单表上限正好是 {XLS_ROW_LIMIT} 行。\
+                 行数顶着上限说明**原始文件在当年导出时就可能已经被截断过**，\
+                 这份数据本身可能不完整。建议回头核对原始系统。"
+            ),
+        });
+    }
+    let merged = merged_region_count(&mut wb, &name);
+    if merged > 0 {
+        warnings.push(Warning {
+            kind: "merged_cells".into(),
+            count: merged,
+            samples: vec![format!("{name}: {merged} 处合并")],
+            advice: "这张表有合并单元格。**合并区域只有左上角那一格有值** —— \
+                     如果某一列（比如「客户」）看着是满的，导入后可能只有第一行有值。"
+                .into(),
+        });
+    }
+
+    *total_rows = h;
+    *total_cols = w;
+    for r in 0..h {
+        let row: Vec<String> = (0..w)
+            .map(|c| cell_text(range.get((r, c)).unwrap_or(&Data::Empty)))
+            .collect();
+        sink(row)?;
+    }
+    Ok(())
+}
+
+// ============================================================
 // 导出
 // ============================================================
 

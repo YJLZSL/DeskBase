@@ -233,7 +233,7 @@ function main() {
 
   if (!argv.includes('--no-build')) {
     console.log('\n先构建应用（光栅化要用它）…');
-    const b = spawnSync(NODE, [path.join(ROOT, 'scripts', 'build.cjs')], {
+    const b = spawnSync(NODE, [path.join(ROOT, 'scripts', 'build.cjs')], { windowsHide: true,
       encoding: 'utf8', timeout: 1800000, cwd: ROOT,
     });
     const tail = (b.stdout || '').trim().split('\n').slice(-3).join('\n');
@@ -247,7 +247,7 @@ function main() {
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deskbase-icon-'));
   console.log('\n光栅化（应用内 WebView2）→ ' + tmpDir);
-  const r = spawnSync(EXE, [], {
+  const r = spawnSync(EXE, [], { windowsHide: true,
     env: { ...process.env, DESKBASE_RENDER: tmpDir, DESKBASE_DATA_DIR: tmpDir },
     encoding: 'utf8', timeout: 180000,
   });

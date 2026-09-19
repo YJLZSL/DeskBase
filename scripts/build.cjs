@@ -20,6 +20,7 @@
  *   node scripts/build.cjs --run      构建后启动
  *   node scripts/build.cjs --check    只做 cargo check（最快）
  *   node scripts/build.cjs --smoke    构建后跑界面烟测（真实点击，见 ui-smoke.cjs）
+ *   node scripts/build.cjs --e2e      构建后跑端到端验收（真实导入一条链路，见 tests/e2e-import.cjs）
  */
 
 const { spawnSync } = require('child_process');
@@ -153,7 +154,7 @@ function msvcEnv() {
   const bat = path.join(os.tmpdir(), 'deskbase-vcvars.bat');
   fs.writeFileSync(bat, `@echo off\r\ncall "${VC_VARS}"\r\nset\r\n`, 'ascii');
 
-  const r = spawnSync('cmd.exe', ['/c', bat], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  const r = spawnSync('cmd.exe', ['/c', bat], { windowsHide: true, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   if (!(r.stdout || '').includes('=')) {
     die('vcvars64.bat 执行失败：' + JSON.stringify((r.stderr || '').slice(0, 300)));
   }
@@ -258,7 +259,7 @@ const args =
 log('');
 log(`=== cargo ${args.join(' ')} ===`);
 const t0 = Date.now();
-const r = spawnSync(cargo, args, {
+const r = spawnSync(cargo, args, { windowsHide: true,
   cwd: APP_DIR,
   encoding: 'utf8',
   env,
@@ -293,17 +294,26 @@ if (MODE !== 'test' && MODE !== 'check') {
     if (has('--run')) {
       log('');
       log('=== 启动 ===');
-      const child = spawnSync(exe, [], { stdio: 'inherit', env });
+      const child = spawnSync(exe, [], { windowsHide: true, stdio: 'inherit', env });
       process.exit(child.status || 0);
     }
     if (has('--smoke')) {
       log('');
       log('=== 界面烟测（真实点击） ===');
-      const r2 = spawnSync(process.execPath, [path.join(__dirname, 'ui-smoke.cjs'), exe], {
+      const r2 = spawnSync(process.execPath, [path.join(__dirname, 'ui-smoke.cjs'), exe], { windowsHide: true,
         stdio: 'inherit',
         env,
       });
       process.exit(r2.status || 0);
+    }
+    if (has('--e2e')) {
+      log('');
+      log('=== 端到端验收（真实导入一条链路） ===');
+      const r3 = spawnSync(process.execPath, [path.join(ROOT, 'tests', 'e2e-import.cjs'), exe], { windowsHide: true,
+        stdio: 'inherit',
+        env,
+      });
+      process.exit(r3.status || 0);
     }
   } else {
     log('⚠ 未找到产物：' + exe);
