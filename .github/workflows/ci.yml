@@ -113,6 +113,55 @@ jobs:
           done
 
   # ------------------------------------------------------------
+  # 前端接线：资源登记 / 脚本挂载 / 样式表进门禁 / IPC 有分支
+  # ------------------------------------------------------------
+  # 存在的理由是"文件写了、功能没有"这类故障（见脚本头部注释）。
+  # 四项都不是编译错误 —— 编译能过、测试能过、实机自检也能过，
+  # 只有人点到那个按钮才发现。所以必须由门禁拦。
+  wiring:
+    name: 前端接线
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: check-wiring
+        run: node scripts/check-wiring.cjs
+
+  # ------------------------------------------------------------
+  # 体积守卫：release 产物 ≤ 10 MB
+  # ------------------------------------------------------------
+  # 为什么值得为它单独跑一次 release 构建：体积是"WebView2 + 零前端框架"
+  # 换来的硬优势，而优势会悄悄消失（加依赖、开着默认 feature 都会涨）。
+  # 历史上 `image` 的默认特性拉进过 AV1 编码器（+666 KB），当时靠人眼发现纯属运气。
+  size:
+    name: 体积守卫
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: 构建 release 并检查体积
+        working-directory: app
+        run: cargo build --release --locked
+
+      - name: 检查体积
+        run: node scripts/check-size.cjs
+
+  # ------------------------------------------------------------
   # 许可证与红线 —— 暂时没做成 CI 任务
   # ------------------------------------------------------------
   # 项目红线之一是「不引入与 Apache-2.0 不兼容的代码/资源」。
@@ -138,7 +187,7 @@ jobs:
   all-green:
     name: 全部通过
     if: always()
-    needs: [test, motion, contrast, ui]
+    needs: [test, motion, contrast, wiring, size, ui]
     runs-on: windows-latest
     steps:
       - name: 检查上游结果
@@ -147,8 +196,10 @@ jobs:
           echo "test=${{ needs.test.result }}"
           echo "motion=${{ needs.motion.result }}"
           echo "contrast=${{ needs.contrast.result }}"
+          echo "wiring=${{ needs.wiring.result }}"
+          echo "size=${{ needs.size.result }}"
           echo "ui=${{ needs.ui.result }}"
-          for r in "${{ needs.test.result }}" "${{ needs.motion.result }}" "${{ needs.contrast.result }}" "${{ needs.ui.result }}"; do
+          for r in "${{ needs.test.result }}" "${{ needs.motion.result }}" "${{ needs.contrast.result }}" "${{ needs.wiring.result }}" "${{ needs.size.result }}" "${{ needs.ui.result }}"; do
             if [ "$r" != "success" ]; then
               echo "::error::有任务未通过：$r"
               exit 1
