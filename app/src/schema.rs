@@ -1590,6 +1590,100 @@ pub fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
     tx.commit().map_err(sqlite_msg)
 }
 
+/// 改列名。SQLite 3.25+ 的 `RENAME COLUMN` 会自动更新引用这一列的索引 / 视图 / 触发器；
+/// 我们要额外做的是把**注释表**里的记录搬过去 —— 不搬，注释就成了挂在新列名上看不见、
+/// 挂在旧列名上找不到的幽灵。
+///
+/// 为什么单独一个函数而不是复用 rename_table：两者的校验完全不同 ——
+/// 列名要过 `validate_column_name`（禁 rowid / 禁空格标点），而且同一张表内不许重名。
+pub fn rename_column(conn: &Connection, table: &str, column: &str, to: &str) -> Result<()> {
+    validate_identifier(table)?;
+    let real = ensure_user_table(conn, table)?;
+    validate_column_name(column)?;
+    validate_column_name(to)?;
+    if column.eq_ignore_ascii_case(to) {
+        return Err("新列名和原列名一样，没什么可改的".into());
+    }
+    let cols = table_columns(&conn, &real)?;
+    if !cols.iter().any(|c| c.name.eq_ignore_ascii_case(column)) {
+        return Err(format!("表「{real}」没有列「{column}」"));
+    }
+    if cols.iter().any(|c| c.name.eq_ignore_ascii_case(to)) {
+        return Err(format!("表「{real}」已经有叫「{to}」的列了"));
+    }
+    ensure_meta_tables(conn)?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
+    tx.execute_batch(&format!(
+        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+        quote_ident(&real),
+        quote_ident(column),
+        quote_ident(to)
+    ))
+    .map_err(|e| format!("改列名失败：{}", sqlite_msg(e)))?;
+    tx.execute(
+        "UPDATE _db_column_comment SET column_name = ?1 WHERE table_name = ?2 AND column_name = ?3",
+        [to, real.as_str(), column],
+    )
+    .map_err(sqlite_msg)?;
+    tx.commit().map_err(sqlite_msg)
+}
+
+#[cfg(test)]
+mod rename_column_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t(名称 TEXT NOT NULL, 金额 INTEGER DEFAULT 0);",
+        )
+        .unwrap();
+        ensure_meta_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO _db_column_comment VALUES ('t', '金额', '应收，按分存', 'money')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO t VALUES ('甲', 100)", []).unwrap();
+        conn
+    }
+
+    #[test]
+    fn 表结构_改列名后数据与注释都跟着走() {
+        let conn = db();
+        rename_column(&conn, "t", "金额", "应收金额").unwrap();
+        // 数据用新列名读得出来
+        let v: i64 = conn
+            .query_row("SELECT 应收金额 FROM t WHERE 名称 = '甲'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 100, "改列名不能动数据");
+        // 注释搬到新列名
+        let c: String = conn
+            .query_row(
+                "SELECT comment FROM _db_column_comment WHERE table_name='t' AND column_name='应收金额'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(c, "应收，按分存");
+        // 旧列名不该再有列
+        let cols = table_columns(&conn, "t").unwrap();
+        assert!(cols.iter().all(|x| x.name != "金额"));
+        assert!(cols.iter().any(|x| x.name == "应收金额"));
+    }
+
+    #[test]
+    fn 表结构_改列名的冲突与保留名都要被拦() {
+        let conn = db();
+        let dup = rename_column(&conn, "t", "金额", "名称").unwrap_err();
+        assert!(dup.contains("已经有"), "重名要说清：{dup}");
+        let same = rename_column(&conn, "t", "金额", "金额").unwrap_err();
+        assert!(same.contains("一样"), "同名要说清：{same}");
+        let none = rename_column(&conn, "t", "不存在的列", "x").unwrap_err();
+        assert!(none.contains("没有列"), "不存在要说清：{none}");
+    }
+}
 /// 改表注释。
 pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;

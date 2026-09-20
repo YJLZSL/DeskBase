@@ -1478,6 +1478,12 @@
         el("span", { class: "n" }, c.name),
         el("span", { class: "t" }, fmtColType(c.decl_type) + (tags ? "（" + tags + "）" : ""))
       );
+      const btnRen = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "改名");
+      btnRen.addEventListener("click", () => {
+        dlg.close("ok");
+        promptRenameColumn(tname, c.name);
+      });
+      row.append(btnRen);
       if (c.pk) {
         row.append(el("span", { class: "s" }, "主键不可删"));
       } else {
@@ -1555,6 +1561,38 @@
     dlg.showModal();
   }
 
+  /** 改列名的小对话框（表结构对话框与列头都用它）。 */
+  function promptRenameColumn(tableName, colName) {
+    const dlg = buildDialog("db-dialog-rename-col", "改列名",
+      "数据、索引与注释都会跟着新列名走。");
+    dlg.textContent = "";
+    dlg.append(el("h3", null, "改列名"));
+    dlg.append(el("p", { class: "hint" }, "把「" + colName + "」改成："));
+    const input = el("input", { class: "input", type: "text", value: colName });
+    const errLine = el("p", { class: "hint", style: "color: #b00" }, "");
+    const actions = el("div", { class: "db-dialog-actions" });
+    const btnOk = el("button", { class: "btn btn-primary", type: "button" }, "确认");
+    const btnCancel = el("button", { class: "btn", type: "button" }, "取消");
+    actions.append(btnOk, btnCancel);
+    btnOk.addEventListener("click", async () => {
+      const to = input.value.trim();
+      if (!to || to === colName) { dlg.close("cancel"); return; }
+      btnOk.disabled = true;
+      try {
+        await call("schema.renameColumn", { table: tableName, column: colName, to: to });
+        dlg.close("ok");
+        toast("已改列名：" + colName + " → " + to);
+        openSchemaDialog(); // 刷新对话框内容
+        openTable(tableName); // 网格跟着变
+      } catch (e) {
+        errLine.textContent = errText(e);
+        btnOk.disabled = false;
+      }
+    });
+    btnCancel.addEventListener("click", () => dlg.close("cancel"));
+    dlg.append(input, errLine, actions);
+    dlg.showModal();
+  }
   window.DeskBaseDb = {
     onShow: onShow,
     openBackupDialog: openBackupDialog,

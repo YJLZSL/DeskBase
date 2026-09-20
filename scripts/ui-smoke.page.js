@@ -306,6 +306,11 @@
           names.includes(newName) && !names.includes(szProbe),
           "新=" + names.includes(newName) + " 旧残留=" + names.includes(szProbe)
         );
+        // 改列名（P1-4a）：改完旧名没了、新名在、数据还在
+        await ipc("schema.renameColumn", { table: newName, column: "名称", to: "品名" });
+        const i3 = await ipc("schema.getTable", { name: newName });
+        const names3 = ((i3 && i3.columns) || []).map((c) => c.name);
+        step("改列名后新列名在、旧列名没了", names3.includes("品名") && !names3.includes("名称"), names3.join(","));
         const ip = await ipc("schema.getTable", { name: newName });
         const pk = ((ip && ip.columns) || []).find((c) => c.pk);
         if (pk) {

@@ -1693,6 +1693,26 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // 改列名（P1-4a）：列头操作的第一块 —— 之前只有"建的时候能改名"。
+        "schema.renameColumn" => {
+            let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = req.args.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            let to = req.args.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            if table.is_empty() || column.is_empty() || to.is_empty() {
+                return err(id, "改列名参数不完整（table / column / to 都要给）");
+            }
+            match state.db.lock() {
+                Ok(d) => match schema::rename_column(d.conn(), table, column, to) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("改列名：{table}.{column} → {to}"));
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "schema.setTableComment" => {
             let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
             let comment = req.args.get("comment").and_then(|v| v.as_str()).unwrap_or("");
