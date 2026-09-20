@@ -1585,6 +1585,13 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 先把"能配"落地，且默认必须是关的（ADR-0017）。
         "app.aiProviders" => ok(id, ai::providers()),
 
+        // 读 AI 审计（最近 N 条，新的在前）。给设置页/AI 面板显示"到底往外发过什么"。
+        "app.aiAuditTail" => {
+            let n = req.args.get("n").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let items = ai::audit_tail(&state.data_dir, n.min(200));
+            ok(id, serde_json::json!({ "items": items }))
+        }
+
         "app.aiSettings" => match state.db.lock() {
             Ok(d) => ok(
                 id,

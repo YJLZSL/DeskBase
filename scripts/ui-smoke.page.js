@@ -267,6 +267,14 @@
       const $aiEn = $("#ai-enabled");
       step("设置页有 AI 开关", !!$aiEn);
       step("AI 默认是关闭的", !!($aiEn && $aiEn.checked === false));
+      const $aiAudit = $("#ai-audit");
+      step("设置页有「查看使用记录」入口", !!$aiAudit);
+      const aTail = await ipc("app.aiAuditTail", { n: 5 });
+      step(
+        "AI 审计可读（没记录时是空表，不是错误）",
+        !!(aTail && Array.isArray(aTail.items)),
+        aTail ? (aTail.items.length + " 条") : "无返回"
+      );
       const $aiPv = $("#ai-provider");
       step(
         "服务商下拉里有主流厂商",

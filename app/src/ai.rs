@@ -112,6 +112,72 @@ pub fn providers() -> serde_json::Value {
     )
 }
 
+// ---------------- 审计（ADR-0017 的第三条要求） ----------------
+//
+// 为什么**单独一份文件**而不是混在主日志里：审计要能被单独查看与留存，
+// 而主日志是「排障用」的流水。混在一起，用户想回答「AI 到底往外发过什么」时，
+// 得先在一屏排障信息里捞。
+//
+// 三条纪律（写进代码，别靠自觉）：
+//   1. **只记元信息**：时间 / 厂商 / 动作 / 列名 / 行数 / 结果。**绝不记数据本体**；
+//   2. **被拒的也要记** —— 用户点"取消"同样是审计事件（ADR-0017 明写）；
+//   3. **绝不记 API Key** —— 连掩码都不记（掩码也是泄露面）。
+
+/// 一条审计记录。字段刻意全是"元信息"：没有任何一格能装下一行数据。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditEntry {
+    /// UTC 毫秒
+    pub at_ms: i64,
+    /// 动作：settings / prepare / call / denied / error
+    pub action: String,
+    /// 厂商 id（不记 base_url —— 那可能带查询串里的密钥）
+    pub provider: String,
+    /// 表名与列名（结构信息，ADR-0017 允许：默认只发结构）
+    pub table: String,
+    pub column: String,
+    /// 涉及的行数（数据最小化的证据）
+    pub rows: usize,
+    /// 结果：ok / denied / failed / skipped
+    pub result: String,
+    /// 人话说明（失败原因等）。**调用方不得把数据塞进来**。
+    pub note: String,
+}
+
+fn audit_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("logs").join("ai-audit.log")
+}
+
+/// 追加一条审计（JSON Lines：一行一条，方便 tail 与机器读）。
+pub fn audit_append(data_dir: &std::path::Path, e: &AuditEntry) -> Result<(), String> {
+    let p = audit_path(data_dir);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|x| format!("创建审计目录失败：{x}"))?;
+    }
+    let line = serde_json::to_string(e).map_err(|x| format!("审计序列化失败：{x}"))?;
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+        .map_err(|x| format!("打开审计文件失败：{x}"))?;
+    writeln!(f, "{line}").map_err(|x| format!("写审计失败：{x}"))?;
+    Ok(())
+}
+
+/// 读最近 n 条（新的在前）。文件不存在就返回空 —— "没记过"和"读不到"对界面是一件事。
+pub fn audit_tail(data_dir: &std::path::Path, n: usize) -> Vec<AuditEntry> {
+    let Ok(text) = std::fs::read_to_string(audit_path(data_dir)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<AuditEntry> = text
+        .lines()
+        .rev()
+        .take(n)
+        .filter_map(|l| serde_json::from_str::<AuditEntry>(l).ok())
+        .collect();
+    out.reverse();   // 调用方拿到的是时间正序，界面自行决定怎么显示
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,4 +234,40 @@ mod tests {
             assert!(ids.contains(&want.to_string()), "缺厂商 {want}");
         }
     }
+    #[test]
+    fn ai审计_写得进读得回且不含数据本体() {
+        let dir = std::env::temp_dir().join(format!("deskbase-ai-audit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = AuditEntry {
+            at_ms: 1_700_000_000_000,
+            action: "prepare".into(),
+            provider: "deepseek".into(),
+            table: "客户".into(),
+            column: "电话".into(),
+            rows: 12,
+            result: "ok".into(),
+            note: "等待用户确认".into(),
+        };
+        audit_append(&dir, &e).unwrap();
+        // 被拒的也要记（ADR-0017）
+        audit_append(&dir, &AuditEntry { result: "denied".into(), ..e.clone() }).unwrap();
+        let got = audit_tail(&dir, 10);
+        assert_eq!(got.len(), 2, "两条都要在");
+        assert_eq!(got[0].action, "prepare");
+        assert_eq!(got[1].result, "denied", "被拒的也要留痕");
+        // 数据本体绝不出现在审计里：整份文件不该含有"值"
+        let raw = std::fs::read_to_string(dir.join("logs").join("ai-audit.log")).unwrap();
+        assert!(!raw.contains("13800138000"), "审计不得含数据本体");
+        assert!(!raw.contains("api_key") && !raw.contains("sk-"), "审计不得含 Key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ai审计_没文件时返回空而不是报错() {
+        let dir = std::env::temp_dir().join(format!("deskbase-ai-audit-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(audit_tail(&dir, 5).is_empty(), "没审计过就是空表，不是错误");
+    }
+
 }

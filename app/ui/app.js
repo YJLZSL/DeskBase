@@ -1400,3 +1400,27 @@
 
     load();
   })();
+
+  // 查看 AI 审计（P2）：让用户能回答"AI 到底往外发过什么"。
+  // 审计只记元信息（谁、哪一列、几行、结果）—— 这里也不展示任何数据内容。
+  (function wireAiAudit() {
+    const $btn = document.getElementById("ai-audit");
+    const $out = document.getElementById("ai-audit-out");
+    if (!$btn || !$out) return;
+    $btn.addEventListener("click", async () => {
+      try {
+        const r = await window.__deskbase.call("app.aiAuditTail", { n: 20 });
+        const items = (r && r.items) || [];
+        if (!items.length) {
+          $out.textContent = "还没有任何 AI 使用记录（这是好事）";
+          return;
+        }
+        const last = items[items.length - 1];
+        $out.textContent = "最近 " + items.length + " 条；最新一条：" +
+          (last.action || "") + " / " + (last.provider || "") + " / " +
+          (last.column ? last.column + "（" + last.rows + " 行）" : "") + " / " + (last.result || "");
+      } catch (e) {
+        $out.textContent = "读审计失败：" + (e && e.message ? e.message : e);
+      }
+    });
+  })();
