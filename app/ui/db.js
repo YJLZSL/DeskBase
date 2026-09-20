@@ -1601,6 +1601,27 @@
   // 网格把"用户点了哪一列的 ⋯"抛上来，这里决定能做什么。
   // 三个动作都复用已有的 IPC（改列名 / 加列 / 删列）—— 界面层不新增业务规则，
   // 三道 SQLite 暗礁（主键、NOT NULL 默认值、被索引引用）依旧由 Rust 拦。
+  /** 整理这一列（P1-5）：只改值不改类型。报告里带"哪几行看不懂"。 */
+  async function runNormalize(tname, colName, rule, label) {
+    if (!confirm("把「" + colName + "」这一列按" + label + "整理一遍？\n\n" +
+      "只会改动格式不一致的值（例如 2026/1/5 → 2026-01-05），看不懂的行会原样留着并告诉你。")) return;
+    try {
+      const rep = await call("schema.normalizeColumn", { table: tname, column: colName, rule: rule });
+      const skipped = (rep && rep.skipped) || [];
+      let msg = "已整理「" + colName + "」：" + (rep ? rep.changed : 0) + " 行被规范化";
+      if (skipped.length) {
+        msg += "，" + skipped.length + " 行看不懂（保持原样）";
+      }
+      toast(msg, skipped.length ? "warn" : "ok");
+      if (skipped.length) {
+        logLine("看不懂的行（前 5 条）：" + skipped.slice(0, 5).map((s) => "第" + s.rowid + "行「" + s.value + "」").join("，"));
+      }
+      openTable(tname); // 网格刷新
+    } catch (e) {
+      toast("整理失败：" + errText(e), "error");
+    }
+  }
+
   function openColumnMenu(info) {
     if (!state.current) return;
     const tname = state.current;
@@ -1615,8 +1636,18 @@
     const btnRen = el("button", { class: "btn", type: "button" }, "改列名");
     const btnAdd = el("button", { class: "btn", type: "button" }, "加一列");
     const btnDel = el("button", { class: "btn", type: "button" }, "删掉这一列");
+    const btnDate = el("button", { class: "btn", type: "button" }, "统一日期格式");
+    const btnNum = el("button", { class: "btn", type: "button" }, "清洗数字");
     const btnCancel = el("button", { class: "btn", type: "button" }, "取消");
-    actions.append(btnRen, btnAdd, btnDel, btnCancel);
+    actions.append(btnRen, btnAdd, btnDel, btnDate, btnNum, btnCancel);
+    btnDate.addEventListener("click", () => {
+      dlg.close("ok");
+      runNormalize(tname, info.name, "date", "日期格式");
+    });
+    btnNum.addEventListener("click", () => {
+      dlg.close("ok");
+      runNormalize(tname, info.name, "number", "数字清洁");
+    });
     btnRen.addEventListener("click", () => {
       dlg.close("ok");
       promptRenameColumn(tname, info.name);

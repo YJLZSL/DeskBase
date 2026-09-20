@@ -1694,6 +1694,32 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         // 改列名（P1-4a）：列头操作的第一块 —— 之前只有"建的时候能改名"。
+        // 值规范化（P1-5）：只改值不改类型 —— 让文本排序变正确的那条轻路。
+        "schema.normalizeColumn" => {
+            let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
+            let column = req.args.get("column").and_then(|v| v.as_str()).unwrap_or("");
+            let rule = req
+                .args
+                .get("rule")
+                .and_then(|v| serde_json::from_value::<schema::NormalizeRule>(v.clone()).ok());
+            let (Some(rule), false) = (rule, table.is_empty() || column.is_empty()) else {
+                return err(id, "整理参数不完整（table / column / rule 都要给）");
+            };
+            match state.db.lock() {
+                Ok(d) => match schema::normalize_column(d.conn(), table, column, rule) {
+                    Ok(rep) => {
+                        log_line(
+                            &state.data_dir,
+                            &format!("整理列：{table}.{column}（改了 {} 行，跳过 {} 行）", rep.changed, rep.skipped.len()),
+                        );
+                        ok(id, serde_json::to_value(rep).unwrap_or_else(|_| serde_json::json!({})))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "schema.renameColumn" => {
             let table = req.args.get("table").and_then(|v| v.as_str()).unwrap_or("");
             let column = req.args.get("column").and_then(|v| v.as_str()).unwrap_or("");

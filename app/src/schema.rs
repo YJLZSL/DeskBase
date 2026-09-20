@@ -1684,6 +1684,215 @@ mod rename_column_tests {
         assert!(none.contains("没有列"), "不存在要说清：{none}");
     }
 }
+// ---------------- 值规范化（v0.3.0 · P1-5） ----------------
+//
+// 只改**值**，不改列类型、不重建表 —— 见 TABLE-REVAMP-PLAN 对 P1-5 的重新定义：
+// 渲染由声明类型决定，而 SQLite 改列类型只能重建表（M/L 规模）；
+// 但把值统一格式就足以让**文本排序变正确**（`2026-01-05` 与 `2026-1-5` 现在会排乱）。
+//
+// 三条原则：
+//   1. **看不懂的行原样留着并报出来** —— 静默丢数据比不改更糟；
+//   2. **已经规范的值不写**（只在真的会变时才 UPDATE，少一次写盘少一次风险）；
+//   3. **主键列不动** —— 它可能被别的表引用，值规范化不该碰标识。
+
+/// 规范化规则。只做两条最痛的：日期格式、数字清洁。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NormalizeRule {
+    Date,
+    Number,
+}
+
+/// 一条看不懂的值（原样保留，但要让用户知道是哪一行）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkippedRow {
+    pub rowid: i64,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NormalizeReport {
+    pub total: usize,
+    pub changed: usize,
+    pub skipped: Vec<SkippedRow>,
+}
+
+/// 日期 → `YYYY-MM-DD`。接受 `2026/1/5`、`2026-1-5`、`2026.1.5`、`2026年1月5日`、
+/// 也接受带时间的（`2026-01-05 13:20`，时间部分丢掉 —— 规范化的是日期）。
+fn iso_date(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() { return None; }
+    let (date_part, _) = match s.find([' ', 'T']) {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    };
+    // 全角数字与常见分隔符统一
+    let mut buf = String::with_capacity(date_part.len());
+    for ch in date_part.chars() {
+        let c = match ch {
+            '０'..='９' => char::from_u32(ch as u32 - 0xFF10 + '0' as u32).unwrap_or(ch),
+            '/' | '.' | '年' | '月' => '-',
+            '日' => ' ',
+            _ => ch,
+        };
+        if c != ' ' { buf.push(c); }
+    }
+    let parts: Vec<&str> = buf.split('-').filter(|p| !p.is_empty()).collect();
+    if parts.len() != 3 { return None; }
+    let y: i32 = parts[0].parse().ok()?;
+    let m: u32 = parts[1].parse().ok()?;
+    let d: u32 = parts[2].parse().ok()?;
+    if !(1000..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// 数字清洁：去掉千分位、货币符号、单位与空白；全角数字转半角。
+/// 返回 None 表示"看不懂"（含字母、多个小数点等）—— 交给上层报给用户。
+fn clean_number(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() { return None; }
+    let mut buf = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let c = match ch {
+            '０'..='９' => char::from_u32(ch as u32 - 0xFF10 + '0' as u32).unwrap_or(ch),
+            '，' => ',',
+            '。' => '.',
+            '－' | '—' => '-',
+            _ => ch,
+        };
+        match c {
+            ',' | '¥' | '￥' | '元' | ' ' | '\t' => {}
+            _ => buf.push(c),
+        }
+    }
+    if buf.is_empty() { return None; }
+    let body = buf.strip_prefix('-').unwrap_or(&buf);
+    if body.is_empty() || body.matches('.').count() > 1 { return None; }
+    if !body.chars().all(|c| c.is_ascii_digit() || c == '.') { return None; }
+    // 去掉纯整数的尾随小数点（12. → 12）
+    let out = if buf.ends_with('.') { buf.trim_end_matches('.').to_string() } else { buf };
+    Some(out)
+}
+
+/// 规范化一整列。返回报告（改了多少、哪些看不懂）。
+pub fn normalize_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    rule: NormalizeRule,
+) -> Result<NormalizeReport> {
+    validate_identifier(table)?;
+    let real = ensure_user_table(conn, table)?;
+    validate_column_name(column)?;
+    let cols = table_columns(&conn, &real)?;
+    let Some(info) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(column)) else {
+        return Err(format!("表「{real}」没有列「{column}」"));
+    };
+    if info.pk {
+        return Err("主键列不参与整理 —— 它可能被别的表引用，值不该被改写".into());
+    }
+    let sel = format!(
+        "SELECT rowid, {} FROM {}",
+        quote_ident(column),
+        quote_ident(&real)
+    );
+    let mut stmt = conn.prepare(&sel).map_err(sqlite_msg)?;
+    let rows: Vec<(i64, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))
+        .map_err(sqlite_msg)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite_msg)?;
+    drop(stmt);
+
+    let mut report = NormalizeReport { total: rows.len(), changed: 0, skipped: Vec::new() };
+    let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
+    let upd = format!(
+        "UPDATE {} SET {} = ?1 WHERE rowid = ?2",
+        quote_ident(&real),
+        quote_ident(column)
+    );
+    for (rowid, value) in rows {
+        let Some(raw) = value else { continue }; // NULL 不动
+        if raw.trim().is_empty() { continue; }  // 空串不动
+        let norm = match rule {
+            NormalizeRule::Date => iso_date(&raw),
+            NormalizeRule::Number => clean_number(&raw),
+        };
+        match norm {
+            Some(v) if v != raw => {
+                tx.execute(&upd, rusqlite::params![v, rowid]).map_err(sqlite_msg)?;
+                report.changed += 1;
+            }
+            Some(_) => {} // 已经规范，不写盘
+            None => report.skipped.push(SkippedRow { rowid, value: raw }),
+        }
+    }
+    tx.commit().map_err(sqlite_msg)?;
+    Ok(report)
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+
+    #[test]
+    fn 规范化_日期各种写法都能认() {
+        assert_eq!(iso_date("2026/1/5").as_deref(), Some("2026-01-05"));
+        assert_eq!(iso_date("2026-01-05").as_deref(), Some("2026-01-05"));
+        assert_eq!(iso_date("2026.1.5").as_deref(), Some("2026-01-05"));
+        assert_eq!(iso_date("2026年1月5日").as_deref(), Some("2026-01-05"));
+        assert_eq!(iso_date("２０２６０１０５").as_deref(), None, "连着写的不猜");
+    }
+
+    #[test]
+    fn 规范化_日期越界与看不懂要返回空() {
+        assert!(iso_date("2026-13-01").is_none(), "13 月不合法");
+        assert!(iso_date("2026-01-32").is_none(), "32 日不合法");
+        assert!(iso_date("待确认").is_none());
+        assert!(iso_date("").is_none());
+    }
+
+    #[test]
+    fn 规范化_数字清洁() {
+        assert_eq!(clean_number("1,234.50").as_deref(), Some("1234.50"));
+        assert_eq!(clean_number("¥1,234").as_deref(), Some("1234"));
+        assert_eq!(clean_number("12元").as_deref(), Some("12"));
+        assert_eq!(clean_number("１２３").as_deref(), Some("123"), "全角数字");
+        assert_eq!(clean_number("-3.5").as_deref(), Some("-3.5"));
+        assert!(clean_number("约一百").is_none());
+        assert!(clean_number("1.2.3").is_none());
+    }
+
+    #[test]
+    fn 规范化_整列跑一遍_看不懂的原样留着并报出来() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(日期 TEXT);").unwrap();
+        conn.execute_batch(
+            "INSERT INTO t VALUES ('2026/1/5'), ('2026-01-06'), ('待确认'), (NULL), ('');",
+        )
+        .unwrap();
+        let r = normalize_column(&conn, "t", "日期", NormalizeRule::Date).unwrap();
+        assert_eq!(r.total, 5);
+        assert_eq!(r.changed, 1, "只有第一种写法需要改");
+        assert_eq!(r.skipped.len(), 1, "看不懂的要报出来");
+        assert_eq!(r.skipped[0].value, "待确认");
+        let v: String = conn
+            .query_row("SELECT 日期 FROM t WHERE rowid = 1", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(v, "2026-01-05");
+    }
+
+    #[test]
+    fn 规范化_主键列不参与() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
+            .unwrap();
+        let e = normalize_column(&conn, "t", "id", NormalizeRule::Number).unwrap_err();
+        assert!(e.contains("主键"), "{e}");
+    }
+}
 /// 改表注释。
 pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;
@@ -3609,7 +3818,7 @@ mod tests {
         assert_eq!(p.rows[3][3], Json::String("2026-09-07 08:05:30".to_string()));
 
         // 定长 ISO 之后，字符串排序 = 日期排序
-        assert!(normalize_date("2026-9-7").unwrap() < normalize_date("2026-10-05").unwrap());
+        assert!(iso_date("2026-9-7").unwrap() < iso_date("2026-10-05").unwrap());
 
         // 不存在的日期、识别不了的格式要报错
         assert!(update_cell(&conn, "t", 1, "日", Some("2026-02-30")).is_err());

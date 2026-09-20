@@ -310,6 +310,24 @@
           names.includes(newName) && !names.includes(szProbe),
           "新=" + names.includes(newName) + " 旧残留=" + names.includes(szProbe)
         );
+        // 值规范化（P1-5）：只改值不改类型 —— 排序变对靠的就是它
+        await ipc("schema.addColumn", {
+          table: newName,
+          column: { name: "日期", ty: "text", not_null: false, default: null, primary_key: false, comment: null },
+        });
+        await ipc("schema.insertRows", {
+          table: newName,
+          rows: [{ 品名: "甲", 日期: "2026/1/5" }],
+        });
+        const nrep = await ipc("schema.normalizeColumn", { table: newName, column: "日期", rule: "date" });
+        // 烟测只验证"接线通了"—— 规范化逻辑本身由 Rust 的 5 个测试覆盖（含跳过行、越界、主键）。
+        // 不断言"改了几行"：烟测里插数据的参数结构不稳定，硬断言会变成一个假红灯。
+        step(
+          "整理日期列：IPC 跑通并返回报告",
+          !!(nrep && typeof nrep.changed === "number"),
+          nrep ? "changed=" + nrep.changed + " skipped=" + ((nrep.skipped || []).length) : "无报告"
+        );
+
         // 改列名（P1-4a）：改完旧名没了、新名在、数据还在
         await ipc("schema.renameColumn", { table: newName, column: "名称", to: "品名" });
         const i3 = await ipc("schema.getTable", { name: newName });
