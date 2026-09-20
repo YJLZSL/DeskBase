@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "deskbase"
-version = "0.3.0-beta.9"
+version = "0.3.0-beta.10"
 dependencies = [
  "calamine",
  "encoding_rs",

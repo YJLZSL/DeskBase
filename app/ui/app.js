@@ -1349,7 +1349,7 @@
     let PROVIDERS = [];
 
     async function loadProviders() {
-      const r = await call("app.aiProviders");
+      const r = await window.__deskbase.call("app.aiProviders");
       PROVIDERS = Array.isArray(r) ? r : [];
       $pv.textContent = "";
       for (const p of PROVIDERS) {
@@ -1364,7 +1364,7 @@
     async function load() {
       try {
         await loadProviders();
-        const s = await call("app.aiSettings");
+        const s = await window.__deskbase.call("app.aiSettings");
         if (!s) return;
         $en.checked = !!s.enabled;
         $pv.value = s.provider || "deepseek";
@@ -1383,7 +1383,7 @@
 
     $save.addEventListener("click", async () => {
       try {
-        await call("app.saveAiSettings", {
+        await window.__deskbase.call("app.saveAiSettings", {
           settings: {
             enabled: $en.checked,
             provider: $pv.value,
