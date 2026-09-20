@@ -215,6 +215,8 @@
         table: name,
         columns: state.cols,
         editable: true,
+        // 列头那个「⋯」：网格只报告点了哪一列，动作由这里决定（P1-4b）
+        onColumnMenu: openColumnMenu,
         pageSize: 200,
         // 行标识：Page 的第 0 列（_rowid），映射时挂在 __rowid 上，不给用户看
         rowId: (row) => (row && row.__rowid != null ? row.__rowid : null),
@@ -1593,11 +1595,59 @@
     dlg.append(input, errLine, actions);
     dlg.showModal();
   }
+  // ============================================================
+  // 列头菜单（v0.3.0 · P1-4b）
+  // ============================================================
+  // 网格把"用户点了哪一列的 ⋯"抛上来，这里决定能做什么。
+  // 三个动作都复用已有的 IPC（改列名 / 加列 / 删列）—— 界面层不新增业务规则，
+  // 三道 SQLite 暗礁（主键、NOT NULL 默认值、被索引引用）依旧由 Rust 拦。
+  function openColumnMenu(info) {
+    if (!state.current) return;
+    const tname = state.current;
+    const dlg = buildDialog(
+      "db-dialog-colmenu",
+      "列操作 · " + info.name,
+      "对「" + info.name + "」这一列做什么？"
+    );
+    dlg.textContent = "";
+    dlg.append(el("h3", null, "列「" + info.name + "」"));
+    const actions = el("div", { class: "db-dialog-actions" });
+    const btnRen = el("button", { class: "btn", type: "button" }, "改列名");
+    const btnAdd = el("button", { class: "btn", type: "button" }, "加一列");
+    const btnDel = el("button", { class: "btn", type: "button" }, "删掉这一列");
+    const btnCancel = el("button", { class: "btn", type: "button" }, "取消");
+    actions.append(btnRen, btnAdd, btnDel, btnCancel);
+    btnRen.addEventListener("click", () => {
+      dlg.close("ok");
+      promptRenameColumn(tname, info.name);
+    });
+    btnAdd.addEventListener("click", () => {
+      dlg.close("ok");
+      openSchemaDialog(); // 加列表单在「表结构」底部（一处实现，两处入口）
+      toast("在「表结构」底部的加列表单里填新列");
+    });
+    btnDel.addEventListener("click", async () => {
+      if (!confirm("删掉列「" + info.name + "」？这一列的数据会一起消失，且不可恢复。")) return;
+      try {
+        await call("schema.dropColumn", { table: tname, column: info.name });
+        dlg.close("ok");
+        toast("已删列「" + info.name + "」");
+        await refreshTables();
+        openTable(tname);
+      } catch (e) {
+        toast(errText(e), "error"); // 主键列等由 Rust 拦下并说明原因
+      }
+    });
+    btnCancel.addEventListener("click", () => dlg.close("cancel"));
+    dlg.append(actions);
+    dlg.showModal();
+  }
   window.DeskBaseDb = {
     onShow: onShow,
     openBackupDialog: openBackupDialog,
     openSchemaDialog: openSchemaDialog,
     openNewTableDialog: openNewTableDialog,
+    openColumnMenu: openColumnMenu,
     refreshTables: refreshTables,
     openImportDialog: openImportDialog,
   };

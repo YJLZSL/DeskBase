@@ -565,7 +565,24 @@
         const caret = el("span", { class: "dbgrid-sort", "aria-hidden": "true" });
         const rz = el("span", { class: "dbgrid-rz", role: "separator", "aria-label": c.name + " 列宽", title: "拖动调整列宽，双击自适应" });
         rz.dataset.c = i;
-        th.append(label, typeTag, caret, rz);
+        // 列操作入口（Excel 那个"列头按钮"）：网格不认识业务，
+        // 只把"用户点了哪一列的菜单"抛给上层（cfg.onColumnMenu）。
+        // 与 commitCell / deleteRows 同一套分层：设置里没给回调就不挂按钮。
+        if (typeof cfg.onColumnMenu === "function") {
+          const menuBtn = el("button", {
+            class: "dbgrid-colmenu",
+            type: "button",
+            title: c.name + "：改列名 / 加列 / 删列",
+            "aria-label": c.name + " 列操作",
+          }, "⋯");
+          menuBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation(); // 别触发列头的排序
+            cfg.onColumnMenu({ index: i, name: c.name });
+          });
+          th.append(label, typeTag, caret, menuBtn, rz);
+        } else {
+          th.append(label, typeTag, caret, rz);
+        }
         hrow.appendChild(th);
 
         const fc = el("div", { class: "dbgrid-fcell", role: "gridcell" });

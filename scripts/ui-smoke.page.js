@@ -265,6 +265,10 @@
       const $sch = $("#btn-db-schema");
       step("数据库页有「表结构」入口", !!$sch);
       step(
+        "列头菜单的编程入口可用",
+        !!(window.DeskBaseDb && typeof window.DeskBaseDb.openColumnMenu === "function")
+      );
+      step(
         "表结构的编程入口可用",
         !!(window.DeskBaseDb && typeof window.DeskBaseDb.openSchemaDialog === "function")
       );

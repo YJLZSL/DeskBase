@@ -715,3 +715,20 @@
     animation: none;
   }
 }
+
+/* 列操作入口（v0.3.0 · P1-4b）：平时淡出，鼠标移到列头才显 —— 不抢视线。
+   刻意不加 transition：动效档位统一由 motion.css 管，这里不需要。 */
+.dbgrid-colmenu {
+  opacity: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  color: inherit;
+}
+.dbgrid-th:hover .dbgrid-colmenu,
+.dbgrid-colmenu:focus-visible {
+  opacity: 0.85;
+}
