@@ -488,7 +488,7 @@
 
     function loadColWidths() {
       // 列宽记在 localStorage 里，键按表名分：同一个用户有多张表，
-      // 列宽是"这张表的这个字段"的属性，不该互相串。
+      // 列宽是"这张表的这个列"的属性，不该互相串。
       // 没有表名时不记也不读 —— 宁可这次不记住，也别把别的表的列宽覆盖掉。
       st.colW = st.columns.map((c) => W_BY_KIND[kindOf(c.type)] || 176);
       if (!st.table) return;
@@ -553,7 +553,7 @@
         const th = el("div", { class: "dbgrid-th", role: "columnheader" });
         th.dataset.c = i;
         th.style.width = "var(--dgc-" + i + ")";
-        // 字段含义（comment）挂在表头上：会计要看的往往就是"这一列到底指什么"，
+        // 列含义（comment）挂在表头上：会计要看的往往就是"这一列到底指什么"，
         // 而不是它的类型。类型另给一个小字角标。
         const tips = [];
         if (c.comment) tips.push(String(c.comment));

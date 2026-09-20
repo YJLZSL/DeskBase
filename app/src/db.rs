@@ -207,7 +207,7 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_note_updated
                  ON note (deleted_at, updated_at DESC);",
         )
-        .map_err(|e| format!("建表失败: {e}"))?;
+        .map_err(|e| format!("新建表格失败: {e}"))?;
         tx.pragma_update(None, "user_version", 1)
             .map_err(|e| format!("写入结构版本失败: {e}"))?;
         tx.commit().map_err(|e| format!("提交迁移失败: {e}"))?;

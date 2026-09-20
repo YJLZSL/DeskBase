@@ -119,6 +119,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0017](0017-ai-assistance-privacy-boundary.md) | AI 协助的隐私边界：默认本地、外部调用逐次授权、数据最小化、生成内容不自动执行 | 提议 | 2026-09-18 |
 | [0018](0018-unsigned-self-update.md) | 无签名前提下的自更新：五步校验链、默认关闭、三步确认、只走官方 API、数据零风险 | 已接受 | 2026-09-19 |
 | [0019](0019-network-boundary-clarification.md) | 网络边界澄清：把「数据不出本机」（红线 R1）与「默认不联网」（信任机制 R2）拆成两条规则 | 已接受 | 2026-09-19 |
+| [0020](0020-table-first-ui-and-ai-tables.md) | 表格优先的界面形态与 AI 表格（取代 0009 界面结论） | 已接受 |
 
 ---
 

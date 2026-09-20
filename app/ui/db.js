@@ -1,12 +1,13 @@
 /* ============================================================
    DeskBase 数据库页装配层
    ============================================================
-   数据网格（grid.js）与 SQL 编辑器（sql.js）只认识"数据从哪来、
+   数据网格（grid.js）只认识"数据从哪来、
    结果往哪去"，不认识这个应用。本文件负责把它们装配成「数据库」页：
 
-     左栏 库表列表（listTables / createTable / dropTable）
+     左栏 表格列表（listTables / createTable / dropTable）
      右栏 数据页签  → DeskBaseGrid.mount(...)，行数据走 keyset 分页
-          SQL 页签  → DeskBaseSql.mount(...)，执行走策略层闸门
+          （SQL 页签已于 2026-09-20 按 ADR-0020 撤下：数据网格成为唯一面板。
+            DeskBaseSql 的挂载代码与策略层闸门刻意保留在下方，是零成本的可逆点。）
 
    与 Rust 的通信走 window.__deskbase.call（app.js 暴露的 IPC 桥）。
    本文件不直接碰数据库，也不拼任何 SQL —— 参数校验都在 Rust 侧。
@@ -18,7 +19,7 @@
    2. money 列按「分」存整数 —— 出库时换算成"元"的字符串给用户看，
       提交时原样交回字符串，由 Rust 的 money_parse 再换算回分。
       两头都不在本文件里做算术，避免第二套实现。
-   3. 危险 SQL 的判定与确认在**两个**层面：sql.js 的粗判（组件层）+
+   3. （已撤下）危险 SQL 的判定与确认在**两个**层面：sql.js 的粗判（组件层）+
       schema.runQuery 的策略层闸门（needsConfirm 应答）。本文件负责把
       策略层的确认请求用模态框问出来，用户拒绝就抛错停手。
    ============================================================ */
@@ -110,7 +111,7 @@
   };
 
   // ============================================================
-  // 库表列表
+  // 表格列表
   // ============================================================
   async function refreshTables() {
     // 并发守卫：快速来回切视图会连着触发几次，"后来居上"的旧响应可能覆盖新的
@@ -137,7 +138,7 @@
     if (!state.tables.length) {
       listEl.appendChild(
         el("div", { class: "db-empty" },
-          "还没有库表。点上方「新建表」建一张，或者用 SQL 页签执行 CREATE TABLE。")
+          "还没有表格。点上方「新建表格」建一张，或者把 Excel / CSV 拖进来。")
       );
       return;
     }
@@ -259,7 +260,7 @@
       limit: q.limit,
       filters: filters,
     });
-    // ⚠️ 字段名是 Rust 侧的 snake_case（`Page { has_more, next_cursor }`），
+    // ⚠️ 列名是 Rust 侧的 snake_case（`Page { has_more, next_cursor }`），
     // 这里**不能**写成 hasMore —— 写错了不会报错，只会让"加载更多"永远不触发：
     // 超过一页的表就再也翻不动，而界面看起来一切正常（P1，见 BUG_HUNT-2026-09-18.md）。
     return {
@@ -379,15 +380,16 @@
       b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
     });
     paneGrid.hidden = tab !== "data";
-    paneSql.hidden = tab !== "sql";
-    if (tab === "sql") ensureSql();
+    // SQL 面板已按 ADR-0020 撤下：这里不再有第二个页签要切。
+    // ensureSql / gatedRunQuery 的函数体刻意保留（JS 无死代码告警，
+    // 留着是零成本的可逆点 —— 恢复 SQL 只需把 ui/legacy/sql.js 移回并重新挂载）。
   }
 
   // ============================================================
-  // 新建表 / 删除表 对话框
+  // 新建表格 / 删除表 对话框
   // ============================================================
   // ============================================================
-  // 字段类型清单
+  // 列类型清单
   // ============================================================
   //
   // ⚠️ **唯一来源是 Rust**（`schema.columnTypes` ← `schema::ColType`）。
@@ -405,7 +407,7 @@
     const r = await call("schema.columnTypes");
     TYPES = (r && r.types ? r.types : []).map((t) => [t.name, t.label]);
     if (!TYPES.length) {
-      throw new Error("读不到字段类型清单（schema.columnTypes 返回空）");
+      throw new Error("读不到列类型清单（schema.columnTypes 返回空）");
     }
     return TYPES;
   }
@@ -449,7 +451,7 @@
   // ---------- 默认模板 ----------
   // 为什么要有模板：调研里最硬的一条是"非程序员可用性是生死线"，而空表对新手等于
   // 无从下手。所以提供几张**能直接开始记东西**的表（发起人要求：数据库要有默认模板）。
-  // 约定：字段名一律中文；金额用 money（按分存）；日期用 date。
+  // 约定：列名一律中文；金额用 money（按分存）；日期用 date。
   // 改这里 = 改用户第一次看到的东西，改完必须同步 `help.js` 的教程，别让教程说谎。
   const TEMPLATES = {
     客户台账: [
@@ -508,20 +510,20 @@
     try {
       await ensureTypes();
     } catch (e) {
-      toast("打不开建表向导：" + errText(e), "error");
+      toast("打不开新建表格向导：" + errText(e), "error");
       return;
     }
     const dlg = buildDialog(
       "db-dialog-new",
-      "新建表",
-      "字段名可以用中文、字母、数字、下划线。金额按「分」存储：写入 12.34 存 1234，" +
+      "新建表格",
+      "列名可以用中文、字母、数字、下划线。金额按「分」存储：写入 12.34 存 1234，" +
         "显示时自动换算回来。主键列必须是整数或文本。"
     );
     dlg.textContent = "";
-    dlg.append(el("h3", null, "新建表"));
+    dlg.append(el("h3", null, "新建表格"));
     dlg.append(
       el("p", { class: "hint" },
-        "字段名可以用中文、字母、数字、下划线，不能叫 rowid。金额按「分」存储：" +
+        "列名可以用中文、字母、数字、下划线，不能叫 rowid。金额按「分」存储：" +
           "写入 12.34 存 1234，显示时自动换算回来。二进制列不能在表格里直接编辑。" +
           "「默认值」是新增行时自动填的内容，留空表示不填。")
     );
@@ -532,7 +534,7 @@
     const tpl = el("select", { class: "db-tpl-select" });
     tpl.appendChild(el("option", { value: "" }, "从模板开始（可选）"));
     Object.keys(TEMPLATES).forEach((k) => tpl.appendChild(el("option", { value: k }, k)));
-    const tplHint = el("p", { class: "hint db-tpl-hint" }, "不知道从哪下手？先套一个模板，字段和表名都能改。");
+    const tplHint = el("p", { class: "hint db-tpl-hint" }, "不知道从哪下手？先套一个模板，列和表名都能改。");
     form.appendChild(tpl);
     form.appendChild(tplHint);
 
@@ -546,7 +548,7 @@
 
     function colRow(col) {
       const row = el("div", { class: "db-col-row" });
-      const name = el("input", { type: "text", placeholder: "字段名" });
+      const name = el("input", { type: "text", placeholder: "列名" });
       if (col) name.value = col.name;
       const type = el("select");
       const wantTy = col ? col.ty : "text";
@@ -581,7 +583,7 @@
       colsBox.textContent = "";
       cols.forEach((c) => colsBox.appendChild(colRow(c)));
       tplHint.textContent =
-        "已套用「" + tname + "」，" + cols.length + " 个字段 —— 表名和字段都能改，用不上的删掉就行。";
+        "已套用「" + tname + "」，" + cols.length + " 个列 —— 表名和列都能改，用不上的删掉就行。";
     }
     tpl.addEventListener("change", () => applyTemplate(tpl.value));
 
@@ -589,7 +591,7 @@
     colsBox.appendChild(colRow());
     colsBox.appendChild(colRow());
 
-    const addCol = el("button", { class: "btn btn-ghost", type: "button" }, "添加字段");
+    const addCol = el("button", { class: "btn btn-ghost", type: "button" }, "添加列");
     addCol.addEventListener("click", () => colsBox.appendChild(colRow()));
     form.appendChild(addCol);
 
@@ -634,19 +636,19 @@
         });
       }
       if (!columns.length) {
-        toast("至少要有一个字段", "error");
+        toast("至少要有一个列", "error");
         return;
       }
       submit.disabled = true;
       submit.textContent = "创建中…";
       try {
         await call("schema.createTable", { spec: { name: tname, comment: null, columns: columns } });
-        toast("已创建表「" + tname + "」");
+        toast("已新建表格「" + tname + "」");
         dlg.close();
         await refreshTables();
         await openTable(tname);
       } catch (e) {
-        toast("建表失败：" + errText(e), "error");
+        toast("新建表格失败：" + errText(e), "error");
         submit.disabled = false;
         submit.textContent = "创建";
       }
@@ -712,7 +714,7 @@
   }
 
   // ============================================================
-  // 从 Excel / CSV 导入建表（v0.3.0 的第一优先级）
+  // 从 Excel / CSV 导入新建表格（v0.3.0 的第一优先级）
   // ============================================================
   //
   // 为什么值得这么多代码：发起人把这条明确成"不是替代 Excel，是要能导入 Excel"。
@@ -722,7 +724,7 @@
   // ## 这个向导的三个设计要点
   //
   // 1. **表头行让用户指**。中文台账的上面经常压着标题行、导出日期行。程序猜，
-  //    猜错了他不一定看得出来（猜错的行会变成字段名）。所以把原文铺出来、
+  //    猜错了他不一定看得出来（猜错的行会变成列名）。所以把原文铺出来、
   //    让他点一行 —— 点错了他自己能看见并改回来。
   // 2. **每一列都说清"为什么判成这个类型"**。类型判错是**静默毁数据**：
   //    前导零的工号存成整数就永久丢了零，而事后从库里已经看不出来。
@@ -933,7 +935,7 @@
 
       // ---- 列：名字 / 类型 / 保留 ----
       const ch = el("div", { class: "db-imp-sec-h" });
-      ch.append(el("span", null, "字段与类型"));
+      ch.append(el("span", null, "列与类型"));
       ch.append(el("span", { class: "hint" }, "改错了会毁数据 —— 拿不准就看样例"));
       body.appendChild(ch);
 
@@ -947,7 +949,7 @@
       nameInput.select();
     }
 
-    /** 一列一行：保留勾选 + 字段名 + 类型 + 判断依据 + 样例 */
+    /** 一列一行：保留勾选 + 列名 + 类型 + 判断依据 + 样例 */
     function impColRow(c) {
       const row = el("div", { class: "db-imp-col" });
       row.dataset.src = String(c.source_index);
@@ -1050,7 +1052,7 @@
      * 而预览行已经在手上了 —— 为了一个纯函数再往返一次 IPC，用户会看到
      * 一次不必要的等待。推导逻辑本身在 Rust 侧（`import_plan::guess_type`），
      * 这里只是**复用同一批预览行**做同样的判断吗？不是 —— 这里只做
-     * "把表头文字当字段名"这一步，类型仍按原来的列位置沿用。
+     * "把表头文字当列名"这一步，类型仍按原来的列位置沿用。
      *
      * 之所以敢这么做：真正的类型判断在**落库前那次** `import.begin` 里由
      * Rust 重新做（它读的是整表），界面上的建议只是给人看的初值。
@@ -1105,12 +1107,12 @@
       }
       const badName = columns.find((c) => !c.name);
       if (badName) {
-        toast("有字段名是空的，先填上", "error");
+        toast("有列名是空的，先填上", "error");
         return;
       }
 
       setBusy(true, "正在准备…");
-      prog.set(null, "正在建表并读取数据（这一步可能要几秒）");
+      prog.set(null, "正在新建表格并读取数据（这一步可能要几秒）");
       const t0 = Date.now();
       try {
         const beg = await call("import.begin", {
@@ -1439,7 +1441,7 @@
     const dlg = buildDialog(
       "db-dialog-schema",
       "表结构 · " + tname,
-      "加字段、删字段、改表注释都在这里。删字段不可恢复 —— " +
+      "加列、删列、改表注释都在这里。删列不可恢复 —— " +
         "重要的表先去侧栏点「备份数据库」。"
     );
     dlg.textContent = "";
@@ -1476,10 +1478,10 @@
       } else {
         const btnDel = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "删列");
         btnDel.addEventListener("click", async () => {
-          if (!confirm("删掉字段「" + c.name + "」？这一列的数据会一起消失，且不可恢复。")) return;
+          if (!confirm("删掉列「" + c.name + "」？这一列的数据会一起消失，且不可恢复。")) return;
           try {
             await call("schema.dropColumn", { table: tname, column: c.name });
-            toast("已删字段「" + c.name + "」");
+            toast("已删列「" + c.name + "」");
             dlg.close("ok");
             openSchemaDialog(); // 重新打开 = 刷新内容
             openTable(tname);   // 网格也要跟着变
@@ -1495,23 +1497,23 @@
     // 加列表单
     await ensureTypes();
     const addBox = el("div", { class: "db-schema-add" });
-    const nameInput = el("input", { class: "input", type: "text", placeholder: "字段名" });
+    const nameInput = el("input", { class: "input", type: "text", placeholder: "列名" });
     const typeSel = el("select", { class: "select" });
     for (const [v, label] of TYPES || []) typeSel.appendChild(el("option", { value: v }, label));
     const nnChk = el("input", { type: "checkbox" });
     const defInput = el("input", { class: "input", type: "text", placeholder: "默认值（可选，如 0）" });
-    const cmtInput = el("input", { class: "input", type: "text", placeholder: "字段说明（可选）" });
-    const btnAdd = el("button", { class: "btn btn-primary", type: "button" }, "加字段");
+    const cmtInput = el("input", { class: "input", type: "text", placeholder: "列说明（可选）" });
+    const btnAdd = el("button", { class: "btn btn-primary", type: "button" }, "加列");
     const addErr = el("p", { class: "hint", style: "color: #b00" }, "");
     addBox.append(
-      el("p", { class: "hint" }, "加一个新字段（已有的行会用默认值填充）："),
+      el("p", { class: "hint" }, "加一个新列（已有的行会用默认值填充）："),
       nameInput, typeSel,
       el("label", { class: "hint" }, " 必填 ", nnChk),
       defInput, cmtInput, btnAdd, addErr
     );
     btnAdd.addEventListener("click", async () => {
       const cname = nameInput.value.trim();
-      if (!cname) { addErr.textContent = "先给字段起个名"; return; }
+      if (!cname) { addErr.textContent = "先给列起个名"; return; }
       btnAdd.disabled = true;
       try {
         await call("schema.addColumn", {
@@ -1525,7 +1527,7 @@
             comment: cmtInput.value.trim() === "" ? null : cmtInput.value.trim(),
           },
         });
-        toast("已加字段「" + cname + "」");
+        toast("已加列「" + cname + "」");
         dlg.close("ok");
         openSchemaDialog();
         openTable(tname);
@@ -1544,7 +1546,7 @@
       }
     });
 
-    dlg.append(commentBox, el("p", { class: "hint" }, "字段（" + (info.columns || []).length + " 个）："), list, addBox);
+    dlg.append(commentBox, el("p", { class: "hint" }, "列（" + (info.columns || []).length + " 个）："), list, addBox);
     dlg.showModal();
   }
 

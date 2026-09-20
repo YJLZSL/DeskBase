@@ -21,7 +21,7 @@ mod import_pipeline;
 mod workspace;
 mod render;
 mod schema;
-// 导入计划内核（表头行与字段类型推断）。**已接线**（2026-09-19）：
+// 导入计划内核（表头行与列类型推断）。**已接线**（2026-09-19）：
 // `excel_import::build_plan` 调它生成列建议，界面在导入向导里显示并允许用户改。
 mod import_plan;
 mod backup;
@@ -1280,9 +1280,9 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }))
         }
 
-        // 字段类型清单：**唯一来源是 Rust 的 `ColType`**。
+        // 列类型清单：**唯一来源是 Rust 的 `ColType`**。
         //
-        // 为什么要有这条 IPC：界面（建表向导、导入向导）都需要"9 种类型 + 中文标签"。
+        // 为什么要有这条 IPC：界面（新建表格向导、导入向导）都需要"9 种类型 + 中文标签"。
         // 以前它抄在 `db.js` 的 `TYPES` 数组里 —— 那就等于同一份清单有两个来源，
         // 加一种类型时会漏改一边（而症状是"下拉框里没有那个选项"，很难联想到协议）。
         // `name` 是协议值（snake_case，与 `ColType::from_name` 逐字一致），
@@ -1306,7 +1306,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         // ============================================================
-        // Excel / CSV 导入建表（v0.3.0 第一优先级）
+        // Excel / CSV 导入新建表格（v0.3.0 第一优先级）
         // ============================================================
         //
         // 三段式，与 `convert.*` 同一套纪律：
@@ -1573,8 +1573,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             ok(id, serde_json::json!({ "opened": opened, "denied": denied }))
         }
 
-        // ---------- 用户库表（schema.rs）----------
-        // 数据库页的 IPC。表名/字段名的校验与转义全部在 schema 层（标识符
+        // ---------- 用户表格（schema.rs）----------
+        // 数据库页的 IPC。表名/列名的校验与转义全部在 schema 层（标识符
         // 白名单 + 引号包裹），值一律参数绑定 —— 这一层只做参数搬运与锁管理，
         // 不拼任何 SQL。接口约定见 schema.rs 头注释：Page.columns[0] 恒为
         // `_rowid`，rows[i][0] 是行号，界面靠它调 updateCell / deleteRows。
@@ -1666,7 +1666,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             match state.db.lock() {
                 Ok(d) => match schema::add_column(d.conn(), table, &col) {
                     Ok(()) => {
-                        log_line(&state.data_dir, &format!("加字段：{table}.{}", col.name));
+                        log_line(&state.data_dir, &format!("加列：{table}.{}", col.name));
                         ok(id, serde_json::json!({}))
                     }
                     Err(e) => err(id, e),
@@ -1684,7 +1684,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             match state.db.lock() {
                 Ok(d) => match schema::drop_column(d.conn(), table, column) {
                     Ok(()) => {
-                        log_line(&state.data_dir, &format!("删字段：{table}.{column}"));
+                        log_line(&state.data_dir, &format!("删列：{table}.{column}"));
                         ok(id, serde_json::json!({}))
                     }
                     Err(e) => err(id, e),
@@ -1717,13 +1717,13 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .get("spec")
                 .and_then(|v| serde_json::from_value::<schema::TableSpec>(v.clone()).ok());
             let Some(spec) = parsed else {
-                return err(id, "建表参数不完整或格式不对");
+                return err(id, "新建表格参数不完整或格式不对");
             };
             match state.db.lock() {
                 Ok(d) => match schema::create_table(d.conn(), &spec) {
                     Ok(()) => {
                         // 日志记表名不记内容 —— 表名会出现在界面上，不算业务数据
-                        log_line(&state.data_dir, &format!("新建库表「{}」", spec.name));
+                        log_line(&state.data_dir, &format!("新建表格「{}」", spec.name));
                         ok(id, serde_json::json!({}))
                     }
                     Err(e) => err(id, e),
@@ -1745,7 +1745,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             match state.db.lock() {
                 Ok(d) => match schema::drop_table(d.conn(), name, confirm) {
                     Ok(()) => {
-                        log_line(&state.data_dir, &format!("删除库表「{name}」"));
+                        log_line(&state.data_dir, &format!("删除表格「{name}」"));
                         ok(id, serde_json::json!({}))
                     }
                     Err(e) => err(id, e),
@@ -2591,7 +2591,7 @@ fn default_out_name(src: &std::path::Path) -> String {
 // 转换计划的一次性暂存
 // ============================================================
 // 为什么不让渲染层拿着路径自己调 run：
-//   `convert::run` 要的是一个 `ConversionPlan`，而它的 `job` 字段是私有的 ——
+//   `convert::run` 要的是一个 `ConversionPlan`，而它的 `job` 列是私有的 ——
 //   外面手拼一个计划编译不过。这是刻意的：**执行路径只能来自本模块造出的计划**，
 //   否则渲染层就能构造一个"读任意文件、写任意路径"的计划出来。
 //
@@ -2676,7 +2676,7 @@ fn log_line(data_dir: &std::path::Path, msg: &str) {
 // 手点一次只能证明"这一次是好的"，下次改代码没人会再点一遍。
 //
 // 这里把 1–15 步里**能用 IPC 表达的那部分**变成可重复运行的测试 —— 而且是走
-// `dispatch()` 这个真正的入口，因此连"Rust 序列化出来的字段名与界面读的是不是
+// `dispatch()` 这个真正的入口，因此连"Rust 序列化出来的列名与界面读的是不是
 // 同一个"也一起钉住了（`has_more` / `elapsed_ms` 两次静默失效都发生在这条边界上）。
 //
 // 覆盖不到的部分（如实说明）：
@@ -2747,9 +2747,9 @@ mod acceptance {
         })
     }
 
-    /// 验收 1 + 2 + 5 + 6：建表（含金额列）→ 录一行 → 金额按分存 → 三位小数被拒。
+    /// 验收 1 + 2 + 5 + 6：新建表格（含金额列）→ 录一行 → 金额按分存 → 三位小数被拒。
     #[test]
-    fn 验收_建表录行与金额往返() {
+    fn 验收_新建表格录行与金额往返() {
         let (state, dir) = fixture("money");
         call(
             &state,
@@ -3137,9 +3137,9 @@ mod acceptance {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 建表向导的「默认值」输入框（v0.2.1 新增）。
+    /// 新建表格向导的「默认值」输入框（v0.2.1 新增）。
     #[test]
-    fn 建表默认值能落库() {
+    fn 新建表格默认值能落库() {
         let (state, dir) = fixture("default");
         call(
             &state,
@@ -3174,7 +3174,7 @@ mod acceptance {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// **九种字段类型都必须能建出来**（走真正的 IPC 入口）。
+    /// **九种列类型都必须能建出来**（走真正的 IPC 入口）。
     ///
     /// 为什么专门加这一条：2026-09-19 发现「日期时间」这个类型**选了会失败** ——
     /// serde 的 `rename_all = "snake_case"` 把 `DateTime` 序列化成 `date_time`，
@@ -3182,7 +3182,7 @@ mod acceptance {
     /// 用这个类型建过表，所以它一直躺在那里没人碰。
     /// **类型清单是一份跨语言协议，每一种都要有覆盖。**
     #[test]
-    fn 九种字段类型都能建表() {
+    fn 九种列类型都能新建表格() {
         let (state, dir) = fixture("types");
 
         // 类型清单来自 Rust（唯一来源），界面就是按这批名字传的
@@ -3203,7 +3203,7 @@ mod acceptance {
                 json!({ "spec": { "name": tname, "comment": null,
                                    "columns": [col("值", ty)] } }),
             )
-            .unwrap_or_else(|e| panic!("类型「{ty}」建表失败：{e}"));
+            .unwrap_or_else(|e| panic!("类型「{ty}」新建表格失败：{e}"));
             let info = call(&state, "schema.getTable", json!({ "name": tname })).unwrap();
             let decl = info["columns"][0]["decl_type"].as_str().unwrap_or("");
             assert!(!decl.is_empty(), "类型「{ty}」的声明类型是空的");
@@ -3221,13 +3221,13 @@ mod acceptance {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 导入建表：**走真实 IPC 的端到端路径**（选文件之后的 preview + run）。
+    /// 导入新建表格：**走真实 IPC 的端到端路径**（选文件之后的 preview + run）。
     ///
     /// 用 CSV 打底：它是最容易在测试里生成的表格格式，且与 xlsx 走的是
     /// 并列的两条读路径（`csv_import::read_rows`）—— 这条覆盖了，xlsx 那侧
     /// 由 `xlsx.rs` 自己的往返测试覆盖。
     #[test]
-    fn 导入建表走完整路径() {
+    fn 导入新建表格走完整路径() {
         let (state, dir) = fixture("import");
         // 造一个带"表头上面还有标题行"的 CSV —— 这是中文台账最常见的形态
         let csv = dir.join("客户台账.csv");

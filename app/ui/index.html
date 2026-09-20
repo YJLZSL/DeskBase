@@ -139,16 +139,17 @@
       </section>
 
       <!-- ---------- 数据库 ---------- -->
-      <!-- 页面外壳只是容器：表列表、数据网格（DeskBaseGrid）与 SQL 编辑器
+      <!-- 页面外壳只是容器：表格列表与数据网格（DeskBaseGrid）。
+           SQL 编辑器已于 2026-09-20 按 ADR-0020 撤下（表格优先形态）——
            （DeskBaseSql）都由 db.js 在运行时挂进来。 -->
       <section class="view" data-view="database">
         <div class="dbwrap" id="db-wrap">
           <aside class="db-side">
             <div class="db-side-head">
-              <span class="db-side-title">库表</span>
+              <span class="db-side-title">表格</span>
               <button class="btn btn-ghost db-mini" id="btn-db-refresh" title="刷新表列表" type="button">刷新</button>
             </div>
-            <button class="btn db-newtable" id="btn-db-new-table" type="button">新建表</button>
+            <button class="btn db-newtable" id="btn-db-new-table" type="button">新建表格</button>
             <button class="btn btn-ghost db-import" id="btn-db-import" type="button"
                     title="把 Excel / CSV 导入成一张新表（不会覆盖已有数据）">
               从 Excel 导入
@@ -158,7 +159,7 @@
               备份数据库
             </button>
             <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
-                    title="查看并编辑当前表的结构：改名、加字段、删字段、改表注释">
+                    title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
               表结构
             </button>
             <div class="db-table-list" id="db-table-list"></div>
@@ -168,13 +169,14 @@
             </div>
           </aside>
           <div class="db-main">
-            <div class="db-tabs" id="db-tabs" role="tablist">
+            <!-- SQL 页签已于 2026-09-20 按 ADR-0020 撤下（表格优先形态）。
+                 页签栏整体移除 —— 只剩一张表可看时，页签是多余的概念。 -->
+            <div class="db-tabs" id="db-tabs" role="tablist" hidden>
               <button class="btn btn-ghost icon-only db-side-toggle" id="btn-db-side"
-                      aria-label="库表列表" title="库表列表" type="button">
+                      aria-label="表格列表" title="表格列表" type="button">
                 <svg class="ico"><use href="#i-db"/></svg>
               </button>
               <button class="db-tab" data-tab="data" type="button" role="tab" aria-selected="true">数据</button>
-              <button class="db-tab" data-tab="sql" type="button" role="tab" aria-selected="false">SQL</button>
               <span class="db-current" id="db-current-name"></span>
             </div>
             <div class="db-pane" id="db-pane-grid"></div>
@@ -435,14 +437,15 @@
 
 <!-- 组件库与命令面板都是自包含的 IIFE：DOM 在运行时创建并挂到 body，
      这里只负责把它们加载进来。必须排在 app.js 之前 —— app.js 是它们的调用方。
-     grid.js / sql.js 是数据网格与 SQL 编辑器（不认识业务）；db.js 是数据库页
+     grid.js 是数据网格（不认识业务）；db.js 是表格页
      的装配层，它调 app.js 暴露的 IPC 桥（window.__deskbase.call），所以必须
      排在 app.js 之前定义、由 app.js 在 boot 完成后调用初始化。 -->
 <script src="motion.js"></script>
 <script src="components.js"></script>
 <script src="palette.js"></script>
 <script src="grid.js"></script>
-<script src="sql.js"></script>
+<!-- SQL 编辑器已于 2026-09-20 撤下（ADR-0020）。文件保留在 app/ui/legacy/sql.js，
+     将来若要加"高级"入口可从那里恢复（存储层未动，恢复不需要动数据）。 -->
 <script src="app.js"></script>
 <script src="db.js"></script>
 <!-- 教程与首次使用引导都自带 init()，不需要 app.js 调用；

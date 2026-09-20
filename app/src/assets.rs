@@ -115,10 +115,8 @@ fn lookup(path: &str) -> Option<Asset> {
             bytes: include_bytes!("../ui/sql.css"),
             mime: CSS,
         },
-        "/sql.js" => Asset {
-            bytes: include_bytes!("../ui/sql.js"),
-            mime: JS,
-        },
+        // /sql.js 已于 2026-09-20 按 ADR-0020 撤下（文件移到 ui/legacy/sql.js，
+        // 不再随应用分发）。恢复方式：把文件移回 ui/ 并在此重新登记。
         "/database.css" => Asset {
             bytes: include_bytes!("../ui/database.css"),
             mime: CSS,

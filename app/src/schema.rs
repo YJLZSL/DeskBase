@@ -1,13 +1,13 @@
-//! 用户库表：结构、DDL、分页与单元格读写（见 docs/06 §2.2 / §2.3 / §5 / §9 / §11）
+//! 用户表格：结构、DDL、分页与单元格读写（见 docs/06 §2.2 / §2.3 / §5 / §9 / §11）
 //!
 //! 这一层存在的理由：**渲染层只会给字符串，而 SQLite 的参数绑定不能用于标识符**。
-//! 所以每个表名/字段名都必须先过 [`validate_identifier`]，再一律用双引号包起来拼进 SQL；
+//! 所以每个表名/列名都必须先过 [`validate_identifier`]，再一律用双引号包起来拼进 SQL；
 //! 值则永远走参数绑定，绝不拼字符串（docs/06 §11 的第一条红线）。
 //!
 //! 四条贯穿全模块的约定（都是踩过的坑，不是风格偏好）：
 //!
 //! 1. **一切靠 rowid**。翻页、改单元格、删行都按 `rowid` 定位，因此
-//!    `WITHOUT ROWID` 表被明确拒绝，字段名也不允许叫 `rowid`/`_rowid_`/`oid`
+//!    `WITHOUT ROWID` 表被明确拒绝，列名也不允许叫 `rowid`/`_rowid_`/`oid`
 //!    —— 它们会遮蔽 SQLite 的内部行号，遮蔽之后的"编辑"会改到别的行上去。
 //!    [`Page::rows`] 的每一行第 0 个值就是 `_rowid`（见 [`ROWID_COLUMN`]），
 //!    界面拿它当行标识，不要显示给用户。
@@ -41,9 +41,9 @@ const SQLITE_PREFIX: &str = "sqlite_";
 const META_PREFIX: &str = "_db_";
 /// 表注释（表级）。
 const TABLE_COMMENT_TABLE: &str = "_db_table_comment";
-/// 字段注释 + 字段语义类型。
+/// 列注释 + 列语义类型。
 const COLUMN_COMMENT_TABLE: &str = "_db_column_comment";
-/// 内置行号的表达式。用 `_rowid_` 而不是 `rowid`：字段名叫 `rowid` 的（外部建的表）
+/// 内置行号的表达式。用 `_rowid_` 而不是 `rowid`：列名叫 `rowid` 的（外部建的表）
 /// 会遮蔽 `rowid`，但不会遮蔽 `_rowid_`，这样能少一类坑。
 const ROWID_EXPR: &str = "_rowid_";
 /// [`Page::columns`] 的第一列名。**这是对界面的约定**：第 0 列永远是行号。
@@ -62,9 +62,9 @@ pub const MONEY_SCALE: u32 = 2;
 /// 之后的解析成本开始明显。
 const DELETE_CHUNK: usize = 400;
 
-// ---------------- 字段类型 ----------------
+// ---------------- 列类型 ----------------
 
-/// 字段类型。对应用户能理解的语义，不是 SQLite 的存储类。
+/// 列类型。对应用户能理解的语义，不是 SQLite 的存储类。
 ///
 /// 与 docs/06 §2.3 的映射（**照文档来，不自己发明**）：
 ///
@@ -84,7 +84,7 @@ const DELETE_CHUNK: usize = 400;
 ///   - **`Money` 不用 `REAL`**：SQLite 的 `NUMERIC`/`DECIMAL` 没有真正的十进制语义，
 ///     小数会落到 IEEE-754 双精度上（0.1+0.2≠0.3），账目上不能接受。所以金额按
 ///     **最小单位（分）的整数**存：比较、求和都是精确整数运算，排序也正确。
-///     为了不让"元"悄悄变成"分"，建表时会给金额列加一条 `CHECK (typeof(...) IN
+///     为了不让"元"悄悄变成"分"，新建表格时会给金额列加一条 `CHECK (typeof(...) IN
 ///     ('integer','null'))` —— 谁（包括界面之外的 SQL）想往金额列写小数，都会当场报错，
 ///     而不是把错误数据记进账里。原值/显示值的换算只用 [`money_parse`] / [`money_display`]。
 ///   - **`Json` 用 `TEXT`**：SQLite 里 `JSON` 这个类型名只有 NUMERIC 亲和性，没有任何
@@ -102,7 +102,7 @@ pub enum ColType {
     /// ⚠️ `rename_all = "snake_case"` 给出的规范名是 **`date_time`**（不是 `datetime`）。
     ///
     /// 这个别名是修一个真实缺陷：界面（`db.js` 的类型下拉）传的是 `datetime`，
-    /// 而 serde 反序列化只认 `date_time` —— 于是**用户在新建表里选「日期时间」
+    /// 而 serde 反序列化只认 `date_time` —— 于是**用户在新建表格里选「日期时间」
     /// 会直接报"未知的类型"**。而此前没有任何测试用这个类型建过表，所以一直没暴露。
     ///
     /// 为什么用 `alias` 而不是改前端文字：两者都要能认。协议名以 serde 为准没错，
@@ -210,7 +210,7 @@ impl ColType {
     }
 }
 
-/// 建表/加列时的字段定义（建表向导第 2 步的产物）。
+/// 新建表格/加列时的列定义（新建表格向导第 2 步的产物）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ColumnDef {
     pub name: String,
@@ -221,11 +221,11 @@ pub struct ColumnDef {
     /// 所以这里按白名单校验（见 `normalize_default`）—— 它是一条真实的注入面。
     pub default: Option<String>,
     pub primary_key: bool,
-    /// 中文注释：给用户看的字段说明（docs/06 §2.2「表注释」）。
+    /// 中文注释：给用户看的列说明（docs/06 §2.2「表注释」）。
     pub comment: Option<String>,
 }
 
-/// 一张表的完整定义（建表向导第 1–3 步的产物）。
+/// 一张表的完整定义（新建表格向导第 1–3 步的产物）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TableSpec {
     pub name: String,
@@ -233,7 +233,7 @@ pub struct TableSpec {
     pub columns: Vec<ColumnDef>,
 }
 
-/// 读回来的字段信息（`PRAGMA table_info` 的样子）。
+/// 读回来的列信息（`PRAGMA table_info` 的样子）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ColumnInfo {
     pub name: String,
@@ -244,7 +244,7 @@ pub struct ColumnInfo {
     pub pk: bool,
 }
 
-/// 字段的附加元数据（注释 + 语义类型）。`ColumnInfo` 只描述 SQLite 认识的模式，
+/// 列的附加元数据（注释 + 语义类型）。`ColumnInfo` 只描述 SQLite 认识的模式，
 /// 这里是本工具额外记住的东西：注释，以及声明类型表达不出来的语义（金额、JSON）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ColumnMeta {
@@ -292,10 +292,10 @@ pub struct QueryResult {
 
 // ---------------- 标识符 ----------------
 
-/// 校验表名/字段名/列名。合法：字母、数字、下划线、中文（中文属 Unicode 字母），
+/// 校验表名/列名/列名。合法：字母、数字、下划线、中文（中文属 Unicode 字母），
 /// 不能以数字开头，不能超过 [`MAX_IDENT_CHARS`] 个字符，不能为空。
 ///
-/// 为什么必须有这一层：SQLite 的参数绑定**不能**用在标识符上，表名/字段名只能拼进
+/// 为什么必须有这一层：SQLite 的参数绑定**不能**用在标识符上，表名/列名只能拼进
 /// SQL 字符串（`PRAGMA table_info("x")` 连引号都不能省）。于是"校验 + 转义"是唯一
 /// 可行的防线：这里挡掉引号、分号、注释符等一切能改变语句结构的字符。
 pub fn validate_identifier(name: &str) -> Result<()> {
@@ -314,22 +314,22 @@ pub fn validate_identifier(name: &str) -> Result<()> {
             continue;
         }
         return Err(format!(
-            "「{name}」里有不允许的字符「{c}」：表名与字段名只能用字母、数字、下划线、中文"
+            "「{name}」里有不允许的字符「{c}」：表名与列名只能用字母、数字、下划线、中文"
         ));
     }
     Ok(())
 }
 
-/// 字段名的额外限制：不许叫 `rowid` / `_rowid_` / `oid`。
+/// 列名的额外限制：不许叫 `rowid` / `_rowid_` / `oid`。
 ///
-/// 这三个名字在 SQLite 里是**内部行号的别名**，用户拿它当字段名会遮蔽真正的 rowid，
+/// 这三个名字在 SQLite 里是**内部行号的别名**，用户拿它当列名会遮蔽真正的 rowid，
 /// 之后按 rowid 定位的分页与编辑就会改到别的行上去 —— 那是静默的数据损坏。
 fn validate_column_name(name: &str) -> Result<()> {
     validate_identifier(name)?;
     let lower = name.to_lowercase();
     if matches!(lower.as_str(), "rowid" | "_rowid_" | "oid" | ROWID_COLUMN) {
         return Err(format!(
-            "「{name}」是 SQLite 的内部行号名，不能当字段名（本工具靠行号分页与定位记录）"
+            "「{name}」是 SQLite 的内部行号名，不能当列名（本工具靠行号分页与定位记录）"
         ));
     }
     Ok(())
@@ -476,7 +476,7 @@ pub fn money_display(cents: i64) -> String {
 // ---------------- 值的转换与校验（docs/06 §5.2 数据校验） ----------------
 
 fn col_err(column: &str, e: String) -> String {
-    format!("字段「{column}」：{e}")
+    format!("列「{column}」：{e}")
 }
 
 /// 整数：允许 `12`、`12.0`（Excel/CSV 里很常见）、千分位、全角数字。
@@ -712,7 +712,7 @@ fn coerce_value(ty: Option<ColType>, column: &str, raw: Option<&str>) -> Result<
         }
         Some(ColType::Blob) => Err(col_err(
             column,
-            "是二进制字段，不能在表格里直接编辑（docs/06 §2.3 把二进制列为进阶能力）：\
+            "是二进制列，不能在表格里直接编辑（docs/06 §2.3 把二进制列为进阶能力）：\
              请用 SQL 编辑器或导入流程写入"
                 .to_string(),
         )),
@@ -740,7 +740,7 @@ fn value_to_json(v: ValueRef<'_>) -> Json {
 }
 
 /// SQLite 的报错翻译：只翻译有明确界面含义的几种，其余原样透出
-/// （原文里有表名/字段名，比我们瞎猜更有用；docs/06 §3.3 的"通俗解释"由编辑器层做）。
+/// （原文里有表名/列名，比我们瞎猜更有用；docs/06 §3.3 的"通俗解释"由编辑器层做）。
 fn sqlite_msg(e: rusqlite::Error) -> String {
     match e {
         rusqlite::Error::MultipleStatement => {
@@ -753,7 +753,7 @@ fn sqlite_msg(e: rusqlite::Error) -> String {
     }
 }
 
-// ---------------- 元数据表（表/字段注释、字段语义） ----------------
+// ---------------- 元数据表（表/列注释、列语义） ----------------
 
 const META_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS _db_table_comment (
@@ -823,7 +823,7 @@ fn upsert_column_meta(
     )
 }
 
-/// 字段的语义类型，只有声明类型表达不出来的才需要记（金额、JSON）。
+/// 列的语义类型，只有声明类型表达不出来的才需要记（金额、JSON）。
 fn semantic_for(ty: ColType) -> Option<ColType> {
     match ty {
         ColType::Money | ColType::Json => Some(ty),
@@ -860,7 +860,7 @@ fn load_table_comments(conn: &Connection) -> Result<HashMap<String, String>> {
     Ok(out)
 }
 
-/// 一张表的字段附加元数据（注释 + 语义类型），按字段名小写索引。
+/// 一张表的列附加元数据（注释 + 语义类型），按列名小写索引。
 fn load_column_meta(conn: &Connection, table: &str) -> Result<HashMap<String, (String, Option<ColType>)>> {
     let mut out = HashMap::new();
     if !meta_tables_ready(conn)? {
@@ -984,9 +984,9 @@ fn is_without_rowid(conn: &Connection, table: &str) -> Result<bool> {
 
 /// 分页/编辑前的守门：必须是用户表、必须有可用的 rowid。
 ///
-/// 为什么把"字段名遮蔽 rowid"也挡掉：如果表里有一个叫 `rowid` 的字段，
+/// 为什么把"列名遮蔽 rowid"也挡掉：如果表里有一个叫 `rowid` 的列，
 /// `_rowid_` 仍指向内部行号（这是 SQLite 的规则），但分页读出来的 rowid 与界面
-/// 看到的"rowid 字段"不是一回事，混淆成本太高。宁可明确拒绝。
+/// 看到的"rowid 列"不是一回事，混淆成本太高。宁可明确拒绝。
 fn ensure_rowid_table(conn: &Connection, table: &str) -> Result<String> {
     let real = ensure_user_table(conn, table)?;
     if is_without_rowid(conn, &real)? {
@@ -998,7 +998,7 @@ fn ensure_rowid_table(conn: &Connection, table: &str) -> Result<String> {
     for c in table_columns(conn, &real)? {
         if matches!(c.name.to_lowercase().as_str(), "rowid" | "_rowid_" | "oid") {
             return Err(format!(
-                "「{real}」有一个叫「{}」的字段，它遮蔽了 SQLite 的内部行号，\
+                "「{real}」有一个叫「{}」的列，它遮蔽了 SQLite 的内部行号，\
                  分页与编辑无法安全进行",
                 c.name
             ));
@@ -1208,7 +1208,7 @@ fn expr_is_safe(s: &str) -> bool {
 ///
 /// 为什么不能把 `DEFAULT 12.34` 直接放进 DDL：`column_ddl` 会给金额列钉一条
 /// `CHECK (typeof(x) IN ('integer','null'))`，而 `DEFAULT 12.34` 往 INTEGER 列里
-/// 写的是 REAL —— **建表能过，第一次插入才报错**，而报错信息完全指不到"默认值"
+/// 写的是 REAL —— **新建表格能过，第一次插入才报错**，而报错信息完全指不到"默认值"
 /// 这三个字上。这类"离现场很远"的报错正是本项目最想避免的。
 ///
 /// 界面把用户填的「元」包成字符串字面量（`'12.34'`）交过来，这里剥壳后交给
@@ -1283,21 +1283,21 @@ fn column_ddl(col: &ColumnDef, inline_pk: bool) -> Result<String> {
     Ok(s)
 }
 
-/// 生成建表 SQL（不执行）。
+/// 生成新建表格 SQL（不执行）。
 ///
-/// 单独暴露的理由是 docs/06 §2.2 的建表向导第 4 步：「预览 DDL → 创建」，
+/// 单独暴露的理由是 docs/06 §2.2 的新建表格向导第 4 步：「预览 DDL → 创建」，
 /// 以及 §1 的"可解释"原则 —— 向导建的每一步都要能看到等价的 SQL。
 pub fn create_table_sql(spec: &TableSpec) -> Result<String> {
     validate_user_table_name(&spec.name)?;
     if spec.columns.is_empty() {
-        return Err("表至少要有一个字段".to_string());
+        return Err("表至少要有一个列".to_string());
     }
-    // 字段名大小写不敏感，重复在这里挡掉，报错比 SQLite 的原文好懂
+    // 列名大小写不敏感，重复在这里挡掉，报错比 SQLite 的原文好懂
     let mut seen: HashSet<String> = HashSet::new();
     for c in &spec.columns {
         validate_column_name(&c.name)?;
         if !seen.insert(c.name.to_lowercase()) {
-            return Err(format!("字段名「{}」重复了", c.name));
+            return Err(format!("列名「{}」重复了", c.name));
         }
     }
     let pk_count = spec.columns.iter().filter(|c| c.primary_key).count();
@@ -1321,7 +1321,7 @@ pub fn create_table_sql(spec: &TableSpec) -> Result<String> {
     ))
 }
 
-// ---------------- 库表管理 ----------------
+// ---------------- 表格管理 ----------------
 
 /// 列出用户表。
 ///
@@ -1378,7 +1378,7 @@ pub fn get_table(conn: &Connection, name: &str) -> Result<TableInfo> {
     })
 }
 
-/// 字段的注释与语义类型（界面渲染"金额/JSON"要用语义类型，
+/// 列的注释与语义类型（界面渲染"金额/JSON"要用语义类型，
 /// 光看 `decl_type` 分不出"金额的分"和"普通整数"）。
 pub fn column_meta(conn: &Connection, table: &str) -> Result<Vec<ColumnMeta>> {
     validate_identifier(table)?;
@@ -1407,10 +1407,10 @@ pub fn column_meta(conn: &Connection, table: &str) -> Result<Vec<ColumnMeta>> {
     Ok(out)
 }
 
-/// 建表。
+/// 新建表格。
 ///
-/// 不用 `IF NOT EXISTS`：建表是用户的显式动作，同名表存在时必须**明确报错**，
-/// 静默跳过会让人以为表建好了。整个建表（DDL + 注释元数据）在一个事务里 ——
+/// 不用 `IF NOT EXISTS`：新建表格是用户的显式动作，同名表存在时必须**明确报错**，
+/// 静默跳过会让人以为表建好了。整个新建表格（DDL + 注释元数据）在一个事务里 ——
 /// SQLite 支持事务内 DDL，失败可以整块回滚（docs/06 §2.2「安全改结构」，
 /// 结构变更与 `meta_column` 更新必须同一事务，见 ADR-0012）。
 ///
@@ -1424,7 +1424,7 @@ pub fn create_table(conn: &Connection, spec: &TableSpec) -> Result<()> {
     }
     let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
     tx.execute_batch(&ddl)
-        .map_err(|e| format!("建表失败：{}", sqlite_msg(e)))?;
+        .map_err(|e| format!("新建表格失败：{}", sqlite_msg(e)))?;
     if let Some(c) = &spec.comment {
         if !c.trim().is_empty() {
             upsert_table_comment(&tx, &spec.name, c).map_err(sqlite_msg)?;
@@ -1447,7 +1447,7 @@ pub fn create_table(conn: &Connection, spec: &TableSpec) -> Result<()> {
 /// 必须同一事务"就是这件事）。
 // 【未接线 API】表结构编辑器（改表名 / 加列 / 改注释）的界面尚未实现，
 // 以下函数在二进制里暂时没有调用方。按本项目规矩（D-044），豁免必须写明
-// 终止条件：**建表向导二期（表结构编辑）接线时，这里一个 allow 都不能留**。
+// 终止条件：**新建表格向导二期（表结构编辑）接线时，这里一个 allow 都不能留**。
 // 它们各自带着完整的校验与测试，删掉等于丢掉已经想清楚的边界条件。
 
 pub fn rename_table(conn: &Connection, from: &str, to: &str) -> Result<()> {
@@ -1517,17 +1517,17 @@ pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()>
         .iter()
         .any(|c| c.name.eq_ignore_ascii_case(&col.name))
     {
-        return Err(format!("表「{real}」已经有字段「{}」了", col.name));
+        return Err(format!("表「{real}」已经有列「{}」了", col.name));
     }
     if col.primary_key {
         return Err(
-            "SQLite 不允许给已有的表加主键列：主键要在建表时定（可以新建一张表再把数据迁过去）"
+            "SQLite 不允许给已有的表加主键列：主键要在新建表格时定（可以新建一张表再把数据迁过去）"
                 .to_string(),
         );
     }
     if col.not_null && col.default.is_none() {
         return Err(
-            "新增字段要求非空时必须给一个默认值 —— 表里已有的那些行要用它来填这个字段"
+            "新增列要求非空时必须给一个默认值 —— 表里已有的那些行要用它来填这个列"
                 .to_string(),
         );
     }
@@ -1539,7 +1539,7 @@ pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()>
     ensure_meta_tables(conn)?;
     let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
     tx.execute_batch(&ddl)
-        .map_err(|e| format!("加字段失败：{}", sqlite_msg(e)))?;
+        .map_err(|e| format!("加列失败：{}", sqlite_msg(e)))?;
     let comment = col.comment.as_deref().unwrap_or("");
     let sem = semantic_for(col.ty);
     if !comment.trim().is_empty() || sem.is_some() {
@@ -1548,7 +1548,7 @@ pub fn add_column(conn: &Connection, table: &str, col: &ColumnDef) -> Result<()>
     tx.commit().map_err(sqlite_msg)
 }
 
-/// 删列。SQLite 3.35+ 的 DROP COLUMN；主键列与最后一个字段删不得；
+/// 删列。SQLite 3.35+ 的 DROP COLUMN；主键列与最后一个列删不得；
 /// 被索引 / 视图 / 触发器引用时 SQLite 会拒绝 —— 翻译成人话并指出常见原因。
 /// 删掉的列在注释表里的记录一并清掉 —— 留着就是幽灵注释。
 pub fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
@@ -1560,15 +1560,15 @@ pub fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
         return Err("「_rowid」是行标识，不能删".into());
     }
     let Some(info) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(column)) else {
-        return Err(format!("表「{real}」没有字段「{column}」"));
+        return Err(format!("表「{real}」没有列「{column}」"));
     };
     if info.pk {
         return Err(format!(
-            "「{column}」是主键字段，删了整张表的行标识就没了 —— 不允许"
+            "「{column}」是主键列，删了整张表的行标识就没了 —— 不允许"
         ));
     }
     if cols.len() <= 1 {
-        return Err("一张表至少要留一个字段".into());
+        return Err("一张表至少要留一个列".into());
     }
     ensure_meta_tables(conn)?;
     let tx = conn.unchecked_transaction().map_err(sqlite_msg)?;
@@ -1578,7 +1578,7 @@ pub fn drop_column(conn: &Connection, table: &str, column: &str) -> Result<()> {
         quote_ident(column)
     )) {
         return Err(format!(
-            "删不掉「{column}」：{}。常见原因是这个字段正被索引、视图或触发器引用 —— 先删掉引用它的东西再试。",
+            "删不掉「{column}」：{}。常见原因是这个列正被索引、视图或触发器引用 —— 先删掉引用它的东西再试。",
             sqlite_msg(e)
         ));
     }
@@ -1599,7 +1599,7 @@ pub fn set_table_comment(conn: &Connection, table: &str, comment: &str) -> Resul
     Ok(())
 }
 
-/// 改字段注释。
+/// 改列注释。
 #[allow(dead_code)]
 pub fn set_column_comment(conn: &Connection, table: &str, column: &str, comment: &str) -> Result<()> {
     validate_identifier(table)?;
@@ -1607,7 +1607,7 @@ pub fn set_column_comment(conn: &Connection, table: &str, column: &str, comment:
     let real = ensure_user_table(conn, table)?;
     let cols = table_columns(conn, &real)?;
     let Some(c) = cols.iter().find(|c| c.name.eq_ignore_ascii_case(column)) else {
-        return Err(format!("表「{real}」没有字段「{column}」"));
+        return Err(format!("表「{real}」没有列「{column}」"));
     };
     ensure_meta_tables(conn)?;
     upsert_column_comment(conn, &real, &c.name, comment).map_err(sqlite_msg)?;
@@ -1701,7 +1701,7 @@ pub fn page_rows(
 
 /// 带**列关键词筛选**的分页（数据网格筛选行的后端）。
 ///
-/// `filters` 是 (字段名, 关键词) 列表，语义是"这一列的值**包含**该关键词
+/// `filters` 是 (列名, 关键词) 列表，语义是"这一列的值**包含**该关键词
 /// （大小写不敏感）"，多个条件之间是 AND；空关键词被忽略。
 ///
 /// 两个刻意的决定：
@@ -1727,7 +1727,7 @@ pub fn page_rows_filtered(
     let real = ensure_rowid_table(conn, table)?;
     let cols = table_columns(conn, &real)?;
     if cols.is_empty() {
-        return Err(format!("表「{real}」没有任何字段"));
+        return Err(format!("表「{real}」没有任何列"));
     }
 
     // 排序键：不指定就按 rowid（= 录入顺序）
@@ -1736,7 +1736,7 @@ pub fn page_rows_filtered(
             validate_column_name(c)?;
             match cols.iter().find(|x| x.name.eq_ignore_ascii_case(c)) {
                 Some(x) => Some(x.name.clone()),
-                None => return Err(format!("表「{real}」没有字段「{c}」")),
+                None => return Err(format!("表「{real}」没有列「{c}」")),
             }
         }
         None => None,
@@ -1776,7 +1776,7 @@ pub fn page_rows_filtered(
         let real_col = cols
             .iter()
             .find(|x| x.name.eq_ignore_ascii_case(col))
-            .ok_or_else(|| format!("表「{real}」没有字段「{col}」"))?;
+            .ok_or_else(|| format!("表「{real}」没有列「{col}」"))?;
         // CAST 成文本再做包含匹配：数字列也能按"123"筛。
         // NULL 行自然被排除（CAST(NULL) 还是 NULL，instr 返回 NULL，不满足 > 0）。
         let idx = binds.len() + 1;
@@ -1892,7 +1892,7 @@ struct ColRef {
     ty: Option<ColType>,
 }
 
-/// 按字段名（小写）索引的列信息，用于写入时的校验与类型强转。
+/// 按列名（小写）索引的列信息，用于写入时的校验与类型强转。
 fn column_index(conn: &Connection, table: &str) -> Result<HashMap<String, ColRef>> {
     let metas = load_column_meta(conn, table)?;
     let mut out = HashMap::new();
@@ -1955,7 +1955,7 @@ pub fn insert_rows_opt(
     let real = ensure_user_table(conn, table)?;
     let idx = column_index(conn, &real)?;
 
-    // 列必须存在、且不重复（字段名大小写不敏感）
+    // 列必须存在、且不重复（列名大小写不敏感）
     let mut seen: HashSet<String> = HashSet::new();
     let mut cols: Vec<&ColRef> = Vec::with_capacity(columns.len());
     for c in columns {
@@ -1965,13 +1965,13 @@ pub fn insert_rows_opt(
         }
         match idx.get(&c.to_lowercase()) {
             Some(ci) => cols.push(ci),
-            None => return Err(format!("表「{real}」没有字段「{c}」")),
+            None => return Err(format!("表「{real}」没有列「{c}」")),
         }
     }
 
     let tx = conn.transaction().map_err(sqlite_msg)?;
     let inserted: usize = if cols.is_empty() {
-        // 一个字段都没给：界面上的"空白行"就是这样，插一行全默认值
+        // 一个列都没给：界面上的"空白行"就是这样，插一行全默认值
         let sql = format!("INSERT INTO {} DEFAULT VALUES", quote_ident(&real));
         let mut n = 0usize;
         for row in rows {
@@ -2038,7 +2038,7 @@ pub fn update_cell(
     let real = ensure_rowid_table(conn, table)?;
     let idx = column_index(conn, &real)?;
     let Some(c) = idx.get(&column.to_lowercase()) else {
-        return Err(format!("表「{real}」没有字段「{column}」"));
+        return Err(format!("表「{real}」没有列「{column}」"));
     };
     let v = coerce_value(c.ty, &c.name, value)?;
     let sql = format!(
@@ -2782,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn 字段名不能遮蔽_rowid() {
+    fn 列名不能遮蔽_rowid() {
         for name in ["rowid", "ROWID", "_rowid_", "oid", "_rowid"] {
             assert!(
                 validate_column_name(name).is_err(),
@@ -2799,10 +2799,10 @@ mod tests {
         assert!(validate_user_table_name("客户").is_ok());
     }
 
-    // ---------- 建表 / 列表 / 改名 / 删表 ----------
+    // ---------- 新建表格 / 列表 / 改名 / 删表 ----------
 
     #[test]
-    fn 建表后能在列表里看到_列信息正确() {
+    fn 新建表格后能在列表里看到_列信息正确() {
         let conn = mem();
         let mut s = spec(
             "客户",
@@ -2837,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn 每种字段类型的建表语句按文档映射() {
+    fn 每种列类型的新建表格语句按文档映射() {
         let s = spec(
             "类型测试",
             vec![
@@ -2919,7 +2919,7 @@ mod tests {
         let p = page_rows(&conn, "t", None, false, None, 10).unwrap();
         assert_eq!(p.rows[0][1].as_i64(), Some(1), "INTEGER PRIMARY KEY 自动编号");
         assert_eq!(p.rows[0][2].as_i64(), Some(0), "默认值生效");
-        // 显式给空串 = 用户把这个字段清空了，写 NULL，**不是**回落到默认值
+        // 显式给空串 = 用户把这个列清空了，写 NULL，**不是**回落到默认值
         ins(&mut conn, "t", &["n"], &[vec![""]]);
         let p = page_rows(&conn, "t", None, false, None, 10).unwrap();
         assert_eq!(p.rows[1][2], Json::Null);
@@ -3013,7 +3013,7 @@ mod tests {
         let conn = mem();
         let mut s = spec("客户", vec![pk("id", ColType::Integer), c("姓名", ColType::Text)]);
         s.comment = Some("旧注释".to_string());
-        s.columns[1].comment = Some("旧字段注释".to_string());
+        s.columns[1].comment = Some("旧列注释".to_string());
         create_table(&conn, &s).unwrap();
         drop_table(&conn, "客户", "客户").unwrap();
         create_table(&conn, &spec("客户", vec![c("姓名", ColType::Text)])).unwrap();
@@ -3312,9 +3312,9 @@ mod tests {
     }
 
     #[test]
-    fn 字段遮蔽rowid的表也拒绝分页() {
+    fn 列遮蔽rowid的表也拒绝分页() {
         let conn = mem();
-        // 外部建的表（我们的 DDL 不允许这种字段名）
+        // 外部建的表（我们的 DDL 不允许这种列名）
         conn.execute_batch("CREATE TABLE shadow (rowid INTEGER, v TEXT)")
             .unwrap();
         let e = page_rows(&conn, "shadow", None, false, None, 10).unwrap_err();
@@ -3385,7 +3385,7 @@ mod tests {
         // 列不存在
         let e = insert_rows(&mut conn, "t", &["没有这列".to_string()], &[vec!["x".to_string()]])
             .unwrap_err();
-        assert!(e.contains("没有字段"), "{e}");
+        assert!(e.contains("没有列"), "{e}");
     }
 
     #[test]
@@ -3637,7 +3637,7 @@ mod tests {
         assert!(e.contains("没有找到"), "{e}");
         // 列不存在
         let e = update_cell(&conn, "t", 1, "没有这列", Some("三")).unwrap_err();
-        assert!(e.contains("没有字段"), "{e}");
+        assert!(e.contains("没有列"), "{e}");
     }
 
     #[test]
@@ -3759,7 +3759,7 @@ mod tests {
         assert!(run_query(&conn, "SELECT 1;", 10).is_ok());
         // 认不出开头
         assert!(run_query(&conn, "1 + 1", 10).is_err());
-        // 语法错误原样透出（带表名/字段名，比我们瞎猜有用）
+        // 语法错误原样透出（带表名/列名，比我们瞎猜有用）
         assert!(run_query(&conn, "SELECT * FROM 没有这张表", 10).is_err());
     }
 
@@ -3913,7 +3913,7 @@ mod tests {
         // 空关键词被忽略 = 全量
         let page = page_rows_filtered(&conn, "客户", None, false, None, 100, &f("")).unwrap();
         assert_eq!(page.rows.len(), 3);
-        // 不存在的字段要报错，不能静默不过滤（注意这里必须直接给"地址"这个列名）
+        // 不存在的列要报错，不能静默不过滤（注意这里必须直接给"地址"这个列名）
         assert!(
             page_rows_filtered(
                 &conn,
@@ -3928,14 +3928,14 @@ mod tests {
         );
     }
 
-    /// 分页应答的字段名是**界面依赖的契约**：Rust 的 snake_case 与 JS 读取的名字必须逐字对上。
+    /// 分页应答的列名是**界面依赖的契约**：Rust 的 snake_case 与 JS 读取的名字必须逐字对上。
     ///
     /// 为什么值得专门钉一个测试：v0.2.0-beta.1 出过一个 P1 —— `db.js` 里写成
     /// `page.hasMore`，而 serde 序列化出来的是 `has_more`，值恒为 `undefined`，
     /// 于是超过一页的表永远翻不动。**测试全绿、界面自检全绿，只有真的去翻页才会发现。**
-    /// 这里把两头都钉住：改字段名而不改界面，这个测试就会红。
+    /// 这里把两头都钉住：改列名而不改界面，这个测试就会红。
     #[test]
-    fn 分页应答的字段名与界面读取的名字一致() {
+    fn 分页应答的列名与界面读取的名字一致() {
         // ① Rust 侧序列化出来的键（snake_case，本模块没有 rename_all）
         let page = Page {
             rows: vec![vec![Json::from(1)]],
@@ -3949,22 +3949,22 @@ mod tests {
             .unwrap()
             .clone();
         for k in ["rows", "columns", "has_more", "next_cursor"] {
-            assert!(obj.contains_key(k), "分页应答缺少字段 {k}：界面会读到 undefined");
+            assert!(obj.contains_key(k), "分页应答缺少列 {k}：界面会读到 undefined");
         }
         assert!(
             !obj.contains_key("hasMore"),
-            "分页应答不该出现驼峰字段 —— 界面要的是 has_more"
+            "分页应答不该出现驼峰列 —— 界面要的是 has_more"
         );
 
         // ② 界面侧必须按这些名字读（源码级核对，防止再写错）
         let js = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/db.js"),
         )
-        .expect("读不到 app/ui/db.js —— 这个测试要核对界面读取的字段名");
+        .expect("读不到 app/ui/db.js —— 这个测试要核对界面读取的列名");
         for name in ["has_more", "next_cursor"] {
             assert!(
                 js.contains(&format!("page.{name}")),
-                "app/ui/db.js 里没有 `page.{name}`：字段名对不上时不会报错，只会静默拿到 \
+                "app/ui/db.js 里没有 `page.{name}`：列名对不上时不会报错，只会静默拿到 \
                  undefined（这个坑已经踩过一次，见 BUG_HUNT-2026-09-18.md P1-1）"
             );
         }
@@ -3973,8 +3973,8 @@ mod tests {
     /// 金额列的默认值必须换算成整数分。
     ///
     /// 反例说明为什么值得测：`DEFAULT 12.34` 在 INTEGER 列上写的是 REAL，
-    /// 撞上建表时钉的 `CHECK (typeof(x) IN ('integer','null'))` ——
-    /// **建表会成功，第一次插入才报错**，而报错信息完全指不到"默认值"上。
+    /// 撞上新建表格时钉的 `CHECK (typeof(x) IN ('integer','null'))` ——
+    /// **新建表格会成功，第一次插入才报错**，而报错信息完全指不到"默认值"上。
     #[test]
     fn 金额列的默认值按元换算成整数分() {
         // 界面会把用户填的「元」包成字符串字面量
@@ -4001,7 +4001,7 @@ mod tests {
         assert!(ddl.contains("DEFAULT 1234"), "DDL 应为 DEFAULT 1234：{ddl}");
         assert!(!ddl.contains("12.34"), "DDL 里不该出现实数：{ddl}");
 
-        // 端到端：建表后不给金额列赋值，默认值要能落成 1234 分
+        // 端到端：新建表格后不给金额列赋值，默认值要能落成 1234 分
         let mut conn = mem();
         create_table(&conn, &spec("报销", vec![c("事项", ColType::Text), col])).unwrap();
         ins(&mut conn, "报销", &["事项"], &[vec!["打车"]]);
@@ -4048,17 +4048,21 @@ mod tests {
         );
     }
 
-    /// 读一个界面脚本的源码（字段名核对用）。
+    /// 读一个界面脚本的源码（列名核对用）。
+    ///
+    /// 回退到 `ui/legacy/`：2026-09-20 按 ADR-0020 撤下的组件（如 sql.js）移到了那里。
+    /// 它们虽然不再随产物分发，但仍**刻意保留着**（零成本可逆点）—— 恢复使用时
+    /// 仍要守同一条跨语言命名规则，所以门禁继续扫它们，而不是把它们排除在外。
     fn ui_src(name: &str) -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("ui")
-            .join(name);
-        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 app/ui/{name}：{e}"))
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        let p = base.join(name);
+        let p = if p.exists() { p } else { base.join("legacy").join(name) };
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 app/ui/{name}（含 legacy 回退）：{e}"))
     }
 
     /// 去掉 JS 的**行注释**（`//` 到行尾），字符串里的 `//` 不算。
     ///
-    /// 为什么要去注释：注释里为了讲清这个坑，会**写出错误的字段名**
+    /// 为什么要去注释：注释里为了讲清这个坑，会**写出错误的列名**
     /// （"不能写成 `elapsedMs`"）。不去掉，门禁会被自己的说明文字弄红 ——
     /// 那等于逼着后来者删掉说明，是本项目的红线（D-040 的精神）。
     fn strip_line_comments(src: &str) -> String {
@@ -4116,11 +4120,11 @@ mod tests {
         out
     }
 
-    /// 跨语言字段名的**通用**门禁：凡是用 serde 默认（snake_case）序列化的结构体字段，
+    /// 跨语言列名的**通用**门禁：凡是用 serde 默认（snake_case）序列化的结构体列，
     /// 界面里都不允许出现它的驼峰写法。
     ///
-    /// 上面那个 `分页应答的字段名…` 测试只钉住 `Page` 的两个字段；这一条把
-    /// 「凡是跨语言边界传字段都要逐个核对」变成机器可查。它已经被踩过两次：
+    /// 上面那个 `分页应答的列名…` 测试只钉住 `Page` 的两个列；这一条把
+    /// 「凡是跨语言边界传列都要逐个核对」变成机器可查。它已经被踩过两次：
     ///   · `Page.has_more` 写成 `hasMore` → 超过一页的表永远翻不动
     ///   · `QueryResult.elapsed_ms` 写成 `elapsedMs` → 每条语句的耗时与总耗时永远不显示
     /// 两次都是"测试全绿、自检全绿、界面看起来正常"。
@@ -4128,7 +4132,7 @@ mod tests {
     /// 只查 `db.js` / `sql.js`（直接读 IPC 应答的两个文件）。`grid.js` 不查：
     /// 它吃的是 `db.js` 转好的**驼峰**对象，那是刻意的内部契约，不是 Rust 那侧的名字。
     #[test]
-    fn 跨语言字段名不得在界面里写成驼峰() {
+    fn 跨语言列名不得在界面里写成驼峰() {
         const FIELDS: &[&str] = &[
             "has_more",
             "next_cursor",
@@ -4143,7 +4147,7 @@ mod tests {
             for f in FIELDS {
                 let camel = to_lower_camel(f);
                 if camel == *f {
-                    continue; // 没有下划线的字段不存在这个问题
+                    continue; // 没有下划线的列不存在这个问题
                 }
                 let bad = format!(".{camel}");
                 assert!(
@@ -4166,7 +4170,7 @@ mod tests {
         let qv = serde_json::to_value(&q).unwrap();
         let qo = qv.as_object().unwrap();
         for k in ["columns", "rows", "truncated", "elapsed_ms", "affected"] {
-            assert!(qo.contains_key(k), "QueryResult 缺少字段 {k}：界面会读到 undefined");
+            assert!(qo.contains_key(k), "QueryResult 缺少列 {k}：界面会读到 undefined");
         }
         let t = TableInfo {
             name: "t".into(),
@@ -4220,7 +4224,7 @@ mod tests {
     // ---------- 注释元数据 ----------
 
     #[test]
-    fn 表注释与字段注释可以写入与读回() {
+    fn 表注释与列注释可以写入与读回() {
         let conn = mem();
         let mut s = spec("客户", vec![pk("id", ColType::Integer), c("金额", ColType::Money)]);
         s.comment = Some("客户主表".to_string());
@@ -4237,13 +4241,13 @@ mod tests {
 
         // 改注释
         set_table_comment(&conn, "客户", "改过的说明").unwrap();
-        set_column_comment(&conn, "客户", "id", "改过的字段说明").unwrap();
+        set_column_comment(&conn, "客户", "id", "改过的列说明").unwrap();
         assert_eq!(get_table(&conn, "客户").unwrap().comment.as_deref(), Some("改过的说明"));
         let metas = column_meta(&conn, "客户").unwrap();
-        assert_eq!(metas[0].comment.as_deref(), Some("改过的字段说明"));
-        // 改字段注释不会把语义类型弄丢（金额仍然是金额）
+        assert_eq!(metas[0].comment.as_deref(), Some("改过的列说明"));
+        // 改列注释不会把语义类型弄丢（金额仍然是金额）
         assert_eq!(metas[1].semantic, Some(ColType::Money));
-        // 给不存在的字段写注释要报错
+        // 给不存在的列写注释要报错
         assert!(set_column_comment(&conn, "客户", "没有这列", "x").is_err());
         // 空注释等于没注释
         set_table_comment(&conn, "客户", "").unwrap();
@@ -4270,7 +4274,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "只读路径不该建元数据表");
-        // 一旦要写（建表），元数据表才出现
+        // 一旦要写（新建表格），元数据表才出现
         create_table(&conn, &spec("新表", vec![pk("id", ColType::Integer)])).unwrap();
         let n: i64 = conn
             .query_row(
@@ -4515,11 +4519,11 @@ mod edit_tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(cc, 0, "被删字段的注释要清掉");
+        assert_eq!(cc, 0, "被删列的注释要清掉");
     }
 
     #[test]
-    fn 表结构_删列_主键和最后的字段都不许删() {
+    fn 表结构_删列_主键和最后的列都不许删() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE only(id INTEGER PRIMARY KEY, v TEXT);")
             .unwrap();

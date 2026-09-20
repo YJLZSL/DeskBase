@@ -26,7 +26,7 @@
 
   const SAMPLE_NAME = "示例台账";
 
-  // 示例表的字段。键名严格对齐 db.js 里 schema.createTable 的入参：
+  // 示例表的列。键名严格对齐 db.js 里 schema.createTable 的入参：
   // { name, ty, not_null, default, primary_key, comment }
   const SAMPLE_COLUMNS = [
     { name: "名称", ty: "text", not_null: false, default: null, primary_key: false, comment: null },
@@ -113,11 +113,11 @@
     const box = el("div", { class: "db-onboard" });
     box.appendChild(
       el("p", { class: "db-onboard-lead" },
-        "还没有库表。跟着三步建第一张：")
+        "还没有表格。跟着三步建第一张：")
     );
     const ol = el("ol", { class: "db-onboard-steps" });
     [
-      "点上方「新建表」，给表起名、加字段。",
+      "点上方「新建表格」，给表起名、加列。",
       "建好后切到「数据」页签，在表尾那行录数据。",
       "看不懂？读设置页里的「数据库使用教程」。",
     ].forEach((t) => ol.appendChild(el("li", null, t)));
