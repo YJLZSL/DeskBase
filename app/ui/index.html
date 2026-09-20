@@ -188,6 +188,37 @@
       <!-- ---------- 设置 ---------- -->
       <section class="view" data-view="settings">
         <div class="stack">
+          <div class="card" id="card-ai">
+            <h3>AI 表格</h3>
+            <p class="hint">
+              让 AI 帮你整理表格（例如"把地址里的省份抠出来"）。
+              <b>默认关闭</b>；开启后也只有你<b>逐次确认过的</b>数据会发送给你选择的厂商。
+            </p>
+            <div class="field">
+              <label><input type="checkbox" id="ai-enabled" /> 启用 AI（需要联网）</label>
+            </div>
+            <div class="field">
+              <label for="ai-provider">服务商</label>
+              <select id="ai-provider" class="select"></select>
+            </div>
+            <div class="field">
+              <label for="ai-base">接口地址</label>
+              <input id="ai-base" class="input" type="text" placeholder="https://…/v1" />
+              <div class="hint">换厂商会自动填好；也支持自建网关与本机 Ollama（http://127.0.0.1:11434/v1）。</div>
+            </div>
+            <div class="field">
+              <label for="ai-model">模型名</label>
+              <input id="ai-model" class="input" type="text" placeholder="留空用该厂商默认" />
+            </div>
+            <div class="field">
+              <label for="ai-key">API Key</label>
+              <input id="ai-key" class="input" type="password" placeholder="你自己的 Key" />
+              <div class="hint">Key 只保存在<b>本机数据库</b>里，程序不会替你保管到别处；调用时直连你选的厂商。</div>
+            </div>
+            <div class="db-dialog-actions">
+              <button class="btn btn-primary" id="ai-save" type="button">保存 AI 设置</button>
+            </div>
+          </div>
           <div class="card">
             <h3>外观</h3>
 

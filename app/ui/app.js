@@ -1335,3 +1335,68 @@
 
   boot();
 })();
+
+  // ---------- AI 表格设置（v0.3.0 · P2） ----------
+  // 只做配置读写。默认必须是关的（ADR-0017）—— 界面不预设任何"帮你打开"的暗示。
+  (function wireAiCard() {
+    const $en = document.getElementById("ai-enabled");
+    const $pv = document.getElementById("ai-provider");
+    const $base = document.getElementById("ai-base");
+    const $model = document.getElementById("ai-model");
+    const $key = document.getElementById("ai-key");
+    const $save = document.getElementById("ai-save");
+    if (!$en || !$save) return;
+    let PROVIDERS = [];
+
+    async function loadProviders() {
+      const r = await call("app.aiProviders");
+      PROVIDERS = Array.isArray(r) ? r : [];
+      $pv.textContent = "";
+      for (const p of PROVIDERS) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.label;
+        opt.dataset.base = p.base_url;
+        $pv.appendChild(opt);
+      }
+    }
+
+    async function load() {
+      try {
+        await loadProviders();
+        const s = await call("app.aiSettings");
+        if (!s) return;
+        $en.checked = !!s.enabled;
+        $pv.value = s.provider || "deepseek";
+        $base.value = s.base_url || "";
+        $model.value = s.model || "";
+        $key.value = s.api_key || "";
+      } catch (e) {
+        console.warn("读 AI 设置失败", e);
+      }
+    }
+
+    $pv.addEventListener("change", () => {
+      const opt = $pv.selectedOptions && $pv.selectedOptions[0];
+      if (opt && opt.dataset.base) $base.value = opt.dataset.base;
+    });
+
+    $save.addEventListener("click", async () => {
+      try {
+        await call("app.saveAiSettings", {
+          settings: {
+            enabled: $en.checked,
+            provider: $pv.value,
+            base_url: $base.value.trim(),
+            model: $model.value.trim(),
+            api_key: $key.value,
+          },
+        });
+        toast($en.checked ? "AI 已开启（每次调用前还会再问你一次）" : "AI 设置已保存（当前关闭）");
+      } catch (e) {
+        toast("保存失败：" + (e && e.message ? e.message : e), "error");
+      }
+    });
+
+    load();
+  })();

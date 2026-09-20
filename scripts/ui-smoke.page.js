@@ -264,6 +264,15 @@
     {
       const $sch = $("#btn-db-schema");
       step("数据库页有「表结构」入口", !!$sch);
+      const $aiEn = $("#ai-enabled");
+      step("设置页有 AI 开关", !!$aiEn);
+      step("AI 默认是关闭的", !!($aiEn && $aiEn.checked === false));
+      const $aiPv = $("#ai-provider");
+      step(
+        "服务商下拉里有主流厂商",
+        !!($aiPv && $aiPv.options && $aiPv.options.length >= 8),
+        $aiPv ? $aiPv.options.length + " 家" : "无下拉"
+      );
       step(
         "列头菜单的编程入口可用",
         !!(window.DeskBaseDb && typeof window.DeskBaseDb.openColumnMenu === "function")

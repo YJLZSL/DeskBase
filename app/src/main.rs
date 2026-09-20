@@ -25,6 +25,7 @@ mod schema;
 // `excel_import::build_plan` 调它生成列建议，界面在导入向导里显示并允许用户改。
 mod import_plan;
 mod backup;
+mod ai;
 mod updater;
 mod xlsx;
 
@@ -1580,6 +1581,42 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // `_rowid`，rows[i][0] 是行号，界面靠它调 updateCell / deleteRows。
         // 备份（v0.3.0 · 不丢数据）：手动留一份 + 列出已有备份。
         // 三步校验在 backup::create 里同步做完 —— 备份不校验等于没有备份。
+        // AI 表格（P2 第一步）：只做配置读写。**调用与授权闸门在下一步** ——
+        // 先把"能配"落地，且默认必须是关的（ADR-0017）。
+        "app.aiProviders" => ok(id, ai::providers()),
+
+        "app.aiSettings" => match state.db.lock() {
+            Ok(d) => ok(
+                id,
+                serde_json::to_value(ai::load(d.conn())).unwrap_or_else(|_| serde_json::json!({})),
+            ),
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        "app.saveAiSettings" => {
+            let parsed = req
+                .args
+                .get("settings")
+                .and_then(|v| serde_json::from_value::<ai::AiSettings>(v.clone()).ok());
+            let Some(s) = parsed else {
+                return err(id, "AI 设置格式不对");
+            };
+            match state.db.lock() {
+                Ok(d) => match ai::save(d.conn(), &s) {
+                    Ok(()) => {
+                        // 日志只记开关与厂商，**绝不记 key**
+                        log_line(
+                            &state.data_dir,
+                            &format!("AI 设置：{}（厂商 {}）", if s.enabled { "开启" } else { "关闭" }, s.provider),
+                        );
+                        ok(id, serde_json::json!({}))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "app.backupCreate" => match state.db.lock() {
             Ok(d) => match backup::create(d.conn(), &state.data_dir) {
                 Ok(info) => {
