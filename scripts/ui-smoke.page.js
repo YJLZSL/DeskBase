@@ -229,6 +229,35 @@
     const dt = types.find((t) => t.name === "date_time" || t.name === "datetime");
     step("「日期时间」在清单里且名字可用", !!dt, dt ? dt.name : "缺失");
 
+    // ---------- 12. 新建表格：免选类型（默认三行、列名已填、类型默认文本） ----------
+    // 这条守的是"门槛"本身：第一次用的人点开新建，不该被三个空输入框拦住。
+    {
+      const dlgApi = window.DeskBaseDb;
+      if (dlgApi && typeof dlgApi.openNewTableDialog === "function") {
+        dlgApi.openNewTableDialog();
+        const opened = await waitFor(() => !!$("#db-dialog-new"), 4000);
+        step("新建表格对话框能打开（编程入口）", opened);
+        const dlg = $("#db-dialog-new");
+        if (dlg) {
+          const rows = [...dlg.querySelectorAll(".db-col-row")];
+          step("默认给了三行", rows.length === 3, rows.length + " 行");
+          const names = rows.map((r) => (r.querySelector("input[type=text]") || {}).value || "");
+          step(
+            "列名已预填（不用先起名就能建）",
+            names.filter(Boolean).length === 3,
+            names.join(" / ")
+          );
+          const tys = rows.map((r) => (r.querySelector("select") || {}).value || "");
+          step("类型默认都是文本", tys.every((t) => t === "text"), tys.join(","));
+          // 不真的创建：建出来会污染后面的用例（这里只验证"门槛"）
+          const cancel = [...dlg.querySelectorAll("button")].find((b) => /取消/.test(b.textContent || ""));
+          if (cancel) cancel.click();
+        }
+      } else {
+        step("新建表格的编程入口可用", false, "DeskBaseDb.openNewTableDialog 不存在");
+      }
+    }
+
     // ---------- 12. 表结构编辑：入口在 + IPC 串起来能跑 ----------
     // 真实点击留给走查（改名要填对话框），这里盖的是"功能真的被接上了"：
     // 建表 → 加列 → 删列 → 改名，每一步断言结果，而不是只看"没报错"。

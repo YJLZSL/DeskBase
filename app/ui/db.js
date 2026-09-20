@@ -557,8 +557,10 @@
         if (v === wantTy) opt.setAttribute("selected", "selected");
         type.appendChild(opt);
       });
+      type.title = "一般不用改：默认按文本存，什么内容都能装";
       const pk = el("label");
       const pkBox = el("input", { type: "checkbox" });
+      pk.title = "一般不用动。只有需要精确区分每一行时才勾（不勾也能正常用）";
       pk.append(pkBox, document.createTextNode("主键"));
       const nn = el("label");
       const nnBox = el("input", { type: "checkbox" });
@@ -587,9 +589,12 @@
     }
     tpl.addEventListener("change", () => applyTemplate(tpl.value));
 
-    colsBox.appendChild(colRow());
-    colsBox.appendChild(colRow());
-    colsBox.appendChild(colRow());
+    // Excel 式：预填三个列名，用户想改就在这儿改，不想改直接点「创建」。
+    // 为什么要预填：空输入框会让第一次用的人停在"我得起三个名字"这一步 ——
+    // 而 Excel 的心智是"先有表，名字慢慢改"。
+    colsBox.appendChild(colRow({ name: "列1" }));
+    colsBox.appendChild(colRow({ name: "列2" }));
+    colsBox.appendChild(colRow({ name: "列3" }));
 
     const addCol = el("button", { class: "btn btn-ghost", type: "button" }, "添加列");
     addCol.addEventListener("click", () => colsBox.appendChild(colRow()));
@@ -1554,6 +1559,7 @@
     onShow: onShow,
     openBackupDialog: openBackupDialog,
     openSchemaDialog: openSchemaDialog,
+    openNewTableDialog: openNewTableDialog,
     refreshTables: refreshTables,
     openImportDialog: openImportDialog,
   };
