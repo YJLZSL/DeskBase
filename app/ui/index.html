@@ -162,6 +162,14 @@
                     title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
               表结构
             </button>
+            <button class="btn btn-ghost db-import" id="btn-db-relations" type="button"
+                    title="共通字段（改一处，所有引用它的表一起变）与同步规则（改一张表，关联表跟着更新，可随时关掉）">
+              关系与同步
+            </button>
+            <button class="btn btn-ghost db-import" id="btn-db-views" type="button"
+                    title="把当前的筛选、排序、分组存成一个命名视图，以后一键回到这个视角（替代写查询语句）">
+              视图
+            </button>
             <div class="db-table-list" id="db-table-list"></div>
             <div class="db-side-foot">
               <div class="db-foot-line">数据目录</div>

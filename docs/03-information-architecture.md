@@ -492,6 +492,6 @@
 - [00 · 总体方案摘要](00-executive-summary.md)
 - [04 · 完整功能矩阵](04-feature-matrix.md) — 每个功能的 MVP / 进阶 / 插件归属
 - [05 · 办公工具箱详细设计](05-office-toolbox.md)
-- [06 · SQL 数据库能力设计](06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](06-data-table-engine.md)
 - [13 · 设置、教程与帮助系统](13-settings-tutorial-help.md)
 - [18 · 视觉、质感、字体与动效设计系统](18-visual-and-motion-design.md) — 外观（主题/字体/排版/动效/辅助功能）规范

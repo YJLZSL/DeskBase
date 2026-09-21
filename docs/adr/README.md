@@ -120,6 +120,8 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0018](0018-unsigned-self-update.md) | 无签名前提下的自更新：五步校验链、默认关闭、三步确认、只走官方 API、数据零风险 | 已接受 | 2026-09-19 |
 | [0019](0019-network-boundary-clarification.md) | 网络边界澄清：把「数据不出本机」（红线 R1）与「默认不联网」（信任机制 R2）拆成两条规则 | 已接受 | 2026-09-19 |
 | [0020](0020-table-first-ui-and-ai-tables.md) | 表格优先的界面形态与 AI 表格（取代 0009 界面结论） | 已接受 |
+| [0021](0021-remove-sql-own-storage-engine.md) | 彻底移除 SQL，改用自研单文件存储（日志 + 快照）（取代 0003「不自研存储引擎」一条） | 已接受 | 2026-09-20 |
+| [0022](0022-linked-tables-and-sync-rules.md) | 用共通字段 + 同步规则 + 关联字段 + 命名视图取代 JOIN / 外键级联 / 触发器 / SELECT | 已接受 | 2026-09-20 |
 
 ---
 

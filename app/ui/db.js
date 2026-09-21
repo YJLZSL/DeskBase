@@ -108,6 +108,7 @@
     listed: false, // 表列表是否已经拉过（懒加载）
     listing: null, // 表列表在途的 Promise（并发守卫，见 refreshTables）
     tab: "data",
+    viewId: null, // 当前应用的命名视图（null = 直接看整张表）
   };
 
   // ============================================================
@@ -248,6 +249,19 @@
 
   async function loadPage(q) {
     if (!state.current) return { rows: [], hasMore: false, nextCursor: null };
+    // 正在看某个命名视图：取数走视图，筛选/排序都在视图配置里，不用再传
+    if (state.viewId) {
+      const vp = await call("view.page", {
+        id: state.viewId,
+        cursor: q.after == null ? null : String(q.after),
+        limit: q.limit,
+      });
+      return {
+        rows: toRowObject(vp),
+        hasMore: !!vp.has_more,
+        nextCursor: vp.next_cursor == null ? null : vp.next_cursor,
+      };
+    }
     const filters = [];
     if (q.filters) {
       for (const k in q.filters) {
@@ -309,70 +323,12 @@
   }
 
   // ============================================================
-  // SQL 页签（策略层闸门在这里落地）
+  // SQL 执行入口（2026-09-20 移除，见 ADR-0021）
+  // ------------------------------------------------------------
+  // 原来这里的 gatedRunQuery / interruptQuery 调的是 schema.runQuery。
+  // 去掉 SQL 之后这条 IPC 连同整个查询编辑器一起删了 —— 查询这件事
+  // 改由「命名视图」承担（筛选 / 排序 / 分组 / 隐藏列），没有语句、没有输入框。
   // ============================================================
-  function ensureSql() {
-    if (state.sql && !state.sqlDirty) return;
-    if (!window.DeskBaseSql) {
-      paneSql.textContent = "";
-      paneSql.appendChild(
-        el("div", { class: "db-empty" },
-          "SQL 编辑器没有加载成功 —— 请检查 app/src/assets.rs 是否登记了 /sql.js。")
-      );
-      return;
-    }
-    if (state.sql) {
-      state.sql.destroy();
-      state.sql = null;
-    }
-    paneSql.textContent = "";
-    state.sqlDirty = false;
-    state.sql = window.DeskBaseSql.mount(paneSql, {
-      maxRows: 5000,
-      listTables: () => call("schema.listTables"),
-      runQuery: gatedRunQuery,
-      interruptQuery: interruptQuery,
-    });
-  }
-
-  /**
-   * 带策略层闸门的执行入口。
-   *
-   * Rust 侧对危险语句（DROP / TRUNCATE / 无顶层 WHERE 的 DELETE / UPDATE …）
-   * 会回 { needsConfirm: 理由 } 而不是直接执行 —— 本函数负责把确认框问出来，
-   * 用户拒绝就抛错（sql.js 会把它当这条语句的错误展示，后面的语句不再执行）。
-   * 同一条 SQL 被问两次（组件层 + 策略层）只发生在两边都认成危险的情形 ——
-   * 宁可多问一次，不能少问一次。
-   */
-  async function gatedRunQuery(sql, opts) {
-    const maxRows = opts && opts.maxRows ? opts.maxRows : 5000;
-    let r = await call("schema.runQuery", { sql: sql, maxRows: maxRows, confirmed: false });
-    if (r && r.needsConfirm) {
-      const go = await confirmBox(
-        "确认要执行这条写操作吗？",
-        r.needsConfirm + "\n\n" + clip(sql, 400)
-      );
-      if (!go) throw new Error("已取消，未执行");
-      r = await call("schema.runQuery", { sql: sql, maxRows: maxRows, confirmed: true });
-    }
-    return r;
-  }
-
-  /**
-   * 中断正在执行的那条 SQL（Q-042）。
-   *
-   * 与 gatedRunQuery 走**同一条** IPC，只是带 `interrupt: true` —— Rust 侧收到
-   * 它不会去开一条新查询，而是直接按下正在跑那条语句的中断句柄。所以这里
-   * 不需要闸门、不需要排队，也不能被 `needsConfirm` 拦（它根本没有语句可问）。
-   *
-   * 为什么必须绕开 gatedRunQuery：那个函数会先发一次 `confirmed:false` 的请求，
-   * 而忙着的时候那条请求会被 Rust 明确拒绝（"上一条查询还在执行"）——
-   * 于是"中断"会变成一句莫名其妙的报错。
-   */
-  async function interruptQuery() {
-    return await call("schema.runQuery", { interrupt: true });
-  }
-
   // ============================================================
   // 页签
   // ============================================================
@@ -1268,6 +1224,8 @@
   document.getElementById("btn-db-backup").addEventListener("click", () => { openBackupDialog(); });
   // 表结构按钮：需要一个当前表，没有就由对话框自己提示
   document.getElementById("btn-db-schema").addEventListener("click", () => { openSchemaDialog(); });
+  document.getElementById("btn-db-relations").addEventListener("click", () => { openRelationsDialog(); });
+  document.getElementById("btn-db-views").addEventListener("click", () => { openViewsDialog(); });
   tabsEl.addEventListener("click", (ev) => {
     const b = ev.target.closest(".db-tab");
     if (b) showTab(b.dataset.tab);
@@ -1315,19 +1273,379 @@
       " " + p(d.getHours()) + ":" + p(d.getMinutes());
   }
 
+  /**
+   * 建节点，支持多个子节点。
+   *
+   * 为什么单独有一个：文件里的 `el(tag, attrs, text)` 第三个参数是**文本**
+   * （`textContent`），塞 DOM 元素进去会变成 "[object HTMLInputElement]" ——
+   * 界面上就是"控件不见了"。对话框里一行要放好几个控件，所以用这个。
+   */
+  function node(tag, attrs) {
+    const n = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        if (attrs[k] == null) continue;
+        n.setAttribute(k, attrs[k]);
+      }
+    }
+    for (let i = 2; i < arguments.length; i++) {
+      const c = arguments[i];
+      if (c == null) continue;
+      if (typeof c === "string" || typeof c === "number") n.append(String(c));
+      else n.append(c);
+    }
+    return n;
+  }
+
+  // ============================================================
+  // 关系与同步（ADR-0022）
+  //
+  // 去掉 SQL 之后，表与表之间的"连着"不再藏在外键和触发器里，
+  // 而是这三类用户看得见、改得动的东西：共通字段、同步规则、关联字段。
+  // ============================================================
+
+  async function openRelationsDialog() {
+    const dlg = buildDialog(
+      "db-dialog-relations",
+      "关系与同步",
+      "共通字段：一次定义、多表引用，改一处所有引用它的字段一起变。同步规则：改一张表，关联表按规则一起更新 —— 规则可以随时关掉，关掉之后目标字段就恢复可编辑。"
+    );
+    dlg.textContent = "";
+    dlg.append(node("h3", null, "关系与同步"));
+    dlg.append(
+      node("p", { class: "hint" },
+        "共通字段解决「同一个东西在好几张表里重复维护」；同步规则解决「改了一处，另一处也要跟着变」。两者都能随时停用，出了问题能一键止血。"
+      )
+    );
+
+    // ---------- 共通字段 ----------
+    const sharedBox = node("div", { class: "db-backup-list" });
+    dlg.append(node("h4", null, "共通字段"));
+    dlg.append(sharedBox);
+
+    async function reloadShared() {
+      sharedBox.textContent = "";
+      let list = [];
+      try {
+        list = await call("shared.list", {});
+      } catch (e) {
+        sharedBox.append(node("div", { class: "db-empty" }, "读不到共通字段：" + errText(e)));
+        return;
+      }
+      if (!list || !list.length) {
+        sharedBox.append(node("div", { class: "db-empty" }, "还没有共通字段"));
+      }
+      (list || []).forEach((f) => {
+        const n = (f.used_by || []).length;
+        sharedBox.append(
+          node("div", { class: "db-backup-item" },
+            node("span", { class: "t" }, "⇄ " + f.name),
+            node("span", { class: "s" }, n + " 张表在用")
+          )
+        );
+      });
+    }
+
+    // 新建一个共通字段：名字 + 类型 +（选择类型时的）选项
+    const shName = node("input", { type: "text", placeholder: "字段名，如「状态」" });
+    const shType = node("select", {});
+    ["text", "integer", "money", "date", "boolean"].forEach((t) => {
+      shType.append(node("option", { value: t }, t));
+    });
+    const shOpts = node("input", { type: "text", placeholder: "选项，逗号分隔（可留空）" });
+    dlg.append(
+      node("div", { class: "db-form-row" }, shName, shType),
+      node("div", { class: "db-form-row" }, shOpts)
+    );
+
+    // ---------- 同步规则 ----------
+    dlg.append(node("h4", null, "同步规则"));
+    const ruleBox = node("div", { class: "db-backup-list" });
+    dlg.append(ruleBox);
+
+    async function reloadRules() {
+      ruleBox.textContent = "";
+      let list = [];
+      try {
+        list = await call("sync.list", {});
+      } catch (e) {
+        ruleBox.append(node("div", { class: "db-empty" }, "读不到同步规则：" + errText(e)));
+        return;
+      }
+      if (!list || !list.length) {
+        ruleBox.append(node("div", { class: "db-empty" }, "还没有同步规则"));
+      }
+      (list || []).forEach((r) => {
+        const on = node("input", { type: "checkbox" });
+        on.checked = !!r.enabled;
+        on.addEventListener("change", async () => {
+          try {
+            await call("sync.toggle", { id: r.id, enabled: on.checked });
+            toast(on.checked ? "已启用同步：" + r.name : "已停用同步：" + r.name, "info");
+          } catch (e2) {
+            on.checked = !on.checked;
+            toast("改不了：" + errText(e2), "error");
+          }
+        });
+        const del = node("button", { class: "btn btn-ghost db-mini", type: "button" }, "删除");
+        del.addEventListener("click", async () => {
+          try {
+            await call("sync.delete", { id: r.id });
+            await reloadRules();
+          } catch (e2) {
+            toast("删不掉：" + errText(e2), "error");
+          }
+        });
+        ruleBox.append(
+          node("div", { class: "db-backup-item" },
+            node("span", { class: "t" },
+              (r.enabled ? "● " : "○ ") + r.name + "：" +
+              r.source_table + "." + r.source_field + " → " + r.target_table + "." + r.target_field
+            ),
+            node("span", { class: "s" }, on, del)
+          )
+        );
+      });
+    }
+
+    // 新建一条同步规则（源表.字段 → 目标表.字段，经由某个关联字段）
+    const rName = node("input", { type: "text", placeholder: "规则名，如「客户改名同步到订单」" });
+    const rSrc = node("input", { type: "text", placeholder: "源表.字段，如 客户.客户名" });
+    const rDst = node("input", { type: "text", placeholder: "目标表.字段，如 订单.客户名" });
+    const rVia = node("input", { type: "text", placeholder: "经由的关联字段，如 客户" });
+    const rMode = node("select", {});
+    [["mirror", "单向镜像（目标只读）"], ["two_way", "双向"], ["suggest", "只给建议不自动写"]].forEach((m) => {
+      rMode.append(node("option", { value: m[0] }, m[1]));
+    });
+    const rConflict = node("select", {});
+    [
+      ["source_wins", "冲突时以源为准"],
+      ["target_wins", "冲突时以目标为准"],
+      ["last_write_wins", "冲突时以最后改动为准"],
+    ].forEach((m) => {
+      rConflict.append(node("option", { value: m[0] }, m[1]));
+    });
+    const rScope = node("select", {});
+    [["always", "总是覆盖目标"], ["fill_empty_only", "只填目标为空的"]].forEach((m) => {
+      rScope.append(node("option", { value: m[0] }, m[1]));
+    });
+    dlg.append(
+      node("div", { class: "db-form-row" }, rName),
+      node("div", { class: "db-form-row" }, rSrc, rDst),
+      node("div", { class: "db-form-row" }, rVia, rMode),
+      node("div", { class: "db-form-row" }, rConflict, rScope)
+    );
+
+    const actions = node("div", { class: "db-dialog-actions" });
+    const btnAddShared = node("button", { class: "btn", type: "button" }, "新建共通字段");
+    btnAddShared.addEventListener("click", async () => {
+      const name = shName.value.trim();
+      if (!name) { toast("给共通字段起个名字", "error"); return; }
+      const opts = shOpts.value
+        .split(/[,，]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+      try {
+        await call("shared.save", {
+          field: {
+            id: "", name: name, ty: shType.value, options: opts,
+            default: null, comment: null, used_by: [],
+          },
+          apply: true,
+        });
+        shName.value = ""; shOpts.value = "";
+        await reloadShared();
+        toast("共通字段已建好", "info");
+      } catch (e) {
+        toast("建不了：" + errText(e), "error");
+      }
+    });
+
+    const btnAddRule = node("button", { class: "btn", type: "button" }, "新建同步规则");
+    btnAddRule.addEventListener("click", async () => {
+      const src = rSrc.value.trim();
+      const dst = rDst.value.trim();
+      if (!rName.value.trim() || !src || !dst || !rVia.value.trim()) {
+        toast("规则名、源、目标、经由字段都要填", "error");
+        return;
+      }
+      const sp = src.split(".");
+      const dp = dst.split(".");
+      if (sp.length !== 2 || dp.length !== 2) {
+        toast("源和目标都写成「表.字段」", "error");
+        return;
+      }
+      try {
+        await call("sync.save", {
+          rule: {
+            id: "", name: rName.value.trim(), enabled: true,
+            source_table: sp[0], source_field: sp[1],
+            target_table: dp[0], target_field: dp[1],
+            via: rVia.value.trim(),
+            mode: rMode.value, conflict: rConflict.value, scope: rScope.value,
+            created_at: 0,
+          },
+        });
+        rName.value = ""; rSrc.value = ""; rDst.value = ""; rVia.value = "";
+        await reloadRules();
+        toast("同步规则已建好，改动源表时目标表会跟着变", "info");
+      } catch (e) {
+        toast("建不了：" + errText(e), "error");
+      }
+    });
+    actions.append(btnAddShared, btnAddRule);
+    dlg.append(actions);
+
+    const closer = node("div", { class: "db-dialog-actions" });
+    const btnClose = node("button", { class: "btn btn-ghost", type: "button" }, "关闭");
+    btnClose.addEventListener("click", () => dlg.close());
+    closer.append(btnClose);
+    dlg.append(closer);
+    // 先弹出来，再去拉列表 —— 骨架已经在 DOM 里，用户不会看到空壳
+    dlg.showModal();
+    await reloadShared();
+    await reloadRules();
+  }
+
+  // ============================================================
+  // 命名视图（替代 SELECT）
+  //
+  // 没有查询语句、没有输入框：把「筛选哪些行、按什么排序、隐藏哪些列」
+  // 存成一个有名字的视角，下次点一下就回到这个视角。
+  // ============================================================
+  async function openViewsDialog() {
+    if (!state.current) {
+      toast("先打开一张表，再建视图", "error");
+      return;
+    }
+    const dlg = buildDialog(
+      "db-dialog-views",
+      "视图",
+      "视图 = 筛选条件 + 排序 + 隐藏列的组合，存下来以后一键回到这个视角。不需要写任何查询语句。"
+    );
+    dlg.textContent = "";
+    dlg.append(node("h3", null, "视图 · " + state.current));
+    const box = node("div", { class: "db-backup-list" });
+    dlg.append(box);
+
+    async function reload() {
+      box.textContent = "";
+      let list = [];
+      try {
+        list = await call("view.list", { table: state.current });
+      } catch (e) {
+        box.append(node("div", { class: "db-empty" }, "读不到视图：" + errText(e)));
+        return;
+      }
+      if (!list || !list.length) {
+        box.append(node("div", { class: "db-empty" }, "这张表还没有视图"));
+      }
+      (list || []).forEach((v) => {
+        const use = node("button", { class: "btn btn-ghost db-mini", type: "button" }, "应用");
+        use.addEventListener("click", async () => {
+          state.viewId = v.id;
+          dlg.close();
+          if (state.grid) await state.grid.reload();
+          toast("已切到视图「" + v.name + "」", "info");
+        });
+        const del = node("button", { class: "btn btn-ghost db-mini", type: "button" }, "删除");
+        del.addEventListener("click", async () => {
+          try {
+            await call("view.delete", { id: v.id });
+            if (state.viewId === v.id) {
+              state.viewId = null;
+              if (state.grid) await state.grid.reload();
+            }
+            await reload();
+          } catch (e2) {
+            toast("删不掉：" + errText(e2), "error");
+          }
+        });
+        box.append(
+          node("div", { class: "db-backup-item" },
+            node("span", { class: "t" }, v.name),
+            node("span", { class: "s" }, use, del)
+          )
+        );
+      });
+    }
+    const vName = node("input", { type: "text", placeholder: "视图名，如「未收款的订单」" });
+    const vField = node("input", { type: "text", placeholder: "筛选字段（留空=不筛选）" });
+    const vOp = node("select", {});
+    [
+      ["contains", "包含"], ["eq", "等于"], ["ne", "不等于"],
+      ["gt", "大于"], ["lt", "小于"], ["is_empty", "为空"], ["is_not_empty", "不为空"],
+    ].forEach((m) => vOp.append(node("option", { value: m[0] }, m[1])));
+    const vVal = node("input", { type: "text", placeholder: "值" });
+    const vSort = node("input", { type: "text", placeholder: "排序字段（留空=不排序）" });
+    const vDesc = node("select", {});
+    [["asc", "升序"], ["desc", "降序"]].forEach((m) =>
+      vDesc.append(node("option", { value: m[0] }, m[1])));
+    dlg.append(
+      node("div", { class: "db-form-row" }, vName),
+      node("div", { class: "db-form-row" }, vField, vOp, vVal),
+      node("div", { class: "db-form-row" }, vSort, vDesc)
+    );
+
+    const actions = node("div", { class: "db-dialog-actions" });
+    const btnSave = node("button", { class: "btn", type: "button" }, "保存为视图");
+    btnSave.addEventListener("click", async () => {
+      const name = vName.value.trim();
+      if (!name) { toast("给视图起个名字", "error"); return; }
+      const filter = vField.value.trim()
+        ? {
+            all: true,
+            items: [{
+              field: vField.value.trim(),
+              op: vOp.value,
+              value: vVal.value,
+            }],
+          }
+        : null;
+      const sorts = vSort.value.trim()
+        ? [{ field: vSort.value.trim(), desc: vDesc.value === "desc" }]
+        : [];
+      try {
+        await call("view.save", {
+          view: {
+            id: "", table: state.current, name: name,
+            filter: filter, sorts: sorts, group_by: null, hidden: [],
+          },
+        });
+        vName.value = ""; vField.value = ""; vVal.value = ""; vSort.value = "";
+        await reload();
+        toast("视图已保存", "info");
+      } catch (e) {
+        toast("存不了：" + errText(e), "error");
+      }
+    });
+    const btnAll = node("button", { class: "btn btn-ghost", type: "button" }, "看整张表");
+    btnAll.addEventListener("click", async () => {
+      state.viewId = null;
+      dlg.close();
+      if (state.grid) await state.grid.reload();
+    });
+    const btnClose = node("button", { class: "btn btn-ghost", type: "button" }, "关闭");
+    btnClose.addEventListener("click", () => dlg.close());
+    actions.append(btnSave, btnAll, btnClose);
+    dlg.append(actions);
+    dlg.showModal();
+    await reload();
+  }
+
   async function openBackupDialog() {
     const dlg = buildDialog(
       "db-dialog-backup",
       "备份数据库",
-      "备份是当前数据库的一份完整快照（VACUUM INTO，一致性快照而不是复制文件），" +
-        "放在数据目录的 backups/ 里。生成后会立刻校验：能独立打开 + 通过完整性检查 + 表数与当前库一致。"
+      "备份是当前数据的一份完整快照（先把状态压实成快照，再复制它 —— 不是直接复制数据文件），" +
+        "放在数据目录的 backups/ 里。生成后会立刻三步校验：非空、能被解析回一份完整状态、表数与当前库一致。"
     );
     dlg.textContent = "";
     dlg.append(el("h3", null, "备份数据库"));
     dlg.append(
       el("p", { class: "hint" },
-        "备份是当前数据库的完整快照（VACUUM INTO，不是复制文件 —— 复制一个正在写入的库可能拿到半截状态）。" +
-          "每份备份生成后立刻三步校验：非空、能独立打开、通过 quick_check 且表数与当前库一致。")
+        "备份是当前数据的完整快照（先压实成快照再复制，不是直接复制数据文件 —— 直接复制正在写入的日志可能拿到半截状态）。" +
+          "每份备份生成后立刻三步校验：非空、能被解析回一份完整状态、表数与当前库一致。")
     );
 
     const listBox = el("div", { class: "db-backup-list" });

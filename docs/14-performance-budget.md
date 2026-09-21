@@ -592,7 +592,7 @@
 ## 十七、相关文档
 
 - [05 · 办公工具箱详细设计](05-office-toolbox.md)
-- [06 · SQL 数据库能力设计](06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](06-data-table-engine.md)
 - [07 · 备份、恢复与断电保护](07-backup-recovery-dr.md)
 - [09 · 本地 AI 架构](09-local-ai.md)
 - [10 · 桌面端与手机远程端](10-desktop-mobile-remote.md)

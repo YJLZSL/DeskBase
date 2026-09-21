@@ -914,15 +914,8 @@ const KEY_CHANNEL: &str = "net.update.channel";
 
 /// 读设置。**任何异常都回退到默认（从不检查）** —— 读不出来时倾向于不联网，
 /// 而不是倾向于联网。方向不能反。
-pub fn load_settings(conn: &rusqlite::Connection) -> UpdateSettings {
-    let get = |key: &str| -> Option<String> {
-        conn.query_row(
-            "SELECT value FROM sys_meta WHERE key = ?1",
-            rusqlite::params![key],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-    };
+pub fn load_settings(db: &crate::model::Db) -> UpdateSettings {
+    let get = |key: &str| -> Option<String> { db.meta_get(key) };
     let mut s = UpdateSettings::default();
     if let Some(v) = get(KEY_MODE) {
         if let Some(m) = UpdateMode::parse(&v) {
@@ -938,19 +931,15 @@ pub fn load_settings(conn: &rusqlite::Connection) -> UpdateSettings {
 }
 
 pub fn save_settings(
-    conn: &rusqlite::Connection,
+    db: &mut crate::model::Db,
     s: &UpdateSettings,
 ) -> Result<(), String> {
     for (k, v) in [
         (KEY_MODE, s.mode.as_str().to_string()),
         (KEY_CHANNEL, s.channel.as_str().to_string()),
     ] {
-        conn.execute(
-            "INSERT INTO sys_meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![k, v],
-        )
-        .map_err(|e| format!("保存更新设置失败：{e}"))?;
+        db.meta_set(k, &v)
+            .map_err(|e| format!("保存更新设置失败：{e}"))?;
     }
     Ok(())
 }
@@ -975,10 +964,10 @@ pub struct CheckReport {
 ///
 /// 网络行为本身由调用方（IPC 层）记审计 —— 这里只做"该不该发"的判断。
 pub fn check_by_settings(
-    conn: &rusqlite::Connection,
+    db: &crate::model::Db,
     current: &Version,
 ) -> Result<CheckReport, String> {
-    let s = load_settings(conn);
+    let s = load_settings(db);
     let mut rep = CheckReport {
         checked: false,
         mode: s.mode.as_str().to_string(),
@@ -2428,13 +2417,13 @@ mod tests_e2e {
 #[cfg(test)]
 mod tests_settings {
     use super::*;
-    use rusqlite::Connection;
+    use crate::model::Db;
 
-    fn db() -> Connection {
-        let c = Connection::open_in_memory().unwrap();
-        c.execute_batch("CREATE TABLE sys_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
-            .unwrap();
-        c
+    fn db() -> Db {
+        let d = std::env::temp_dir().join(format!("dkb_updater_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Db::open(&d).unwrap()
     }
 
     #[test]
@@ -2447,27 +2436,24 @@ mod tests_settings {
 
     #[test]
     fn 设置能存能读且重复存不炸() {
-        let c = db();
+        let mut c = db();
         let s = UpdateSettings {
             mode: UpdateMode::DownloadAsk,
             channel: Channel::Prerelease,
         };
-        save_settings(&c, &s).unwrap();
+        save_settings(&mut c, &s).unwrap();
         assert_eq!(load_settings(&c).mode, UpdateMode::DownloadAsk);
         assert_eq!(load_settings(&c).channel, Channel::Prerelease);
         // UPSERT：再存一次不该报错
-        save_settings(&c, &s).unwrap();
+        save_settings(&mut c, &s).unwrap();
         assert_eq!(load_settings(&c).channel, Channel::Prerelease);
     }
 
     #[test]
     fn 设置里出现不认识的档位时回退到不联网() {
-        let c = db();
-        c.execute(
-            "INSERT INTO sys_meta (key, value) VALUES ('net.update.mode', 'whatever')",
-            [],
-        )
-        .unwrap();
+        let mut c = db();
+        // 直接塞一个读不懂的档位值（原来靠 INSERT INTO sys_meta，现在写键值即可）
+        c.meta_set("net.update.mode", "whatever").unwrap();
         assert_eq!(
             load_settings(&c).mode,
             UpdateMode::Never,

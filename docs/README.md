@@ -50,7 +50,7 @@
 | 03 | [信息架构](03-information-architecture.md) | 一级模块 / 二级功能 / 三级设置全表 |
 | 04 | [完整功能矩阵](04-feature-matrix.md) | MVP / 进阶 / 插件化的边界 |
 | 05 | [办公工具箱详细设计](05-office-toolbox.md) | 笔记到长截图，逐项设计 |
-| 06 | [SQL 数据库能力设计](06-sql-database.md) | 从查询向导到执行计划 |
+| 06 | [数据表引擎设计（无 SQL）](06-data-table-engine.md) | 存储、字段类型、关联、共通、同步规则、命名视图 |
 | 07 | [备份、恢复与断电保护](07-backup-recovery-dr.md) | 怎么保证不丢数据 |
 | 08 | [隐私、安全、加密、权限与审计](08-privacy-security.md) | 默认最小权限的最后一道防线 |
 | 09 | [本地 AI 架构](09-local-ai.md) | AI 不出网是怎么做到的 |

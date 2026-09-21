@@ -99,7 +99,7 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
-        // ---------- 数据库页（数据网格 + SQL 编辑器 + 页面模块） ----------
+        // ---------- 数据库页（数据网格 + 页面模块） ----------
         // grid / sql 是第十二轮交付的数据核心组件；database.css / db.js 是
         // 接线时新增的页面外壳。四份必须**成对**登记：JS 自己会注入 <link>
         // 拉样式（见 grid.js 的 injectStyles），漏掉任何一半都是静默 404。
@@ -110,10 +110,6 @@ fn lookup(path: &str) -> Option<Asset> {
         "/grid.js" => Asset {
             bytes: include_bytes!("../ui/grid.js"),
             mime: JS,
-        },
-        "/sql.css" => Asset {
-            bytes: include_bytes!("../ui/sql.css"),
-            mime: CSS,
         },
         // /sql.js 已于 2026-09-20 按 ADR-0020 撤下（文件移到 ui/legacy/sql.js，
         // 不再随应用分发）。恢复方式：把文件移回 ui/ 并在此重新登记。

@@ -802,6 +802,6 @@ deskbase-export-20260917/
 
 - [03 · 信息架构](03-information-architecture.md)
 - [04 · 完整功能矩阵](04-feature-matrix.md)
-- [06 · SQL 数据库能力设计](06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](06-data-table-engine.md)
 - [13 · 设置、教程与帮助系统](13-settings-tutorial-help.md)
 - [14 · 性能优化与量化指标](14-performance-budget.md)

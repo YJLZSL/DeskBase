@@ -12,6 +12,10 @@
 
 mod assets;
 mod capture;
+// 自研单文件存储（append-only 日志 + 快照），见 docs/adr/0021
+mod store;
+// 数据表模型：表 / 字段 / 记录 / 视图 / 关联 / 共通 / 同步，见 docs/adr/0022
+mod model;
 mod convert;
 mod csv_import;
 mod db;
@@ -20,7 +24,6 @@ mod recovery;
 mod import_pipeline;
 mod workspace;
 mod render;
-mod schema;
 // 导入计划内核（表头行与列类型推断）。**已接线**（2026-09-19）：
 // `excel_import::build_plan` 调它生成列建议，界面在导入向导里显示并允许用户改。
 mod import_plan;
@@ -45,7 +48,7 @@ use wry::WebViewBuilder;
 #[cfg(target_os = "windows")]
 use wry::WebViewBuilderExtWindows;
 
-use db::Db;
+use model::Db;
 
 /// tools/icon 产出的窗口图标边长（`ui/brand/icon-rgba-256.png` → `icon-rgba-256.bin`）
 const ICON_SIZE: u32 = 256;
@@ -206,30 +209,9 @@ fn browser_args(_log_path: Option<&std::path::Path>) -> String {
 /// `WebView`，含原生指针、不是 `Send`）。一个 `AtomicU64` 谁都能读，代价是零。
 static MAIN_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// 一次 SQL 执行的中断状态与应答队列。
-///
-/// 与 `Db` 分开放在一个独立的结构里，是刻意的：工作线程**只**拿到这一份的
-/// `Arc`，不去碰 `AppState`（那里握着 `WebView`，跨线程分享既没必要也不安全）。
-#[derive(Default)]
-struct SqlJob {
-    /// 正在执行的查询：`(代号, 中断句柄)`。
-    ///
-    /// 代号（generation）用来防止"上一条查询的超时哨兵"误伤下一条：
-    /// 哨兵睡醒后先比对代号，不是自己那一代就不动手。否则一条查询超时、
-    /// 用户立刻重试，前一次的哨兵可能在几百毫秒后把新查询打断。
-    running: Mutex<Option<(u64, rusqlite::InterruptHandle)>>,
-    /// 中断原因（`"user"` / `"timeout"`）。发起方写、工作线程读走后清空，
-    /// 用来把 SQLite 那句干巴巴的 `interrupted` 翻译成人话。
-    cause: Mutex<Option<&'static str>>,
-    next_gen: AtomicU64,
-    /// 待回传的应答。工作线程 push，主线程 drain。用 `Vec` 而不是单槽：
-    /// 极端情况下（用户中断后立刻重试）可能有两条应答先后到达。
-    pending: Mutex<Vec<String>>,
-}
-
 /// 应用全局状态。IPC 处理器与主线程共享它。
 struct AppState {
-    /// `Arc` 而不是裸 `Mutex`：SQL 工作线程需要独占一个克隆去执行查询。
+    /// `Arc` 而不是裸 `Mutex`：退出前保存那条路径需要在别处也拿到它。
     db: Arc<Mutex<Db>>,
     data_dir: PathBuf,
     /// WebView 句柄在 build 之后才能拿到，所以先用 Option 占位。
@@ -237,8 +219,6 @@ struct AppState {
     started_at: std::time::Instant,
     /// 前端最近一次上报的工作区状态。退出前的最后一道保存用它兜底落盘。
     last_workspace: Mutex<Option<workspace::WorkspaceState>>,
-    /// SQL 执行的中断状态与应答队列（见 [`SqlJob`]）
-    sql: Arc<SqlJob>,
     /// 事件循环代理：工作线程用它叫醒主线程
     proxy: Mutex<Option<EventLoopProxy<AppEvent>>>,
     /// 界面烟测脚本路径（`DESKBASE_UI_SMOKE` 指定，见 [`fire_ui_smoke`]）。
@@ -381,7 +361,7 @@ fn main() -> wry::Result<()> {
         return render::run(&PathBuf::from(out), &data_dir);
     }
 
-    let db_path = data_dir.join("data").join("main.db");
+    let db_path = data_dir.join("data").join("main.dkb");
 
     log_line(&data_dir, &format!("启动，数据目录 = {}", data_dir.display()));
     if let Some(p) = ui_smoke.as_ref() {
@@ -403,8 +383,8 @@ fn main() -> wry::Result<()> {
         );
     }
 
-    let database = match Db::open(&data_dir, &db_path) {
-        Ok(d) => d,
+    let database = match Db::open(&data_dir) {
+        Ok(mut d) => d,
         Err(e) => {
             // 打不开数据库是致命错误：不静默继续，直接报出来
             log_line(&data_dir, &format!("致命错误：{e}"));
@@ -422,7 +402,6 @@ fn main() -> wry::Result<()> {
         webview: Mutex::new(None),
         started_at: std::time::Instant::now(),
         last_workspace: Mutex::new(None),
-        sql: Arc::new(SqlJob::default()),
         proxy: Mutex::new(Some(event_loop.create_proxy())),
         smoke_script: ui_smoke,
         smoke_fired: AtomicBool::new(false),
@@ -615,7 +594,7 @@ fn main() -> wry::Result<()> {
         // 工作线程干完了活：把攒下的应答一次性交回前端。
         // 必须在主线程做 —— 求值脚本只能在创建 WebView 的那个线程上执行。
         if let Event::UserEvent(AppEvent::Reply) = event {
-            flush_replies(&state);
+            
             *control_flow = ControlFlow::Wait;
             return;
         }
@@ -686,18 +665,7 @@ fn main() -> wry::Result<()> {
 fn current_exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-}
-
-/// 把工作线程攒下的应答取出来回传给前端。只在主线程调用。
-fn flush_replies(state: &AppState) {
-    let batch: Vec<String> = match state.sql.pending.lock() {
-        Ok(mut g) => g.drain(..).collect(),
-        Err(_) => return, // 锁中毒：直接放弃这一批，总比 panic 好
-    };
-    for payload in batch {
-        state.respond(&payload);
-    }
+        .and_then(|p| p.parent().map(|mut d| d.to_path_buf()))
 }
 
 /// 把界面烟测脚本注入页面（仅烟测模式，见 `DESKBASE_UI_SMOKE`）。
@@ -751,10 +719,10 @@ fn finalize_workspace(state: &AppState) {
         .last_workspace
         .lock()
         .ok()
-        .and_then(|g| g.clone());
+        .and_then(|mut g| g.clone());
     if let Some(ws) = last {
-        if let Ok(guard) = state.db.try_lock() {
-            let _ = workspace::save(guard.conn(), &ws);
+        if let Ok(mut guard) = state.db.try_lock() {
+            let _ = workspace::save(&mut guard, &ws);
         }
     }
 }
@@ -762,14 +730,12 @@ fn finalize_workspace(state: &AppState) {
 /// 命令分发。所有前端能做的事都在这里，一一显式列出，不做通配。
 ///
 /// 返回 `None` 表示**这条命令是异步的**，应答稍后由工作线程交回来 ——
-/// 目前只有 `schema.runQuery` 一条（慢查询必须能中断，且不能占住主线程，
 /// 见 [`run_query_async`]）。其余命令一律同步返回 `Some(应答)`。
 fn dispatch(state: &AppState, req: Request) -> Option<String> {
     match req.cmd.as_str() {
         // 唯一一条异步命令。写成 match 分支而不是 `if`，是因为
         // `scripts/check-wiring.cjs` 靠这个形式认出"命令确实有处理方"——
         // 写成 `if req.cmd == "..."` 门禁会误报（它只认分支形式）。
-        "schema.runQuery" => run_query_async(state, req),
         _ => Some(dispatch_sync(state, req)),
     }
 }
@@ -783,13 +749,13 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .db
                 .lock()
                 .map_err(|_| "锁失败".to_string())
-                .and_then(|d| d.count_notes())
+                .and_then(|mut d| db::count_notes(&mut d))
                 .unwrap_or(-1);
             let workspace = state
                 .db
                 .lock()
                 .ok()
-                .and_then(|d| workspace::load(d.conn()).ok())
+                .and_then(|mut d| workspace::load(&mut d).ok())
                 .unwrap_or_default();
             ok(
                 id,
@@ -829,7 +795,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 这是 xlsx 模块的核心策略：只读原文件、只写新文件。
         "xlsx.exportNotes" => {
             let notes = match state.db.lock() {
-                Ok(d) => match d.list_notes() {
+                Ok(mut d) => match db::list_notes(&mut d) {
                     Ok(v) => v,
                     Err(e) => return err(id, e),
                 },
@@ -997,7 +963,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             // 栈里，ExecuteScript 会被吞掉（见 [`AppEvent::SmokeInject`]）；
             // 所以只把"该注入了"这件事丢给事件循环，注入在回调结束之后发生。
             if state.smoke_script.is_some() && !state.smoke_fired.swap(true, Ordering::SeqCst) {
-                match state.proxy.lock().ok().and_then(|g| g.clone()) {
+                match state.proxy.lock().ok().and_then(|mut g| g.clone()) {
                     Some(px) => {
                         let _ = px.send_event(AppEvent::SmokeInject);
                     }
@@ -1249,8 +1215,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .unwrap_or_default();
 
             let mut created = 0usize;
-            let guard = match state.db.lock() {
-                Ok(g) => g,
+            let mut guard = match state.db.lock() {
+                Ok(mut g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             for row in &body {
@@ -1258,11 +1224,11 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 if title.trim().is_empty() {
                     continue;
                 }
-                match guard.create_note(&title) {
+                match db::create_note(&mut guard, &title) {
                     Ok(n) => {
                         // 第二列如果有内容就当作正文
                         if let Some(content) = row.get(1) {
-                            let _ = guard.save_note(&n.id, &title, content);
+                            let _ = db::save_note(&mut guard, &n.id, &title, content);
                         }
                         created += 1;
                     }
@@ -1289,7 +1255,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // `name` 是协议值（snake_case，与 `ColType::from_name` 逐字一致），
         // `label` 只用于显示。
         "schema.columnTypes" => {
-            use schema::ColType::*;
+            use model::ColType::*;
             let all = [
                 Text, Integer, Real, Money, Boolean, Date, DateTime, Json, Blob,
             ];
@@ -1299,7 +1265,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                     serde_json::json!({
                         "name": serde_json::to_value(t).unwrap_or_default(),
                         "label": t.label(),
-                        "decl": t.declared_type(),
+                        "decl": t.label(),
                     })
                 })
                 .collect();
@@ -1409,12 +1375,12 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             };
 
             let t0 = std::time::Instant::now();
-            let guard = match state.db.lock() {
-                Ok(g) => g,
+            let mut guard = match state.db.lock() {
+                Ok(mut g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             match excel_import::begin_import(
-                guard.conn(),
+                &mut guard,
                 &path,
                 sheet,
                 header_row,
@@ -1452,14 +1418,14 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000) as usize;
             let mut guard = match state.db.lock() {
-                Ok(g) => g,
+                Ok(mut g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
-            match excel_import::write_chunk(guard.conn_mut(), sid, batch) {
+            match excel_import::write_chunk(&mut guard, sid, batch) {
                 Ok(c) => ok(id, serde_json::to_value(c).unwrap_or_default()),
                 Err(e) => {
                     // 写不进去就把表删掉，别留半张（用户会以为那张表是好的）
-                    let _ = excel_import::abort_import(guard.conn(), sid);
+                    let _ = excel_import::abort_import(&mut guard, sid);
                     err(id, format!("{e}\n这批数据已经清理掉，库里没有留下半张表。"))
                 }
             }
@@ -1499,9 +1465,9 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let _guard = state.db.lock().ok();
-            match _guard.as_ref() {
-                Some(g) => match excel_import::abort_import(g.conn(), sid) {
+            let mut _guard = state.db.lock().ok();
+            match _guard.as_mut() {
+                Some(g) => match excel_import::abort_import(&mut **g, sid) {
                     Ok(t) => {
                         log_line(&state.data_dir, &format!("导入已取消，表「{t}」已清理"));
                         ok(id, serde_json::json!({ "cleaned": t }))
@@ -1515,11 +1481,11 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 列出未跑完的导入作业 —— 上次崩在中间的作业会在这里出现，
         // 让用户看到"已导入多少、还剩多少"，而不是自动回滚
         "import.pending" => {
-            let conn = match state.db.lock() {
-                Ok(g) => g,
+            let mut conn = match state.db.lock() {
+                Ok(mut g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
-            match import_pipeline::recovery_notice(&conn.conn()) {
+            match import_pipeline::recovery_notice(&&conn) {
                 Ok(notice) => ok(
                     id,
                     serde_json::json!({ "notice": notice.unwrap_or_default() }),
@@ -1539,10 +1505,10 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             serde_json::to_value(&state.recovery_status).unwrap_or_default(),
         ),
 
-        // 一致性快照走 `VACUUM INTO`，**不是文件复制** —— WAL 模式下复制
-        // 可能漏掉还没 checkpoint 的已提交事务。落点：数据目录下的 recovery/。
+        // 一致性快照：先压实成快照文件再复制它，**不是直接复制数据文件** ——
+        // 直接复制正在追加的日志会拿到半截状态。落点：数据目录下的 recovery/。
         "recovery.snapshot" => match state.db.lock() {
-            Ok(g) => match recovery::snapshot(g.conn(), &state.data_dir) {
+            Ok(mut g) => match recovery::snapshot(&mut g, &state.data_dir) {
                 Ok(p) => {
                     log_line(&state.data_dir, &format!("恢复向导：已生成数据快照 {p}"));
                     ok(id, serde_json::json!({ "path": p }))
@@ -1593,9 +1559,9 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         "app.aiSettings" => match state.db.lock() {
-            Ok(d) => ok(
+            Ok(mut d) => ok(
                 id,
-                serde_json::to_value(ai::load(d.conn())).unwrap_or_else(|_| serde_json::json!({})),
+                serde_json::to_value(ai::load(&mut d)).unwrap_or_else(|_| serde_json::json!({})),
             ),
             Err(_) => err(id, "数据库锁失败"),
         },
@@ -1609,7 +1575,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "AI 设置格式不对");
             };
             match state.db.lock() {
-                Ok(d) => match ai::save(d.conn(), &s) {
+                Ok(mut d) => match ai::save(&mut d, &s) {
                     Ok(()) => {
                         // 日志只记开关与厂商，**绝不记 key**
                         log_line(
@@ -1625,7 +1591,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         "app.backupCreate" => match state.db.lock() {
-            Ok(d) => match backup::create(d.conn(), &state.data_dir) {
+            Ok(mut d) => match backup::create(&mut d, &state.data_dir) {
                 Ok(info) => {
                     // 日志只记文件名，不记数据内容
                     log_line(&state.data_dir, &format!("手动备份：{}", info.name));
@@ -1644,8 +1610,171 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             ok(id, serde_json::json!({ "items": items }))
         }
 
+        // ============================================================
+        // 共通字段 / 同步规则 / 命名视图（ADR-0022）
+        //
+        // 为什么单独一组命令：这三样是「去掉 SQL 之后，关系靠什么表达」的答案，
+        // 界面上必须有入口 —— 引擎里有但界面够不着 = 等于没做。
+        // ============================================================
+
+        "shared.list" => match state.db.lock() {
+            Ok(mut d) => ok(id, serde_json::to_value(d.list_shared_fields()).unwrap_or_default()),
+            Err(_) => err(id, "数据库锁失败"),
+        }
+
+        "shared.save" => {
+            let Some(f) = req
+                .args
+                .get("field")
+                .and_then(|v| serde_json::from_value::<model::SharedField>(v.clone()).ok())
+            else {
+                return err(id, "缺少参数 field");
+            };
+            // apply=true 时把类型/选项推到所有引用它的字段。
+            // 界面在提交前**必须**先弹"会影响 N 张表"的确认 —— 影响面由这里返回。
+            let apply = req.args.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+            match state.db.lock() {
+                Ok(mut d) => match d.upsert_shared_field(f, apply) {
+                    Ok(n) => ok(id, serde_json::json!({ "touched": n })),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "sync.list" => match state.db.lock() {
+            Ok(mut d) => match d.list_sync_rules() {
+                Ok(r) => ok(id, serde_json::to_value(r).unwrap_or_default()),
+                Err(e) => err(id, e),
+            },
+            Err(_) => err(id, "数据库锁失败"),
+        }
+
+        "sync.save" => {
+            let Some(mut r) = req
+                .args
+                .get("rule")
+                .and_then(|v| serde_json::from_value::<model::SyncRule>(v.clone()).ok())
+            else {
+                return err(id, "缺少参数 rule");
+            };
+            if r.id.is_empty() {
+                r.id = ulid::Ulid::generate().to_string();
+            }
+            if r.created_at == 0 {
+                r.created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|x| x.as_millis() as i64)
+                    .unwrap_or(0);
+            }
+            match state.db.lock() {
+                Ok(mut d) => match d.upsert_sync_rule(r) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // 「可以调整」最常用的那一下：单独给一个开关端点，
+        // 不用为了关掉一条规则而把整条规则重新提交一遍（少一次写错的机会）。
+        "sync.toggle" => {
+            let Some(rid) = req.args.get("id").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 id");
+            };
+            let enabled = req.args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            match state.db.lock() {
+                Ok(mut d) => match d.set_rule_enabled(rid, enabled) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "sync.delete" => {
+            let Some(rid) = req.args.get("id").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 id");
+            };
+            match state.db.lock() {
+                Ok(mut d) => match d.delete_sync_rule(rid) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "view.list" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            match state.db.lock() {
+                Ok(mut d) => ok(id, serde_json::to_value(d.list_views(table)).unwrap_or_default()),
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "view.save" => {
+            let Some(mut v) = req
+                .args
+                .get("view")
+                .and_then(|x| serde_json::from_value::<model::View>(x.clone()).ok())
+            else {
+                return err(id, "缺少参数 view");
+            };
+            if v.id.is_empty() {
+                v.id = ulid::Ulid::generate().to_string();
+            }
+            match state.db.lock() {
+                Ok(mut d) => match d.upsert_view(v) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "view.delete" => {
+            let Some(vid) = req.args.get("id").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 id");
+            };
+            match state.db.lock() {
+                Ok(mut d) => match d.delete_view(vid) {
+                    Ok(()) => ok(id, serde_json::json!({})),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // 命名视图取数（替代 SELECT）：没有语句，只有"哪个视图 + 从哪儿接着翻"。
+        "view.page" => {
+            let Some(vid) = req.args.get("id").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 id");
+            };
+            let cursor = req.args.get("cursor").and_then(|v| v.as_str());
+            let limit = req
+                .args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            match state.db.lock() {
+                Ok(mut d) => {
+                    match d.find_view(vid) {
+                        Some(v) => match d.view_page(&v, cursor, limit) {
+                            Ok(p) => ok(id, serde_json::to_value(p).unwrap_or_default()),
+                            Err(e) => err(id, e),
+                        },
+                        None => err(id, format!("视图「{vid}」不存在")),
+                    }
+                }
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "schema.listTables" => match state.db.lock() {
-            Ok(d) => match schema::list_tables(d.conn()) {
+            Ok(mut d) => match d.list_tables() {
                 Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),
                 Err(e) => err(id, e),
             },
@@ -1657,7 +1786,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 name");
             };
             match state.db.lock() {
-                Ok(d) => match schema::get_table(d.conn(), name) {
+                Ok(mut d) => match d.get_table(name) {
                     Ok(t) => ok(id, serde_json::to_value(t).unwrap_or_default()),
                     Err(e) => err(id, e),
                 },
@@ -1670,7 +1799,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 name");
             };
             match state.db.lock() {
-                Ok(d) => match schema::column_meta(d.conn(), name) {
+                Ok(mut d) => match d.column_meta(name) {
                     Ok(m) => ok(id, serde_json::to_value(m).unwrap_or_default()),
                     Err(e) => err(id, e),
                 },
@@ -1687,7 +1816,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "改名参数不完整（old / new 都要给）");
             }
             match state.db.lock() {
-                Ok(d) => match schema::rename_table(d.conn(), old, new) {
+                Ok(mut d) => match d.rename_table(old, new) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("表改名：{old} → {new}"));
                         ok(id, serde_json::json!({}))
@@ -1703,12 +1832,12 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             let parsed = req
                 .args
                 .get("column")
-                .and_then(|v| serde_json::from_value::<schema::ColumnDef>(v.clone()).ok());
+                .and_then(|v| serde_json::from_value::<model::ColumnDef>(v.clone()).ok());
             let Some(col) = parsed else {
                 return err(id, "加列参数不完整或格式不对（column 要给全）");
             };
             match state.db.lock() {
-                Ok(d) => match schema::add_column(d.conn(), table, &col) {
+                Ok(mut d) => match d.add_column(table, &col) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("加列：{table}.{}", col.name));
                         ok(id, serde_json::json!({}))
@@ -1726,7 +1855,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "删列参数不完整（table / column 都要给）");
             }
             match state.db.lock() {
-                Ok(d) => match schema::drop_column(d.conn(), table, column) {
+                Ok(mut d) => match d.drop_column(table, column) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("删列：{table}.{column}"));
                         ok(id, serde_json::json!({}))
@@ -1745,12 +1874,12 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             let rule = req
                 .args
                 .get("rule")
-                .and_then(|v| serde_json::from_value::<schema::NormalizeRule>(v.clone()).ok());
+                .and_then(|v| serde_json::from_value::<model::NormalizeRule>(v.clone()).ok());
             let (Some(rule), false) = (rule, table.is_empty() || column.is_empty()) else {
                 return err(id, "整理参数不完整（table / column / rule 都要给）");
             };
             match state.db.lock() {
-                Ok(d) => match schema::normalize_column(d.conn(), table, column, rule) {
+                Ok(mut d) => match d.normalize_column(table, column, rule) {
                     Ok(rep) => {
                         log_line(
                             &state.data_dir,
@@ -1772,7 +1901,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "改列名参数不完整（table / column / to 都要给）");
             }
             match state.db.lock() {
-                Ok(d) => match schema::rename_column(d.conn(), table, column, to) {
+                Ok(mut d) => match d.rename_column(table, column, to) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("改列名：{table}.{column} → {to}"));
                         ok(id, serde_json::json!({}))
@@ -1790,7 +1919,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "要说明改哪张表（table）");
             }
             match state.db.lock() {
-                Ok(d) => match schema::set_table_comment(d.conn(), table, comment) {
+                Ok(mut d) => match d.set_table_comment(table, comment) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("改表注释：{table}"));
                         ok(id, serde_json::json!({}))
@@ -1805,12 +1934,12 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             let parsed = req
                 .args
                 .get("spec")
-                .and_then(|v| serde_json::from_value::<schema::TableSpec>(v.clone()).ok());
+                .and_then(|v| serde_json::from_value::<model::TableSpec>(v.clone()).ok());
             let Some(spec) = parsed else {
                 return err(id, "新建表格参数不完整或格式不对");
             };
             match state.db.lock() {
-                Ok(d) => match schema::create_table(d.conn(), &spec) {
+                Ok(mut d) => match d.create_table(&spec) {
                     Ok(()) => {
                         // 日志记表名不记内容 —— 表名会出现在界面上，不算业务数据
                         log_line(&state.data_dir, &format!("新建表格「{}」", spec.name));
@@ -1833,7 +1962,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 name");
             }
             match state.db.lock() {
-                Ok(d) => match schema::drop_table(d.conn(), name, confirm) {
+                Ok(mut d) => match d.drop_table(name, confirm) {
                     Ok(()) => {
                         log_line(&state.data_dir, &format!("删除表格「{name}」"));
                         ok(id, serde_json::json!({}))
@@ -1860,7 +1989,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(200)
-                .min(schema::MAX_PAGE_LIMIT as u64) as usize;
+                .min(model::MAX_PAGE_LIMIT as u64) as usize;
             // 筛选条件：{列名: 关键词} 或 [[列名, 关键词], …]，两种都收
             let filters: Vec<(String, String)> = match req.args.get("filters") {
                 Some(serde_json::Value::Object(m)) => m
@@ -1880,13 +2009,11 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 _ => Vec::new(),
             };
             match state.db.lock() {
-                Ok(d) => {
+                Ok(mut d) => {
                     let page = if filters.is_empty() {
-                        schema::page_rows(d.conn(), table, order_by, desc, cursor, limit)
+                        d.page_rows(table, order_by, desc, cursor, limit)
                     } else {
-                        schema::page_rows_filtered(
-                            d.conn(),
-                            table,
+                        d.page_rows_filtered(table,
                             order_by,
                             desc,
                             cursor,
@@ -1915,9 +2042,9 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             };
             let value = json_to_cell(req.args.get("value").unwrap_or(&serde_json::Value::Null));
             match state.db.lock() {
-                Ok(d) => match schema::update_cell(d.conn(), table, rowid, column, value.as_deref())
+                Ok(mut d) => match d.update_cell(table, rowid, column, value.as_deref())
                 {
-                    Ok(()) => ok(id, serde_json::json!({})),
+                    Ok(_) => ok(id, serde_json::json!({})),
                     Err(e) => err(id, e),
                 },
                 Err(_) => err(id, "数据库锁失败"),
@@ -1935,7 +2062,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
                 .unwrap_or_default();
             match state.db.lock() {
-                Ok(d) => match schema::delete_rows(d.conn(), table, &rowids) {
+                Ok(mut d) => match d.delete_rows(table, &rowids) {
                     Ok(n) => ok(id, serde_json::json!({ "deleted": n })),
                     Err(e) => err(id, e),
                 },
@@ -1957,9 +2084,14 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .get("rows")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            // insert_rows 要求 &mut Connection（事务 API 的需要），见 db.rs::conn_mut
+            // 界面给的是"全是字符串"的二维数组；模型侧用 Option 区分"空字符串"与"没给值"，
+            // 这里统一包成 Some —— 界面上没有 null 这个概念。
+            let rows: Vec<Vec<Option<String>>> = rows
+                .into_iter()
+                .map(|r| r.into_iter().map(Some).collect())
+                .collect();
             match state.db.lock() {
-                Ok(mut d) => match schema::insert_rows(d.conn_mut(), table, &columns, &rows) {
+                Ok(mut d) => match d.insert_rows(table, &columns, &rows) {
                     Ok(n) => ok(id, serde_json::json!({ "inserted": n })),
                     Err(e) => err(id, e),
                 },
@@ -1967,12 +2099,11 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
-        // ⚠️ `schema.runQuery` **不在这里** —— 它是唯一的异步命令，
         // 由 `dispatch()` 直接转给 `run_query_async()`。慢查询必须离开主线程，
         // 否则界面（连同"中断"按钮）会被一起冻住（Q-042）。
 
         "note.list" => match state.db.lock() {
-            Ok(d) => match d.list_notes() {
+            Ok(mut d) => match db::list_notes(&mut d) {
                 Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),
                 Err(e) => err(id, e),
             },
@@ -1985,7 +2116,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 id");
             }
             match state.db.lock() {
-                Ok(d) => match d.get_note(note_id) {
+                Ok(mut d) => match db::get_note(&mut d, note_id) {
                     Ok(Some(n)) => ok(id, serde_json::to_value(n).unwrap_or_default()),
                     Ok(None) => err(id, format!("笔记不存在: {note_id}")),
                     Err(e) => err(id, e),
@@ -2001,7 +2132,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("未命名笔记");
             match state.db.lock() {
-                Ok(d) => match d.create_note(title) {
+                Ok(mut d) => match db::create_note(&mut d, title) {
                     Ok(n) => ok(id, serde_json::to_value(n).unwrap_or_default()),
                     Err(e) => err(id, e),
                 },
@@ -2017,7 +2148,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 id");
             }
             match state.db.lock() {
-                Ok(d) => match d.save_note(note_id, title, content) {
+                Ok(mut d) => match db::save_note(&mut d, note_id, title, content) {
                     Ok(ts) => ok(id, serde_json::json!({ "updatedAt": ts })),
                     Err(e) => err(id, e),
                 },
@@ -2031,8 +2162,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 id");
             }
             match state.db.lock() {
-                Ok(d) => match d.delete_note(note_id) {
-                    Ok(()) => ok(id, serde_json::json!({})),
+                Ok(mut d) => match db::delete_note(&mut d, note_id) {
+                    Ok(_) => ok(id, serde_json::json!({})),
                     Err(e) => err(id, e),
                 },
                 Err(_) => err(id, "数据库锁失败"),
@@ -2056,8 +2187,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             // 若此刻有慢查询占着连接，阻塞等待会把主线程连同界面一起按住 ——
             // 每一次都按 5 秒。存不下就跳过，工作区状态已经记在 last_workspace 里。
             match state.db.try_lock() {
-                Ok(d) => match workspace::save(d.conn(), &ws) {
-                    Ok(()) => ok(id, serde_json::json!({})),
+                Ok(mut d) => match workspace::save(&mut d, &ws) {
+                    Ok(_) => ok(id, serde_json::json!({})),
                     Err(e) => err(id, e),
                 },
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -2075,8 +2206,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         "app.updateSettings" => {
             // 不传 mode / channel 就是只读；传了就是改。改完要落库并记一条审计。
             match state.db.lock() {
-                Ok(d) => {
-                    let mut cur = updater::load_settings(d.conn());
+                Ok(mut d) => {
+                    let mut cur = updater::load_settings(&mut d);
                     let mut changed = false;
                     if let Some(m) = req.args.get("mode").and_then(|v| v.as_str()) {
                         match updater::UpdateMode::parse(m) {
@@ -2097,7 +2228,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                         }
                     }
                     if changed {
-                        if let Err(e) = updater::save_settings(d.conn(), &cur) {
+                        if let Err(e) = updater::save_settings(&mut d, &cur) {
                             return err(id, e);
                         }
                         log_line(
@@ -2118,7 +2249,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         "app.updateCheck" => {
             // 先读设置判断"该不该发"。**`Never` 档位下一个包都不发。**
             let mode = match state.db.lock() {
-                Ok(d) => updater::load_settings(d.conn()).mode,
+                Ok(mut d) => updater::load_settings(&mut d).mode,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             if mode == updater::UpdateMode::Never {
@@ -2131,7 +2262,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
             let cur = updater::current_version();
             let r = match state.db.lock() {
-                Ok(d) => updater::check_by_settings(d.conn(), &cur),
+                Ok(mut d) => updater::check_by_settings(&mut d, &cur),
                 Err(_) => return err(id, "数据库锁失败"),
             };
             match r {
@@ -2152,8 +2283,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         "app.updateState" => {
             // 给界面用的一条只读汇总：档位、通道、当前版本、有没有已暂存好的更新。
             match state.db.lock() {
-                Ok(d) => {
-                    let s = updater::load_settings(d.conn());
+                Ok(mut d) => {
+                    let s = updater::load_settings(&mut d);
                     let staged: Vec<String> = std::fs::read_dir(state.data_dir.join("updates"))
                         .map(|rd| {
                             rd.filter_map(|e| e.ok())
@@ -2179,7 +2310,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         "app.updateDownload" => {
             // 这是"检查"之外的**第二次确认**（ADR-0018 第 3 条）。
             let mode = match state.db.lock() {
-                Ok(d) => updater::load_settings(d.conn()).mode,
+                Ok(mut d) => updater::load_settings(&mut d).mode,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             if mode != updater::UpdateMode::DownloadAsk {
@@ -2190,14 +2321,14 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
 
             let install_dir = match current_exe_dir() {
-                Some(d) => d,
+                Some(mut d) => d,
                 None => return err(id, "取不到程序所在目录"),
             };
             let cur = updater::current_version();
             log_line(&state.data_dir, "出站尝试：下载更新包（api.github.com）");
 
             let channel = match state.db.lock() {
-                Ok(d) => updater::load_settings(d.conn()).channel,
+                Ok(mut d) => updater::load_settings(&mut d).channel,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             let r = updater::fetch_releases().and_then(|rs| match updater::check(&rs, &cur, channel) {
@@ -2233,7 +2364,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "替换需要显式确认（confirmed: true）");
             }
             let mode = match state.db.lock() {
-                Ok(d) => updater::load_settings(d.conn()).mode,
+                Ok(mut d) => updater::load_settings(&mut d).mode,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             if mode != updater::UpdateMode::DownloadAsk {
@@ -2262,7 +2393,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "暂存目录里没有 plan.json（替换计划）");
             }
             let install_dir = match current_exe_dir() {
-                Some(d) => d,
+                Some(mut d) => d,
                 None => return err(id, "取不到程序所在目录"),
             };
 
@@ -2294,7 +2425,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
             // 让主进程退出，把 exe 的文件锁让出来（替换进程正在等它）。
             // 走 `AppEvent::Quit` 而不是 `process::exit` —— 后者会绕过"退出前保存"。
-            let proxy = state.proxy.lock().ok().and_then(|g| g.clone());
+            let proxy = state.proxy.lock().ok().and_then(|mut g| g.clone());
             match proxy {
                 Some(p) => {
                     let _ = p.send_event(AppEvent::Quit);
@@ -2356,7 +2487,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 ),
             );
             // 走与"关闭窗口"相同的收尾路径退出（退出前保存一次都不能省）
-            if let Some(p) = state.proxy.lock().ok().and_then(|g| g.clone()) {
+            if let Some(p) = state.proxy.lock().ok().and_then(|mut g| g.clone()) {
                 let _ = p.send_event(AppEvent::SmokeDone);
             }
             ok(id, serde_json::json!({ "written": true }))
@@ -2373,7 +2504,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 来验证重名保护，而第一次导入收尾时会把令牌用掉。
         "app.e2eSource" => {
             let path = match state.e2e_source.lock() {
-                Ok(g) => g.as_ref().map(PathBuf::from),
+                Ok(mut g) => g.as_ref().map(PathBuf::from),
                 Err(_) => None,
             };
             match path {
@@ -2396,220 +2527,6 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
         other => err(id, format!("未知命令: {other}")),
     }
-}
-
-/// `schema.runQuery` 的异步实现（Q-042）。
-///
-/// 为什么必须异步：`schema::run_query` 只限制返回行数，不限制时间。慢查询
-/// （全表扫、缺索引、写错的条件）会把调用线程占住几分钟。以前它跑在主线程上，
-/// 也就是 WebView 的事件线程 —— 界面点不动、连"中断"这件事都点不了。
-///
-/// 现在的分工：
-///   · 主线程 —— 解析参数、过危险语句闸门、登记中断句柄、起线程，立刻返回 `None`
-///     （表示"应答稍后给"）。同时保持可响应：`{ interrupt: true }` 就是在这条路上
-///     被接住的，这就是"执行中再点一次 = 中断"。
-///   · 工作线程 —— 独占数据库连接跑查询，跑完把应答塞进队列、发事件叫醒主线程。
-///   · 超时哨兵 —— 睡够 `timeoutMs` 后若这一代查询还在跑，就替用户按下中断。
-///
-/// 忙时**明确拒绝**而不是排队：排队会让"哪条结果对应界面上哪个结果块"变得
-/// 不可预测（用户看不出第二条是在等第一条还是在跑自己）。
-fn run_query_async(state: &AppState, req: Request) -> Option<String> {
-    let id = req.id;
-
-    // ---------- ① 中断请求 ----------
-    if req
-        .args
-        .get("interrupt")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let hit = match state.sql.running.lock() {
-            Ok(g) => match g.as_ref() {
-                Some((_, handle)) => {
-                    handle.interrupt();
-                    true
-                }
-                None => false,
-            },
-            Err(_) => false,
-        };
-        if !hit {
-            return Some(err(id, "当前没有正在执行的查询"));
-        }
-        // 先写原因再返回：工作线程是靠它把 interrupted 翻译成人话的。
-        // 若哨兵已经写了 "timeout"，不覆盖 —— 让用户看到"自动中断"这个真相。
-        if let Ok(mut c) = state.sql.cause.lock() {
-            if c.is_none() {
-                *c = Some("user");
-            }
-        }
-        log_line(&state.data_dir, "用户中断了正在执行的 SQL");
-        return Some(ok(id, serde_json::json!({ "interrupted": true })));
-    }
-
-    // ---------- ② 参数 ----------
-    let Some(sql) = req.args.get("sql").and_then(|v| v.as_str()) else {
-        return Some(err(id, "缺少参数 sql"));
-    };
-    let sql = sql.to_string();
-    let max_rows = req
-        .args
-        .get("maxRows")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(5000)
-        .clamp(1, 100_000) as usize;
-    let confirmed = req
-        .args
-        .get("confirmed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let timeout_ms = req
-        .args
-        .get("timeoutMs")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_QUERY_TIMEOUT_MS);
-
-    // ---------- ③ 策略层闸门（仍在主线程问，此时界面空闲，确认框能正常弹）----------
-    if !confirmed {
-        if let Some(reason) = schema::needs_confirm(&sql) {
-            return Some(ok(id, serde_json::json!({ "needsConfirm": reason })));
-        }
-    }
-
-    // ---------- ④ 占住执行位并取中断句柄 ----------
-    let my_gen = {
-        let mut slot = match state.sql.running.lock() {
-            Ok(g) => g,
-            Err(_) => return Some(err(id, "查询状态锁失败")),
-        };
-        if slot.is_some() {
-            return Some(err(id, "上一条查询还在执行 —— 先点「中断」，或等它跑完"));
-        }
-        let guard = match state.db.lock() {
-            Ok(g) => g,
-            Err(_) => return Some(err(id, "数据库锁失败")),
-        };
-        // 句柄内部握着连接的 Arc，因此脱离这把锁之后依然有效
-        let handle = guard.conn().get_interrupt_handle();
-        drop(guard);
-        let gen = state.sql.next_gen.fetch_add(1, Ordering::SeqCst);
-        *slot = Some((gen, handle));
-        gen
-    };
-    if let Ok(mut c) = state.sql.cause.lock() {
-        *c = None; // 新一代查询，清掉上一条留下的原因
-    }
-
-    // ---------- ⑤ 超时哨兵 ----------
-    if timeout_ms > 0 {
-        let slot = Arc::clone(&state.sql);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
-            if let Ok(g) = slot.running.lock() {
-                if let Some((gen, handle)) = g.as_ref() {
-                    if *gen == my_gen {
-                        if let Ok(mut c) = slot.cause.lock() {
-                            if c.is_none() {
-                                *c = Some("timeout");
-                            }
-                        }
-                        handle.interrupt();
-                    }
-                }
-            }
-        });
-    }
-
-    // ---------- ⑥ 工作线程 ----------
-    let proxy = match state.proxy.lock() {
-        Ok(g) => g.clone(),
-        Err(_) => None,
-    };
-    let Some(proxy) = proxy else {
-        if let Ok(mut slot) = state.sql.running.lock() {
-            *slot = None;
-        }
-        return Some(err(id, "事件循环未就绪，无法调度查询"));
-    };
-
-    let db = Arc::clone(&state.db);
-    let slot = Arc::clone(&state.sql);
-    let log_dir = state.data_dir.clone();
-
-    std::thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let outcome = match db.lock() {
-            Ok(guard) => schema::run_query(guard.conn(), &sql, max_rows),
-            Err(_) => Err("数据库锁失败".to_string()),
-        };
-        let elapsed_ms = started.elapsed().as_millis();
-
-        // 收尾：先确认这一代还是自己的再清（否则可能把后来者清掉）
-        if let Ok(mut g) = slot.running.lock() {
-            let mine = match g.as_ref() {
-                Some((gen, _)) => *gen == my_gen,
-                None => false,
-            };
-            if mine {
-                *g = None;
-            }
-        }
-        let cause = slot.cause.lock().ok().and_then(|mut c| c.take());
-
-        let payload = match outcome {
-            Ok(r) => {
-                // 不记录 SQL 内容（docs/06 §9.3：查询日志默认关闭）；
-                // 只记"发生过写"这个事实，供审计页计数。
-                if confirmed || r.affected > 0 {
-                    log_line(
-                        &log_dir,
-                        &format!("SQL 编辑器执行了写操作，影响 {} 行", r.affected),
-                    );
-                }
-                ok(id, serde_json::to_value(r).unwrap_or_default())
-            }
-            Err(e) => match cause {
-                Some("timeout") => {
-                    log_line(
-                        &log_dir,
-                        &format!("SQL 执行超过 {} 秒，已被自动中断", timeout_ms / 1000),
-                    );
-                    err(
-                        id,
-                        format!(
-                            "这条查询跑了 {} ms 还没完，已按 {} 秒的上限自动中断。\
-                             常见原因是条件列没有索引、或者写成了全表扫描 —— \
-                             可以先用 LIMIT 看看数据长什么样，再决定要不要建索引。",
-                            elapsed_ms,
-                            timeout_ms / 1000
-                        ),
-                    )
-                }
-                Some(_) => {
-                    log_line(&log_dir, "SQL 执行被用户中断");
-                    err(
-                        id,
-                        format!(
-                            "查询已中断（跑了 {} ms）。SQLite 会回滚这一条语句，\
-                             不会留下写了一半的数据。",
-                            elapsed_ms
-                        ),
-                    )
-                }
-                None => err(id, e),
-            },
-        };
-
-        if let Ok(mut g) = slot.pending.lock() {
-            g.push(payload);
-        }
-        // 叫醒主线程去回传。注意不能用 `log_dir` 之外的 AppState ——
-        // 工作线程只持有这几份 Arc，不碰 WebView。
-        let _ = proxy.send_event(AppEvent::Reply);
-    });
-
-    // 应答在路上：这条命令到此为止，什么也不回
-    None
 }
 
 /// 用系统默认浏览器打开一个 http(s) 链接。
@@ -2790,15 +2707,14 @@ mod acceptance {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("data")).unwrap();
-        let db = Db::open(&dir, &dir.join("data").join("main.db")).unwrap();
+        let db = Db::open(&dir).unwrap();
         let state = Arc::new(AppState {
             db: Arc::new(Mutex::new(db)),
             data_dir: dir.clone(),
             webview: Mutex::new(None),
             started_at: std::time::Instant::now(),
             last_workspace: Mutex::new(None),
-            sql: Arc::new(SqlJob::default()),
-            proxy: Mutex::new(None),
+                proxy: Mutex::new(None),
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
             e2e_source: Mutex::new(None),
@@ -3079,110 +2995,6 @@ mod acceptance {
 
         let _ = std::fs::remove_dir_all(dir);
     }
-
-    /// 验收 11 + 12 + 13：SQL 执行与**危险语句闸门**。
-    ///
-    /// 12 / 13 是这套验收里最要紧的两条：`DELETE FROM t` 与
-    /// `DELETE FROM t WHERE 1=1` 都必须弹确认。后者曾经能绕过（恒真谓词）。
-    #[test]
-    fn 验收_危险语句必须弹确认() {
-        let (state, dir) = fixture("gate");
-        call(
-            &state,
-            "schema.createTable",
-            json!({ "spec": { "name": "台账", "comment": null, "columns": [col("名称", "text")] }}),
-        )
-        .unwrap();
-        call(
-            &state,
-            "schema.insertRows",
-            json!({ "table":"台账","columns":["名称"],"rows":[["甲"],["乙"]] }),
-        )
-        .unwrap();
-
-        // 11：普通查询走同步闸门放行 → 到异步执行那一步才需要事件循环。
-        //     这里只能验证它**没有被闸门拦下**（返回的不是 needsConfirm）。
-        let allowed = call(
-            &state,
-            "schema.runQuery",
-            json!({"sql":"SELECT * FROM 台账 LIMIT 20"}),
-        );
-        // 单测里没有事件循环，所以这里要么是"事件循环未就绪"，要么是应答；
-        // 唯独不能是 needsConfirm。
-        if let Ok(v) = &allowed {
-            assert!(v.get("needsConfirm").is_none(), "普通 SELECT 不该被拦：{v}");
-        }
-
-        // 12：无 WHERE 的 DELETE
-        let r = call(&state, "schema.runQuery", json!({"sql":"DELETE FROM 台账"})).unwrap();
-        assert!(
-            r["needsConfirm"].is_string(),
-            "无 WHERE 的 DELETE 必须弹确认，实际：{r}"
-        );
-
-        // 13：恒真谓词 —— 也弹确认
-        let r = call(
-            &state,
-            "schema.runQuery",
-            json!({"sql":"DELETE FROM 台账 WHERE 1=1"}),
-        )
-        .unwrap();
-        assert!(
-            r["needsConfirm"].is_string(),
-            "WHERE 1=1 这种恒真写法必须弹确认（曾经能绕过），实际：{r}"
-        );
-
-        // 有真实过滤条件的可以放行
-        let r = call(
-            &state,
-            "schema.runQuery",
-            json!({"sql":"DELETE FROM 台账 WHERE 名称 = '甲'"}),
-        );
-        if let Ok(v) = &r {
-            assert!(v.get("needsConfirm").is_none(), "有条件就不该拦：{v}");
-        }
-
-        // 数据一行没少：闸门拦下的语句绝不能被执行
-        let page = call(&state, "schema.pageRows", json!({"table":"台账","limit":10})).unwrap();
-        assert_eq!(
-            page["rows"].as_array().unwrap().len(),
-            2,
-            "被拦下的 DELETE 不能真的删了数据"
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// 有查询在跑时，第二条查询必须**明确拒绝**而不是排队。
-    ///
-    /// 顺带证明"中断"这条路是通的：中断请求只看 `sql.running`，不碰数据库锁，
-    /// 所以它在慢查询期间一定能被处理（这正是 Q-042 要解决的事）。
-    #[test]
-    fn 忙时第二条查询被明确拒绝_而中断仍然可达() {
-        let (state, dir) = fixture("busy");
-        // 假装有一条正在跑的查询
-        let handle = {
-            let guard = state.db.lock().unwrap();
-            guard.conn().get_interrupt_handle()
-        };
-        *state.sql.running.lock().unwrap() = Some((1, handle));
-
-        let busy = call(&state, "schema.runQuery", json!({"sql":"SELECT 1"}));
-        assert!(busy.is_err(), "忙的时候第二条查询必须被拒绝");
-        assert!(
-            busy.unwrap_err().contains("还在执行"),
-            "拒绝理由要说清楚"
-        );
-
-        // 中断请求照样能进来（它不走数据库锁）
-        let r = call(&state, "schema.runQuery", json!({"interrupt": true})).unwrap();
-        assert_eq!(r["interrupted"], true);
-        assert_eq!(*state.sql.cause.lock().unwrap(), Some("user"));
-
-        *state.sql.running.lock().unwrap() = None;
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
     /// 验收 14 + 15：工作区状态存下去、重启后能读回来。
     #[test]
     fn 验收_工作区状态重启后能恢复() {
@@ -3204,15 +3016,14 @@ mod acceptance {
         assert_eq!(info["workspace"]["windowW"], 1280);
 
         // 换一个 AppState 打开同一份库（= 关掉程序重开）
-        let db = Db::open(&dir, &dir.join("data").join("main.db")).unwrap();
+        let db = Db::open(&dir).unwrap();
         let state2 = AppState {
             db: Arc::new(Mutex::new(db)),
             data_dir: dir.clone(),
             webview: Mutex::new(None),
             started_at: std::time::Instant::now(),
             last_workspace: Mutex::new(None),
-            sql: Arc::new(SqlJob::default()),
-            proxy: Mutex::new(None),
+                proxy: Mutex::new(None),
             smoke_script: None,
             smoke_fired: AtomicBool::new(false),
             e2e_source: Mutex::new(None),

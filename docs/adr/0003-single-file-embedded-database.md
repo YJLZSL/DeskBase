@@ -3,7 +3,7 @@
 - **状态**：已接受
 - **日期**：2026-09-17
 - **决策者**：核心维护者
-- **相关**：[06 · SQL 数据库能力设计](../06-sql-database.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[17 · 技术选型建议](../17-tech-selection.md)
+- **相关**：[06 · 数据表引擎设计（无 SQL）](../06-data-table-engine.md)、[07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)、[17 · 技术选型建议](../17-tech-selection.md)
 
 ---
 
@@ -89,6 +89,6 @@
 
 ## 参考
 
-- [06 · SQL 数据库能力设计](../06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](../06-data-table-engine.md)
 - [07 · 备份、恢复与断电保护](../07-backup-recovery-dr.md)
 - [17 · 技术选型建议](../17-tech-selection.md) — 数据层候选对比

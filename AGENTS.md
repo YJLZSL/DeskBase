@@ -20,8 +20,8 @@
 | 形态 | Windows 单机桌面应用（Rust + `tao`/`wry` + 系统 WebView2） |
 | 代码 | `app/src/*.rs`（后端与全部能力）+ `app/ui/*.js|css`（WebView 里的手写前端） |
 | 通道 | `window.__deskbase.call(cmd, args)` ↔ Rust `dispatch()`，命令在 `app/src/main.rs` 显式列出 |
-| 存储 | 单文件 SQLite（`rusqlite` bundled），WAL + `synchronous=FULL` |
-| 数据目录 | `data/main.db`、日志 `data/logs/app.log`（`DESKBASE_DATA_DIR` 可覆盖） |
+| 存储 | 自研单文件存储引擎 `store`（append-only 日志 + 快照 + fsync，纯 Rust，无第三方数据库依赖） |
+| 数据目录 | `data/main.dkb`、日志 `data/logs/app.log`（`DESKBASE_DATA_DIR` 可覆盖） |
 | 当前版本 | 见 `local-docs/handoff/VERSION_PLAN.md` §1 事实面板（**别从别处猜版本**） |
 
 ---
@@ -204,7 +204,7 @@ DeskBase/
 | R1 | **用户数据不得离开本机**（逐次显式授权除外）；遥测/埋点/崩溃上报**不存在**（不是开关）—— ADR-0017 |
 | R2 | 程序自主联网**默认关闭**、各自独立开关、全记审计（含被拒）、关掉时**出站 0 字节** —— ADR-0018/0019 |
 | | 无账号、无登录、无强制云同步 |
-| | 不字符串拼接 SQL；不用 `innerHTML` 渲染用户数据 |
+| | 不以字符串拼接构造查询（值一律走类型校验）；不用 `innerHTML` 渲染用户数据 |
 | | 密钥/令牌/口令不写日志；不把加密密钥放进备份包 |
 | | **不把 `local-docs/` 提交进仓库**（`git add -f` 也不行）；不改 `.gitignore` 使其失效 |
 
@@ -237,6 +237,7 @@ DeskBase/
 | `reg.exe` 被本机安全策略拉黑 | 见到 `LNK1181: cannot open input file 'kernel32.lib'` 先想这条；构建脚本已用"扫盘符"兜住，**不要自己写注册表方案** |
 | 界面烟测会**短暂弹窗** | 正常现象，烟测用临时数据目录（不碰真实数据），结束自动清理 |
 | 交互式命令会挂 | `Read-Host`、`git rebase -i` 等在非交互环境会挂死；PowerShell 5.1 不支持 `&&` |
+| **数据文件已从 SQLite 变为自研格式** | 旧库 `data/main.db`（SQLite）→ 新库 `data/main.dkb`（自研 append-only 日志 + 快照）；旧库不直读，迁移走「旧版导出 JSON/CSV → 新版导入」。主程序不再依赖 SQLite（`rusqlite` / `libsqlite3-sys` 已从依赖树移除），`Db` 句柄现在指向 `store` / `model` 而非 SQLite 连接 |
 
 ---
 

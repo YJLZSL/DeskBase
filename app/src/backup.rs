@@ -1,21 +1,23 @@
-//! 手动备份（v0.3.0 · 不丢数据）
+//! 手动备份（不丢数据）
 //!
-//! 为什么单开一个模块：迁移前的自动备份（`db.rs::backup_before_upgrade`）只在
-//! "库结构要升级"时发生；用户想**主动**留一份（换机、折腾数据前、把台账发给同事）
-//! 时没有入口。三条底线第一条是"不丢数据"，主动备份是它最直接的兑现。
+//! 为什么单开一个模块：用户想**主动**留一份（换机、折腾数据前、把台账发给同事）
+//! 时得有入口。三条底线第一条是"不丢数据"，主动备份是它最直接的兑现。
 //!
 //! 三个设计取舍：
-//!   1. 放 `<数据目录>/backups/`，与迁移备份同处 —— 用户只需要记住一个地方；
-//!   2. 用 `VACUUM INTO` 而不是复制文件：它产出**一致快照**，还顺带整理碎片；
-//!      复制一个正在写入的 .db 可能拿到半截状态（WAL 还没落盘）；
-//!   3. 建完**立刻三步校验**（非空 / 能独立打开 / quick_check 通过且表数一致）——
+//!   1. 放 `<数据目录>/backups/`，用户只需要记住一个地方；
+//!   2. **先压实快照，再复制快照文件**。原来这一层靠 SQLite 的 `VACUUM INTO`
+//!      产出一致快照；新引擎（docs/adr/0021）的等价动作是
+//!      [`Store::force_snapshot`] —— 把内存状态整份写成一个干净的快照文件，
+//!      然后把那个文件复制走。直接复制正在追加的日志会拿到半截状态，不能那么干；
+//!   3. 建完**立刻三步校验**（非空 / 能解析回状态 / 表数一致）——
 //!      不校验的备份等于没有备份：磁盘满、半途失败都会留下一个"看起来像备份"的文件。
 
-use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 use time::macros::format_description;
 use time::OffsetDateTime;
+
+use crate::model::Db;
 
 /// 给界面用的备份描述。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -37,17 +39,15 @@ fn stamp() -> String {
         .unwrap_or_else(|_| "backup".into())
 }
 
-/// 源库的用户表数 —— 第三步校验用它挡住"空壳备份"。
-fn table_count(conn: &Connection) -> Result<i64, String> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |r| r.get(0),
-    )
-    .map_err(|e| format!("读取表数失败：{e}"))
+/// 当前库里的表数 —— 第三步校验用它挡住"空壳备份"。
+pub fn table_count(db: &Db) -> i64 {
+    db.store().count("tbl/") as i64
 }
 
 /// 三步校验。`expect_tables` 给 `Some(n)` 时会比对表数（备份必须与源库同构）。
+///
+/// 第二步原来是"用 SQLite 独立打开"，现在是"把快照 JSON 解析回来"——
+/// 判据其实更严格：它要求这份文件**真的能被还原成一份状态**，而不只是"文件头没坏"。
 pub fn verify(path: &Path, expect_tables: Option<i64>) -> Result<u64, String> {
     // ① 非空
     let meta = std::fs::metadata(path)
@@ -55,17 +55,17 @@ pub fn verify(path: &Path, expect_tables: Option<i64>) -> Result<u64, String> {
     if meta.len() == 0 {
         return Err("备份文件是 0 字节 —— 这次备份不可用，请重试".into());
     }
-    // ② 能独立打开（新开连接，而不是复用当前连接）
-    let conn = Connection::open(path).map_err(|e| format!("备份文件打不开：{e}"))?;
-    // ③ 完整性 + 表数
-    let check: String = conn
-        .query_row("PRAGMA quick_check", [], |r| r.get(0))
-        .map_err(|e| format!("完整性检查失败：{e}"))?;
-    if check != "ok" {
-        return Err(format!("备份文件没通过完整性检查：{check}"));
-    }
+    // ② 能被解析回一份完整状态（等价原来的"能独立打开"）
+    let raw = std::fs::read(path).map_err(|e| format!("备份文件读不出来：{e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("备份文件不是一份完整的快照：{e}"))?;
+    let data = v
+        .get("data")
+        .and_then(|d| d.as_object())
+        .ok_or_else(|| "备份文件里没有数据段 —— 可能不是 DeskBase 的备份".to_string())?;
+    // ③ 表数一致
     if let Some(n) = expect_tables {
-        let got = table_count(&conn)?;
+        let got = data.keys().filter(|k| k.starts_with("tbl/")).count() as i64;
         if got != n {
             return Err(format!(
                 "备份里的表数（{got}）与当前库（{n}）对不上 —— 备份可能不完整，已保留原文件供排查"
@@ -94,22 +94,24 @@ fn info_of(path: &Path, size: u64) -> BackupInfo {
 }
 
 /// 创建一份备份（含三步校验）。
-pub fn create(conn: &Connection, data_dir: &Path) -> Result<BackupInfo, String> {
+pub fn create(db: &mut Db, data_dir: &Path) -> Result<BackupInfo, String> {
     let dir = backup_dir(data_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("创建备份目录失败（{}）：{e}", dir.display()))?;
-    let name = format!("deskbase-{}.db", stamp());
+    let name = format!("deskbase-{}.dkb", stamp());
     let path = dir.join(&name);
     if path.exists() {
         // 同一秒内点两次：不覆盖，直接把已有的那份校验一遍返回（幂等）
         let size = verify(&path, None)?;
         return Ok(info_of(&path, size));
     }
-    // VACUUM INTO 的目标是 SQL 字面量 —— 路径里的单引号必须转义（与 db.rs 同款处理）
-    let lit = path.to_string_lossy().replace('\'', "''");
-    let expect = table_count(conn)?;
-    conn.execute_batch(&format!("VACUUM INTO '{lit}'"))
-        .map_err(|e| format!("备份失败（目标 {}）：{e}", path.display()))?;
+    let expect = table_count(db);
+    // 先把状态压实成快照，再复制它 —— 复制正在追加的日志会拿到半截状态
+    db.store_mut()
+        .force_snapshot()
+        .map_err(|e| format!("备份前压实快照失败：{e}"))?;
+    let snap = db.store().snap_path().to_path_buf();
+    std::fs::copy(&snap, &path).map_err(|e| format!("备份失败（目标 {}）：{e}", path.display()))?;
     // 立刻校验：不校验的备份等于没有备份
     match verify(&path, Some(expect)) {
         Ok(size) => Ok(info_of(&path, size)),
@@ -126,7 +128,7 @@ pub fn list(data_dir: &Path) -> Vec<BackupInfo> {
     };
     for e in rd.flatten() {
         let p = e.path();
-        if p.extension().map(|x| x == "db").unwrap_or(false) {
+        if p.extension().map(|x| x == "dkb").unwrap_or(false) {
             if let Ok(m) = std::fs::metadata(&p) {
                 out.push(info_of(&p, m.len()));
             }
@@ -150,34 +152,54 @@ mod tests {
         d
     }
 
-    fn seed(dir: &Path) -> Connection {
-        let conn = Connection::open(dir.join("main.db")).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE a(x INTEGER); CREATE TABLE b(y TEXT); INSERT INTO a VALUES (1);",
-        )
-        .unwrap();
-        conn
+    fn seed(dir: &Path) -> Db {
+        let db = Db::open(dir).unwrap();
+        db
     }
 
-    /// 正向：备份能建、能独立打开、数据在、表数一致。
+    fn two_tables(db: &mut Db) {
+        let mk = |name: &str| crate::model::TableSpec {
+            name: name.to_string(),
+            comment: None,
+            columns: vec![crate::model::ColumnDef {
+                name: "x".to_string(),
+                ty: crate::model::ColType::Text,
+                not_null: false,
+                default: None,
+                primary_key: false,
+                comment: None,
+                shared: None,
+                link: None,
+                lookup: None,
+                rollup: None,
+            }],
+        };
+        db.create_table(&mk("a")).unwrap();
+        db.create_table(&mk("b")).unwrap();
+        db.insert_rows("a", &["x".to_string()], &[vec![Some("1".to_string())]])
+            .unwrap();
+    }
+
+    /// 正向：备份能建、能独立读回、数据在、表数一致。
     #[test]
-    fn 备份_创建后可独立打开且表数一致() {
+    fn 备份_创建后可独立读回且表数一致() {
         let d = tmp_dir("ok");
-        let conn = seed(&d);
-        let info = create(&conn, &d).unwrap();
+        let mut db = seed(&d);
+        two_tables(&mut db);
+        let info = create(&mut db, &d).unwrap();
         assert!(info.size > 0, "备份不能是空文件");
         assert!(
             info.name.starts_with("deskbase-"),
             "命名应带 deskbase 前缀：{}",
             info.name
         );
-        // 独立打开（不复用源连接）并读数据 —— 这才是"这份备份能用"的证明
-        let b = Connection::open(&info.path).unwrap();
-        let n: i64 = b
-            .query_row("SELECT COUNT(*) FROM a", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 1, "备份里应能读到源库的数据");
-        assert_eq!(table_count(&b).unwrap(), 2);
+        // 独立读回（不复用源 db）并取到数据 —— 这才是"这份备份能用"的证明
+        let raw = std::fs::read(&info.path).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let data = v.get("data").unwrap().as_object().unwrap();
+        assert!(data.contains_key("tbl/a"), "备份里应有表 a");
+        assert!(data.contains_key("rec/a/00000000000000000001"), "备份里应有记录");
+        assert_eq!(table_count(&db), 2);
         assert!(verify(Path::new(&info.path), Some(2)).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -186,10 +208,11 @@ mod tests {
     #[test]
     fn 备份_列表按时间倒序() {
         let d = tmp_dir("list");
-        let conn = seed(&d);
-        let first = create(&conn, &d).unwrap();
+        let mut db = seed(&d);
+        two_tables(&mut db);
+        let first = create(&mut db, &d).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100)); // 文件名精确到秒
-        let second = create(&conn, &d).unwrap();
+        let second = create(&mut db, &d).unwrap();
         let items = list(&d);
         assert!(items.len() >= 2);
         assert_eq!(items[0].name, second.name, "最新的应排最前");
@@ -201,10 +224,21 @@ mod tests {
     #[test]
     fn 备份_空文件校验必失败() {
         let d = tmp_dir("empty");
-        let p = d.join("empty.db");
+        let p = d.join("empty.dkb");
         std::fs::write(&p, b"").unwrap();
         let e = verify(&p, None).unwrap_err();
         assert!(e.contains("0 字节"), "错误要说清原因：{e}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 负向：不是快照的文件要被拦下。
+    #[test]
+    fn 备份_非快照文件校验必失败() {
+        let d = tmp_dir("notjson");
+        let p = d.join("broken.dkb");
+        std::fs::write(&p, b"not a snapshot at all").unwrap();
+        let e = verify(&p, None).unwrap_err();
+        assert!(e.contains("完整的快照"), "错误要说清原因：{e}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -212,8 +246,9 @@ mod tests {
     #[test]
     fn 备份_表数对不上要被拦下() {
         let d = tmp_dir("mismatch");
-        let conn = seed(&d);
-        let info = create(&conn, &d).unwrap();
+        let mut db = seed(&d);
+        two_tables(&mut db);
+        let info = create(&mut db, &d).unwrap();
         let e = verify(Path::new(&info.path), Some(9)).unwrap_err();
         assert!(e.contains("对不上"), "要明确说表数对不上：{e}");
         let _ = std::fs::remove_dir_all(&d);
@@ -223,9 +258,10 @@ mod tests {
     #[test]
     fn 备份_同秒重复调用不覆盖() {
         let d = tmp_dir("again");
-        let conn = seed(&d);
-        let a = create(&conn, &d).unwrap();
-        let b = create(&conn, &d).unwrap();
+        let mut db = seed(&d);
+        two_tables(&mut db);
+        let a = create(&mut db, &d).unwrap();
+        let b = create(&mut db, &d).unwrap();
         assert_eq!(a.name, b.name, "同一秒内应复用同一份，不覆盖");
         let _ = std::fs::remove_dir_all(&d);
     }

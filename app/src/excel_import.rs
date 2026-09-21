@@ -8,6 +8,10 @@
 //! | `xlsx.rs` / `csv_import.rs` | **只读文件**：把表读成字符串行（编码、单元格清洗都在那儿） |
 //! | 本模块 | **编排**：把上面两段接起来，并把用户的调整带进落库 |
 //!
+//! **落库不经过 SQL**：本模块只调用 [`crate::model::Db`]（自研单文件存储，
+//! 见 `docs/adr/0021`）。建表用 `Db::create_table`、写行用 `Db::insert_rows`、
+//! 取消/失败清场用 `Db::drop_table`，表存在性用 `Db::get_table` 判断。
+//!
 //! ## 为什么计划里带路径、而不让前端传路径
 //!
 //! 与 `convert.rs` 同一条纪律：**路径只在 Rust 侧流转**。前端拿到的是一个
@@ -42,8 +46,12 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::import_plan;
-use crate::schema;
+use crate::model;
+use crate::model::Db;
 use crate::xlsx;
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -79,7 +87,7 @@ pub struct PlannedColumn {
     pub original: String,
     /// 建议的字段名（已去重、已合法化）
     pub name: String,
-    /// 建议类型（`schema::ColType` 认的 snake_case 名字）
+    /// 建议类型（`model::ColType` 认的 snake_case 名字）
     pub ty: String,
     /// `high` / `low`。低置信度时界面要提醒用户看一眼再确认。
     pub confidence: String,
@@ -322,7 +330,7 @@ pub struct FinalColumn {
     /// 对应源表的第几列（来自计划里的 `sourceIndex`）
     pub source_index: usize,
     pub name: String,
-    /// 目标类型（`schema::ColType` 的 snake_case 名字）
+    /// 目标类型（`model::ColType` 的 snake_case 名字）
     pub ty: String,
     #[serde(default)]
     pub not_null: bool,
@@ -401,7 +409,7 @@ pub fn close_session(id: &str) {
 /// **顺序刻意是「先建表、再读数据」**：读文件失败时表还没建出来，什么都不用收拾；
 /// 表建好之后如果读失败，`abort` 一次就干净了。
 pub fn begin_import(
-    conn: &rusqlite::Connection,
+    db: &mut Db,
     path: &Path,
     sheet_index: usize,
     header_row: usize,
@@ -423,21 +431,14 @@ pub fn begin_import(
     }
 
     // 目标表不能已经存在 —— 覆盖别人的表比"导入失败"严重得多
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND lower(name)=lower(?1)",
-            rusqlite::params![table],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if exists {
+    if db.get_table(table).is_ok() {
         return Err(format!(
             "已经有一张叫「{table}」的表了。请换个名字，或先把旧表改名 —— \
              导入不会覆盖已有数据。"
         ));
     }
 
-    let spec = schema::TableSpec {
+    let spec = model::TableSpec {
         name: table.to_string(),
         comment: Some(format!(
             "从 {} 导入",
@@ -447,21 +448,25 @@ pub fn begin_import(
         )),
         columns: columns
             .iter()
-            .map(|c| -> Result<schema::ColumnDef> {
-                let ty = schema::ColType::from_name(&c.ty)
+            .map(|c| -> Result<model::ColumnDef> {
+                let ty = model::ColType::from_name(&c.ty)
                     .ok_or_else(|| format!("不认识的字段类型：{}", c.ty))?;
-                Ok(schema::ColumnDef {
+                Ok(model::ColumnDef {
                     name: c.name.trim().to_string(),
                     ty,
                     not_null: c.not_null,
                     default: None,
                     primary_key: false,
                     comment: None,
+                    shared: None,
+                    link: None,
+                    lookup: None,
+                    rollup: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
     };
-    schema::create_table(conn, &spec)?;
+    db.create_table(&spec)?;
 
     // ---- 把要写的数据读进来 ----
     let source_indexes: Vec<usize> = columns.iter().map(|c| c.source_index).collect();
@@ -492,7 +497,7 @@ pub fn begin_import(
     });
     if let Err(e) = walk {
         // 表已经建出来了，读失败就得把它删掉 —— 否则用户下次会撞上"表已存在"
-        let _ = schema::drop_table(conn, table, table);
+        let _ = db.drop_table(table, table);
         return Err(e);
     }
 
@@ -536,7 +541,7 @@ pub fn begin_import(
 
 /// 写一批。返回累计进度。
 pub fn write_chunk(
-    conn: &mut rusqlite::Connection,
+    db: &mut Db,
     id: &str,
     batch: usize,
 ) -> Result<Chunk> {
@@ -545,10 +550,9 @@ pub fn write_chunk(
         let end = (s.cursor + batch).min(s.rows.len());
         if s.cursor < end {
             let slice = &s.rows[s.cursor..end];
-            // 导入路径走 _opt 版本：空单元格在读文件时已标成 None → 统一落 NULL
-            // （含文本列）。手动编辑那条路径的空串语义不受影响，见 schema.rs 的
-            // insert_rows_opt 文档与 Q-047。
-            schema::insert_rows_opt(conn, &s.table, &s.col_names, slice)?;
+            // 导入路径：空单元格在读文件时已标成 None → 统一落 NULL（含文本列），
+            // 由 model::Db::insert_rows 的 NULL 语义保证（见 Q-047）。
+            db.insert_rows(&s.table, &s.col_names, slice)?;
             s.cursor = end;
         }
         Ok(Chunk {
@@ -563,9 +567,9 @@ pub fn write_chunk(
 ///
 /// 这不是数据库意义上的"回滚"（已提交的批次确实进过库），而是"把现场收拾干净"：
 /// 留着一张写了一半的表，用户下次导入会撞上"表已存在"，而他又看不出那张表哪来的。
-pub fn abort_import(conn: &rusqlite::Connection, id: &str) -> Result<String> {
+pub fn abort_import(db: &mut Db, id: &str) -> Result<String> {
     let table = with_session(id, |s| Ok(s.table.clone()))?;
-    let _ = schema::drop_table(conn, &table, &table);
+    let _ = db.drop_table(&table, &table);
     close_session(id);
     Ok(table)
 }
@@ -602,19 +606,19 @@ pub struct ImportOutcome {
 /// 从断言里摘出去（循环本身由上面那条 `可以分批写完且进度是累计的` 覆盖）。
 #[cfg(test)]
 pub fn run_import(
-    conn: &mut rusqlite::Connection,
+    db: &mut Db,
     path: &Path,
     sheet_index: usize,
     header_row: usize,
     table: &str,
     columns: &[FinalColumn],
 ) -> Result<ImportOutcome> {
-    let (id, begun) = begin_import(conn, path, sheet_index, header_row, table, columns)?;
+    let (id, begun) = begin_import(db, path, sheet_index, header_row, table, columns)?;
     loop {
-        let c = match write_chunk(conn, &id, 500) {
+        let c = match write_chunk(db, &id, 500) {
             Ok(c) => c,
             Err(e) => {
-                let _ = abort_import(conn, &id);
+                let _ = abort_import(db, &id);
                 return Err(e);
             }
         };
@@ -640,10 +644,14 @@ pub fn run_import(
 mod tests {
     use super::*;
 
-    fn mem() -> rusqlite::Connection {
-        let c = rusqlite::Connection::open_in_memory().unwrap();
-        c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        c
+    static IMP_TMP: AtomicU64 = AtomicU64::new(0);
+
+    fn mem() -> Db {
+        let n = IMP_TMP.fetch_add(1, Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("dkb_imp_{}_{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Db::open(&d).unwrap()
     }
 
     /// 造一个 CSV 并返回路径。CSV 是最容易在测试里生成的表格格式，
@@ -702,7 +710,7 @@ mod tests {
         assert_eq!(out.skipped_above, 0);
 
         // 金额按「分」存的核对：1234.50 → 123450
-        let page = schema::page_rows(&conn, "客户台账", None, false, None, 10).unwrap();
+        let page = conn.page_rows("客户台账", None, false, None, 10).unwrap();
         assert_eq!(page.rows.len(), 2);
         // columns[0] 是 _rowid，所以金额在第 3 列
         assert_eq!(page.rows[0][2].as_i64(), Some(123450));
@@ -734,7 +742,7 @@ mod tests {
         assert_eq!(out.skipped_above, 2, "上面两行必须如实报告被跳过");
         assert_eq!(out.inserted, 2);
         // 库里绝不能出现「标题行」
-        let page = schema::page_rows(&conn, "t", None, false, None, 10).unwrap();
+        let page = conn.page_rows("t", None, false, None, 10).unwrap();
         for r in &page.rows {
             assert_ne!(r[1].as_str().unwrap_or(""), "标题行");
             assert_ne!(r[1].as_str().unwrap_or(""), "2026-09-01");
@@ -785,13 +793,7 @@ mod tests {
         let r = run_import(&mut conn, &p, 0, plan.header_row, "坏表", &cols);
         assert!(r.is_err(), "写不进去必须报错");
         // 关键：表不能留在库里
-        let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='坏表'",
-                [],
-                |_| Ok(()),
-            )
-            .is_ok();
+        let exists = conn.get_table("坏表").is_ok();
         assert!(!exists, "失败后不该留下半张表");
     }
 
@@ -835,7 +837,7 @@ mod tests {
         ];
         let out = run_import(&mut conn, &p, 0, 0, "子集", &cols).unwrap();
         assert_eq!(out.inserted, 1);
-        let page = schema::page_rows(&conn, "子集", None, false, None, 10).unwrap();
+        let page = conn.page_rows("子集", None, false, None, 10).unwrap();
         // columns = [_rowid, 第三列, 第一列]
         assert_eq!(page.rows[0][1].as_str(), Some("3"));
         assert_eq!(page.rows[0][2].as_str(), Some("1"));
@@ -872,7 +874,7 @@ mod tests {
     /// 字段类型"，跟真正的原因（两处名字不一样）隔着好几层。
     #[test]
     fn 类型名与序列化形式逐字一致() {
-        use schema::ColType::*;
+        use model::ColType::*;
         let all = [
             Text, Integer, Real, Money, Boolean, Date, DateTime, Json, Blob,
         ];
@@ -880,14 +882,14 @@ mod tests {
             let ser = serde_json::to_value(t).unwrap();
             let name = ser.as_str().unwrap();
             assert_eq!(
-                schema::ColType::from_name(name),
+                model::ColType::from_name(name),
                 Some(t),
                 "from_name 与 serde 的 snake_case 形式对不上：{name}"
             );
             // 大小写与空白不敏感（界面可能传 "Text" 或带空格）
-            assert_eq!(schema::ColType::from_name(&format!(" {} ", name.to_uppercase())), Some(t));
+            assert_eq!(model::ColType::from_name(&format!(" {} ", name.to_uppercase())), Some(t));
         }
-        assert_eq!(schema::ColType::from_name("不存在的类型"), None);
+        assert_eq!(model::ColType::from_name("不存在的类型"), None);
     }
     /// 分批写入：进度要能累计，且**最后一批不足一批也要写完**。
     ///
@@ -906,7 +908,7 @@ mod tests {
             FinalColumn { source_index: 0, name: "名称".into(), ty: "text".into(), not_null: false },
             FinalColumn { source_index: 1, name: "数量".into(), ty: "integer".into(), not_null: false },
         ];
-        let (id, begun) = begin_import(&conn, &p, 0, 0, "分批表", &cols).unwrap();
+        let (id, begun) = begin_import(&mut conn, &p, 0, 0, "分批表", &cols).unwrap();
         assert_eq!(begun.total, 7, "总数是进度条的分母，必须先给出来");
 
         let mut steps = Vec::new();
@@ -926,7 +928,7 @@ mod tests {
         let out = finish_import(&id, begun.skipped_above).unwrap();
         assert_eq!(out.inserted, 7);
 
-        let page = schema::page_rows(&conn, "分批表", None, false, None, 20).unwrap();
+        let page = conn.page_rows("分批表", None, false, None, 20).unwrap();
         assert_eq!(page.rows.len(), 7, "7 行一行都不能少");
         // 会话用完就没了
         assert!(write_chunk(&mut conn, &id, 3).is_err(), "收尾之后会话该失效");
@@ -947,17 +949,11 @@ mod tests {
             ty: "text".into(),
             not_null: false,
         }];
-        let (id, _) = begin_import(&conn, &p, 0, 0, "半张表", &cols).unwrap();
+        let (id, _) = begin_import(&mut conn, &p, 0, 0, "半张表", &cols).unwrap();
         write_chunk(&mut conn, &id, 1).unwrap(); // 先写一行（表里已经有数据了）
-        let gone = abort_import(&conn, &id).unwrap();
+        let gone = abort_import(&mut conn, &id).unwrap();
         assert_eq!(gone, "半张表");
-        let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='半张表'",
-                [],
-                |_| Ok(()),
-            )
-            .is_ok();
+        let exists = conn.get_table("半张表").is_ok();
         assert!(!exists, "取消之后不能留下半张表");
     }
 

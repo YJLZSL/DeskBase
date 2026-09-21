@@ -387,7 +387,7 @@
             bkDo.click();
             // 备份 = VACUUM INTO + 三步校验，给足时间（同步 IPC）
             // ⚠️ 断言要盯"刚生成的那份"，不能只看"列表非空"：
-            // 临时数据目录里本来就有一份迁移前的自动备份（before-v2-*.db），
+            // 备份目录里可能有历史文件（旧版是 .db，新版是 .dkb），
             // 列表非空会立刻成立，于是旧备份被当成新备份读走（2026-09-19 实测踩到）。
             const appeared = await waitFor(() => {
               const el0 = bkDlg.querySelector(".db-backup-item .t");
@@ -397,8 +397,8 @@
             const nameEl = bkDlg.querySelector(".db-backup-item .t");
             const nameTxt = nameEl ? (nameEl.textContent || "") : "";
             step(
-              "备份文件名符合约定（deskbase-YYYYMMDD-HHMMSS.db）",
-              /^deskbase-\d{8}-\d{6}\.db$/.test(nameTxt),
+              "备份文件名符合约定（deskbase-YYYYMMDD-HHMMSS.dkb）",
+              /^deskbase-\d{8}-\d{6}\.dkb$/.test(nameTxt),
               nameTxt || "（没读到名字）"
             );
             const sizeEl = bkDlg.querySelector(".db-backup-item .s");
@@ -411,6 +411,58 @@
           const bkClose = bkBtns.find((b) => /关闭/.test(b.textContent || ""));
           if (bkClose) bkClose.click();
         }
+      }
+    }
+
+    // ---------- 10b. 关系与同步 / 命名视图：入口在、能开、控件齐 ----------
+    // 去掉 SQL 之后，表与表之间的关系全靠这两处入口暴露给用户 ——
+    // 引擎里有但界面够不着 = 等于没做，所以必须点得到。
+    const $rel = $("#btn-db-relations");
+    step("数据库页有「关系与同步」入口", !!$rel);
+    if ($rel) {
+      $rel.click();
+      const relOpen = await waitFor(() => !!$("#db-dialog-relations"), 4000);
+      step("点「关系与同步」能打开对话框", relOpen);
+      const relDlg = $("#db-dialog-relations");
+      if (relDlg) {
+        const btns = [...relDlg.querySelectorAll("button")].map((b) => b.textContent || "");
+        step(
+          "对话框里有「新建共通字段」与「新建同步规则」",
+          btns.some((t) => /新建共通字段/.test(t)) && btns.some((t) => /新建同步规则/.test(t)),
+          btns.join(" / ")
+        );
+        // 共通字段与同步规则两块区域都要有（列表或空态占位都算）
+        step(
+          "共通字段与同步规则各有一块区域",
+          relDlg.querySelectorAll(".db-backup-list").length >= 2,
+          "区块数=" + relDlg.querySelectorAll(".db-backup-list").length
+        );
+        const relClose = [...relDlg.querySelectorAll("button")].find((b) => /关闭/.test(b.textContent || ""));
+        if (relClose) relClose.click();
+      }
+    }
+
+    const $vw = $("#btn-db-views");
+    step("数据库页有「视图」入口", !!$vw);
+    if ($vw) {
+      $vw.click();
+      // 没有打开任何表时，视图对话框会给出「先打开一张表」的提示而不是静默无反应 ——
+      // 两种情况都是正确的界面反馈，所以断言"有反馈"而不是"一定打开"。
+      const vwFeedback = await waitFor(
+        () => !!$("#db-dialog-views") || !!document.querySelector(".dbui-toast, .toast"),
+        4000
+      );
+      step("点「视图」后界面有反馈（打开对话框或给出提示）", vwFeedback);
+      const vwDlg = $("#db-dialog-views");
+      if (vwDlg) {
+        const btns = [...vwDlg.querySelectorAll("button")].map((b) => b.textContent || "");
+        step(
+          "视图对话框里有「保存为视图」",
+          btns.some((t) => /保存为视图/.test(t)),
+          btns.join(" / ")
+        );
+        const vwClose = [...vwDlg.querySelectorAll("button")].find((b) => /关闭/.test(b.textContent || ""));
+        if (vwClose) vwClose.click();
       }
     }
 

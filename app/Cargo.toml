@@ -1,8 +1,8 @@
 [package]
 name = "deskbase"
-version = "0.3.0-beta.11"
+version = "0.4.0"
 edition = "2021"
-description = "DeskBase 桌库 —— 本地优先、隐私优先的办公工具箱，内置轻量 SQL 数据库"
+description = "DeskBase 桌库 —— 本地优先、隐私优先的办公工具箱，内置轻量数据表引擎（多表 + 关联 + 协同更新，无 SQL）"
 license = "Apache-2.0"
 authors = ["The DeskBase Authors"]
 
@@ -11,8 +11,10 @@ authors = ["The DeskBase Authors"]
 tao = "0.37"
 wry = "0.57"
 
-# 存储：单文件嵌入式 SQLite（见 docs/adr/0003），bundled 表示自带源码编译，不依赖系统 SQLite
-rusqlite = { version = "0.40", features = ["bundled"] }
+# 存储：**自研单文件引擎**（append-only 日志 + 快照，见 docs/adr/0021）。
+# 这里**没有任何依赖** —— 去掉 SQL 之后，存储层由 `src/store/` 自己实现，
+# 顺带也去掉了 libsqlite3-sys 那个 9 MB 的 sqlite3.c 编译（它在本机 MSVC 上
+# 开优化会直接把编译器搞崩，原先还得为它单独关 opt-level）。
 
 # 序列化：IPC 用 JSON
 serde = { version = "1", features = ["derive"] }
@@ -92,13 +94,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# libsqlite3-sys 在 release 下会用 cl.exe 编译 bundled 的 sqlite3.c（约 9 MB 的单体 C 文件）。
-# 本机 MSVC 14.51.36231 配合优化编译该文件时 cl.exe 会崩溃：
-#   error occurred in cc-rs: command did not execute successfully (status code exit code: 0xc0000005)
-# 0xc0000005 是 ACCESS_VIOLATION，即编译器自身挂了，不是代码问题。
-# 所以单独把它的优化关掉 —— 代价只是 SQLite 的运行速度略降，换来构建能过。
-[profile.release.package.libsqlite3-sys]
-opt-level = 0
-
-[profile.dev.package.libsqlite3-sys]
-opt-level = 0
+# 注：原来这里有一段给 libsqlite3-sys 单独关 opt-level 的 workaround
+# （bundled 的 sqlite3.c 在本机 MSVC 上开优化会把 cl.exe 搞崩）。
+# SQL 移除后它连同整个 SQLite 一起消失了 —— 构建更快，产物更小。

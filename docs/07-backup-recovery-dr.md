@@ -631,7 +631,7 @@ backup-20260917-020000.deskbase-backup/
 ## 十二、相关文档
 
 - [04 · 完整功能矩阵](04-feature-matrix.md)
-- [06 · SQL 数据库能力设计](06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](06-data-table-engine.md)
 - [08 · 隐私、安全、加密、权限与审计](08-privacy-security.md) — 加密与密钥管理
 - [11 · 安全与资源优化专项](11-security-and-resource-optimization.md)
 - [12 · 安装与卸载体验](12-installer-and-uninstaller.md) — 卸载时的数据处置

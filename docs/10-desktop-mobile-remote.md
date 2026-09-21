@@ -418,7 +418,7 @@
 ## 十二、相关文档
 
 - [03 · 信息架构](03-information-architecture.md)
-- [06 · SQL 数据库能力设计](06-sql-database.md)
+- [06 · 数据表引擎设计（无 SQL）](06-data-table-engine.md)
 - [08 · 隐私、安全、加密、权限与审计](08-privacy-security.md)
 - [11 · 安全与资源优化专项](11-security-and-resource-optimization.md)
 - [14 · 性能优化与量化指标](14-performance-budget.md)

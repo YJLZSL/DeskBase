@@ -663,3 +663,12 @@
 .db-schema-col .n { font-size: 13px; min-width: 6em; word-break: break-all; }
 .db-schema-col .t { font-size: 12px; opacity: 0.75; flex: 1; }
 .db-schema-add { display: grid; gap: 6px; margin-top: 8px; padding-top: 8px; }
+
+/* 关系与同步 / 视图对话框：表单行与分区标题
+   说明：这里只做静态排版，不引入任何过渡或动画（门禁 check-motion 不允许）。 */
+.db-form-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.db-form-row > * { flex: 1 1 150px; min-width: 0; }
+.db-form-row input,
+.db-form-row select { width: 100%; box-sizing: border-box; }
+.db-dialog h4 { margin: 16px 0 6px; font-size: 13px; font-weight: 600; opacity: 0.95; }
+.db-backup-item .s { display: flex; align-items: center; gap: 8px; }

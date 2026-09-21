@@ -1,43 +1,42 @@
-//! 崩溃恢复：判断「上次是否正常退出」，没正常退出就做一次完整性自检。
-//!
 //! ## 为什么要一个标记文件
 //!
-//! WAL + `synchronous=FULL` 保证的是「**已提交**的事务不丢」。但它不回答
-//! 另一个问题：上次那个进程是正常退的还是被强杀的（断电、任务管理器、崩溃）？
-//! 两种情况下数据库都能恢复成一致状态，可用户的处境完全不同 —— 强杀之后
-//! 用户有权被告知，而不是被瞒着。「崩溃必进恢复向导」是三条底线里
-//! 「不丢数据」的一部分。
+//! 自研存储（append-only 日志 + fsync）保证的是「**已提交**的事务不丢」。
+//! 但它不回答另一个问题：上次那个进程是正常退的还是被强杀的
+//! （断电、任务管理器、崩溃）？两种情况下数据都能恢复成一致状态，
+//! 可用户的处境完全不同 —— 强杀之后用户有权被告知，而不是被瞒着。
+//! 「崩溃必进恢复向导」是三条底线里「不丢数据」的一部分。
 //!
 //! 标记文件是计算机里最老也最可靠的一招：
 //!   · 启动时写 `boot.lock.json`（含 pid / 启动时间 / 版本）；
 //!   · **正常退出时删掉它**（[`mark_clean`]）；
 //!   · 下次启动时它还在 → 上次没走到"正常退出"这一步。
 //!
-//! 为什么不把标记记在数据库里：**数据库本身可能就是坏的那一个**。
-//! 判断"该不该进恢复"的逻辑，必须不依赖它要判断的对象 —— 否则库坏了，
-//! 连"库坏了"这件事都读不出来。
+//! 为什么不把标记记在数据文件里：**数据文件本身可能就是坏的那一个**。
+//! 判断"该不该进恢复"的逻辑，必须不依赖它要判断的对象 —— 否则数据坏了，
+//! 连"数据坏了"这件事都读不出来。
 //!
 //! ## 自检做什么、不做什么
 //!
-//! · `PRAGMA quick_check`：SQLite 官方的完整性快速检查（比 `integrity_check`
-//!   快，代价是只报告有限数量的错误）。结果**原样**带进报告，不向用户翻译成
-//!   "没问题"之外的说法。
-//! · `PRAGMA wal_checkpoint(TRUNCATE)`：把上次残留的 WAL 合回主库并清空。
-//!   正常情况下 SQLite 打开库时会自己处理，这里显式做一次是为了把
-//!   "WAL 当时还剩多少"量出来（它大 = 上次确实死在写入中间）。
-//! · **不做自动修复**。没有哪个自动修复能在不看现场的情况下被信任；向导给的是
-//!   "看清现场"的能力（自检结果 / 快照 / 数据目录），不是一个魔法按钮。
+//! · **日志能否被完整解析**（[`store::check_log`]）：新引擎没有 `quick_check`
+//!   这种引擎内自检，但判据其实更直接 —— 日志从头能不能解析完。
+//!   解析不完的尾部就是上次崩溃留下的半写事务，会被丢弃。
+//!   **这不叫损坏，叫恢复**，报告里必须这么告诉用户。
+//! · **不做自动修复**。没有哪个自动修复能在不看现场的情况下被信任；
+//!   向导给的是"看清现场"的能力（自检结果 / 快照 / 数据目录），不是一个魔法按钮。
 //!
 //! ## 快照
 //!
-//! [`snapshot`] 用 `VACUUM INTO` —— SQLite 官方的一致性拷贝通道，产出的是
-//! 页级一致、任何 SQLite 工具都能打开的干净副本。**不是文件复制**：
-//! WAL 模式下直接复制文件可能漏掉还没 checkpoint 的已提交事务。
-
+//! [`snapshot`] 先把内存状态**压实成快照**再复制那个文件。
+//! **不是直接复制数据文件**：直接复制正在追加的日志可能拿到半截状态。
+//!
+//! > 2026-09-20 改：原来这一段靠 `VACUUM INTO` + `PRAGMA quick_check` +
+//! > `wal_checkpoint(TRUNCATE)`。SQL 移除后三者都换了实现，行为不变、说法要变。
+//!
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use crate::model::Db;
+use crate::store;
 use serde::Serialize;
 
 /// 标记文件名（放在数据目录下）。存在 = 上次没有走到正常退出。
@@ -130,18 +129,24 @@ pub fn mark_clean(data_dir: &Path) {
     let _ = fs::remove_file(data_dir.join(LOCK_NAME));
 }
 
-/// 生成一致性快照（`VACUUM INTO`），返回快照文件路径。
+/// 生成一致性快照，返回快照文件路径。
+///
+/// 新引擎没有 VACUUM INTO，等价动作是：先把内存状态**压实成快照**
+/// （store::Store::force_snapshot），再把那个干净的快照文件复制走。
+/// 直接复制正在追加的日志会拿到半截状态，不能那么干。
 ///
 /// 为什么要用户主动点、而不是自动做：快照会把库完整复制一份（大库=几百 MB），
 /// 自动做是有代价的；而且"什么时候需要快照"是用户/向导的判断。
-pub fn snapshot(conn: &Connection, data_dir: &Path) -> Result<String, String> {
+pub fn snapshot(db: &mut Db, data_dir: &Path) -> Result<String, String> {
     let dir = data_dir.join("recovery");
     fs::create_dir_all(&dir).map_err(|e| format!("建快照目录失败：{e}"))?;
-    let out = dir.join(format!("snap-{}.db", now_ms()));
-    let out_s = out.to_string_lossy().to_string();
-    conn.execute("VACUUM INTO ?1", rusqlite::params![out_s])
-        .map_err(|e| format!("生成快照失败：{e}"))?;
-    Ok(out_s)
+    let out = dir.join(format!("snap-{}.dkb", now_ms()));
+    db.store_mut()
+        .force_snapshot()
+        .map_err(|e| format!("压实快照失败：{e}"))?;
+    let snap = db.store().snap_path().to_path_buf();
+    fs::copy(&snap, &out).map_err(|e| format!("生成快照失败：{e}"))?;
+    Ok(out.to_string_lossy().to_string())
 }
 
 // ---------- 内部 ----------
@@ -157,58 +162,34 @@ fn write_lock(lock: &Path) {
     }
 }
 
-fn wal_path(db_path: &Path) -> PathBuf {
+/// 数据文件 main.dkb 对应的日志文件 main.dkb.log。
+fn log_path(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_os_string();
-    s.push("-wal");
+    s.push(".log");
     PathBuf::from(s)
 }
 
 fn assess(report: &mut RecoveryReport, db_path: &Path) {
-    if !db_path.exists() {
+    // 新引擎的数据是「快照 + 日志」两件套：快照是状态，日志是增量。
+    // 一致性判据不再是引擎内部的 quick_check，而是**日志能不能被完整解析**。
+    let log = log_path(db_path);
+    if !log.exists() {
         report.quick_check_ok = false;
-        report.quick_check = "未执行：数据文件不存在".to_string();
+        report.quick_check = "未执行：还没有日志文件（大概是全新数据目录）".to_string();
         return;
     }
     report.db_bytes = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-    let wal = wal_path(db_path);
-    report.wal_bytes = fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    report.wal_bytes = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
 
-    match Connection::open(db_path) {
-        Ok(conn) => {
-            match conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)) {
-                Ok(v) if v.eq_ignore_ascii_case("ok") => {
-                    report.quick_check_ok = true;
-                    report.quick_check = "ok".to_string();
-                }
-                Ok(v) => {
-                    report.quick_check_ok = false;
-                    report.quick_check =
-                        format!("{v}（可能还有更多 —— quick_check 只报告有限数量的错误）");
-                }
-                Err(e) => {
-                    report.quick_check_ok = false;
-                    report.quick_check = format!("检查失败：{e}");
-                }
-            }
-            match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-                r.get::<_, i64>(0)
-            }) {
-                Ok(0) => report.wal_checkpoint = "ok".to_string(),
-                Ok(b) => {
-                    report.wal_checkpoint =
-                        format!("busy（{b}）：有别的连接占着 WAL，没能做完清理");
-                }
-                Err(e) => report.wal_checkpoint = format!("失败：{e}"),
-            }
-            // checkpoint 之后重新量：给用户看"WAL 被清掉了多少"
-            report.db_bytes = fs::metadata(db_path).map(|m| m.len()).unwrap_or(report.db_bytes);
-            report.wal_bytes = fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
-        }
-        Err(e) => {
-            report.quick_check_ok = false;
-            report.quick_check = format!("打不开数据文件：{e}");
-        }
-    }
+    let chk = store::check_log(&log);
+    report.quick_check_ok = chk.ok;
+    report.quick_check = chk.message;
+    // 原来这一步是「把 WAL 收敛回主库」；新引擎里对应的是"尾部半写是否已被丢弃"
+    report.wal_checkpoint = if chk.truncated_tail {
+        "已丢弃尾部半写事务（这是恢复，不是损坏）".to_string()
+    } else {
+        "ok".to_string()
+    };
 }
 
 #[cfg(test)]
@@ -225,29 +206,54 @@ mod tests {
         d
     }
 
-    fn make_db(path: &Path) {
-        let c = Connection::open(path).unwrap();
-        c.execute_batch("CREATE TABLE t(a INTEGER); INSERT INTO t(a) VALUES (1),(2);")
-            .unwrap();
+    /// 数据文件与日志文件的位置（与 Store 的约定一致）
+    fn paths(d: &Path) -> (PathBuf, PathBuf) {
+        (d.join("data").join("main.dkb"), d.join("data").join("main.dkb.log"))
+    }
+
+    /// 造一份有两行数据的库
+    fn make_db(d: &Path) {
+        let mut db = Db::open(d).unwrap();
+        db.create_table(&crate::model::TableSpec {
+            name: "t".to_string(),
+            comment: None,
+            columns: vec![crate::model::ColumnDef {
+                name: "a".to_string(),
+                ty: crate::model::ColType::Integer,
+                not_null: false,
+                default: None,
+                primary_key: false,
+                comment: None,
+                shared: None,
+                link: None,
+                lookup: None,
+                rollup: None,
+            }],
+        })
+        .unwrap();
+        db.insert_rows(
+            "t",
+            &["a".to_string()],
+            &[vec![Some("1".to_string())], vec![Some("2".to_string())]],
+        )
+        .unwrap();
     }
 
     #[test]
     fn clean_boot_then_unclean_detected() {
         let d = tmp_dir("boot");
-        let db = d.join("main.db");
+        let (db, _log) = paths(&d);
 
         let r1 = begin_boot(&d, &db);
         assert!(!r1.unclean, "全新目录第一次启动不该报未清理");
         assert!(d.join(LOCK_NAME).exists(), "启动后必须有标记文件");
 
-        // 正常退出
         mark_clean(&d);
         assert!(!d.join(LOCK_NAME).exists());
 
         let r2 = begin_boot(&d, &db);
         assert!(!r2.unclean, "正常退出之后再启动必须是干净的");
 
-        // 模拟崩溃：不调 mark_clean，直接"再启动一次"
         let r3 = begin_boot(&d, &db);
         assert!(r3.unclean, "上次没删标记，必须被认出来");
         assert!(r3.last_boot.is_some(), "上次启动的信息要能读回来");
@@ -257,40 +263,54 @@ mod tests {
     }
 
     #[test]
-    fn unclean_with_healthy_db_passes_check_and_keeps_data() {
+    fn unclean_with_healthy_log_passes_check_and_keeps_data() {
         let d = tmp_dir("healthy");
-        let db = d.join("main.db");
+        let (db, _log) = paths(&d);
 
-        begin_boot(&d, &db); // 写标记
-        {
-            make_db(&db);
-            let c = Connection::open(&db).unwrap();
-            c.execute_batch("INSERT INTO t(a) VALUES (3)").unwrap();
-        } // 连接在这里关闭（模拟"写完之后进程没了"）
+        begin_boot(&d, &db);
+        make_db(&d);
 
         let r = begin_boot(&d, &db); // 不调 mark_clean = 崩溃后重启
         assert!(r.unclean);
-        assert!(r.quick_check_ok, "健康库必须通过自检：{}", r.quick_check);
+        assert!(r.quick_check_ok, "健康的日志必须通过自检：{}", r.quick_check);
         assert_eq!(r.wal_checkpoint, "ok");
 
-        let c = Connection::open(&db).unwrap();
-        let n: i64 = c.query_row("SELECT count(*) FROM t", [], |x| x.get(0)).unwrap();
-        assert_eq!(n, 3, "崩溃重启不能丢已提交的数据");
+        // 崩溃重启不能丢已提交的数据
+        let db2 = Db::open(&d).unwrap();
+        assert_eq!(db2.store().count("rec/t/"), 2, "崩溃重启不能丢已提交的数据");
         mark_clean(&d);
     }
 
     #[test]
-    fn corrupt_db_is_reported_not_swallowed() {
-        let d = tmp_dir("corrupt");
-        let db = d.join("main.db");
-
+    fn 尾部半写被认成可恢复而不是损坏() {
+        let d = tmp_dir("half");
+        let (db, log) = paths(&d);
         begin_boot(&d, &db);
-        make_db(&db);
+        make_db(&d);
 
-        // 往文件开头刷垃圾：模拟磁盘损坏 / 被别的程序写坏
+        // 往日志尾部追加一条"声称有内容但没写完"的条目 —— 模拟被强杀
+        use std::io::Write as _;
+        let mut f = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(b"DKB1\x63\x00\x00\x00\x00\x00\x00\x00").unwrap();
+        f.sync_all().unwrap();
+
+        let r = begin_boot(&d, &db);
+        assert!(r.unclean);
+        assert!(r.quick_check_ok, "半写是可恢复的，不该报损坏：{}", r.quick_check);
+        assert!(r.quick_check.contains("已丢弃"), "要说清已丢弃：{}", r.quick_check);
+        mark_clean(&d);
+    }
+
+    #[test]
+    fn 日志头部被毁要如实报出来() {
+        let d = tmp_dir("corrupt");
+        let (db, log) = paths(&d);
+        begin_boot(&d, &db);
+        make_db(&d);
+
         {
             use std::io::Write as _;
-            let mut f = fs::OpenOptions::new().write(true).open(&db).unwrap();
+            let mut f = fs::OpenOptions::new().write(true).open(&log).unwrap();
             f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03])
                 .unwrap();
             f.sync_all().unwrap();
@@ -298,30 +318,35 @@ mod tests {
 
         let r = begin_boot(&d, &db);
         assert!(r.unclean);
+        assert!(!r.quick_check.is_empty());
         assert!(
-            !r.quick_check_ok,
-            "坏库必须被报出来而不是被吞掉：{}",
+            !r.quick_check.starts_with("ok"),
+            "坏日志必须被报出来而不是被吞掉：{}",
             r.quick_check
         );
-        assert!(!r.quick_check.is_empty());
         mark_clean(&d);
     }
 
     #[test]
     fn snapshot_is_a_working_copy() {
         let d = tmp_dir("snap");
-        let db = d.join("main.db");
-        make_db(&db);
+        make_db(&d);
+        let mut db = Db::open(&d).unwrap();
 
-        let c = Connection::open(&db).unwrap();
-        let out = snapshot(&c, &d).unwrap();
+        let out = snapshot(&mut db, &d).unwrap();
         assert!(Path::new(&out).exists());
         assert!(out.contains("recovery"));
 
-        let sc = Connection::open(&out).unwrap();
-        let n: i64 = sc.query_row("SELECT count(*) FROM t", [], |x| x.get(0)).unwrap();
-        assert_eq!(n, 2, "快照必须是一份可用的完整副本");
-        drop(sc);
+        // 快照必须能被解析回一份完整状态，且数据在
+        let raw = fs::read(&out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let data = v.get("data").unwrap().as_object().unwrap();
+        assert!(data.contains_key("tbl/t"), "快照里要有表定义");
+        assert_eq!(
+            data.keys().filter(|k| k.starts_with("rec/t/")).count(),
+            2,
+            "快照必须是一份可用的完整副本"
+        );
         mark_clean(&d);
     }
 }

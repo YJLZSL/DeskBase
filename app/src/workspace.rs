@@ -1,13 +1,14 @@
 //! 工作区状态持久化
 //!
 //! 把「当前视图 / 打开的表 / 侧栏状态 / 窗口尺寸」这类**界面状态**（不是用户数据）
-//! 存进已有的 `sys_meta` 表，用一条 JSON 记录。这样覆盖 exe 升级、崩溃、重开之后，
+//! 存进自研存储的一个键值项（`sys/workspace`）。这样覆盖 exe 升级、崩溃、重开之后，
 //! 用户回到的是离开时的样子 —— 这就是「更新时工作区不丢失」的落点。
 //!
-//! 与笔记 / 库表数据走不同的 IPC、不同的表，互不影响；本模块只认 `sys_meta`。
+//! 与笔记 / 表数据走不同的键前缀，互不影响；本模块只认 `sys/workspace` 这一项。
 
-use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+
+use crate::model::Db;
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -56,31 +57,17 @@ impl WorkspaceState {
     }
 }
 
-/// 保存工作区状态进 `sys_meta`（UPSERT）。`conn` 只需 `&Connection`：写入走的是
-/// 普通 INSERT/UPDATE，rusqlite 的 `execute` 本身接受 `&self`。
-pub fn save(conn: &Connection, state: &WorkspaceState) -> Result<()> {
+/// 写入工作区状态。走 store 的键值接口，一次提交即落盘（含 fsync）。
+pub fn save(db: &mut Db, state: &WorkspaceState) -> Result<()> {
     let json = serde_json::to_string(state).map_err(|e| format!("序列化工作区状态失败: {e}"))?;
-    conn.execute(
-        "INSERT INTO sys_meta (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![KEY, json],
-    )
-    .map_err(|e| format!("保存工作区状态失败: {e}"))?;
+    db.meta_set(KEY, &json)
+        .map_err(|e| format!("保存工作区状态失败: {e}"))?;
     Ok(())
 }
 
-/// 从 `sys_meta` 读回工作区状态。没有记录 → 安全默认；记录损坏 → 也回退默认
-/// （不让启动崩）。
-pub fn load(conn: &Connection) -> Result<WorkspaceState> {
-    let json: Option<String> = conn
-        .query_row(
-            "SELECT value FROM sys_meta WHERE key = ?1",
-            rusqlite::params![KEY],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|e| format!("读取工作区状态失败: {e}"))?;
-    match json {
+/// 读回工作区状态。没有记录 → 安全默认；记录损坏 → 也回退默认（不让启动崩）。
+pub fn load(db: &Db) -> Result<WorkspaceState> {
+    match db.meta_get(KEY) {
         None => Ok(WorkspaceState::default()),
         Some(s) => match serde_json::from_str::<WorkspaceState>(&s) {
             Ok(mut st) => {
@@ -108,18 +95,19 @@ fn log_warn(_msg: &str) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
 
-    fn fresh_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE sys_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
-            .unwrap();
-        conn
+    fn fresh(tag: &str) -> (std::path::PathBuf, Db) {
+        let d = std::env::temp_dir()
+            .join(format!("dkb_ws_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let db = Db::open(&d).unwrap();
+        (d, db)
     }
 
     #[test]
     fn 保存后重开读到同一份() {
-        let conn = fresh_db();
+        let (d, mut db) = fresh("roundtrip");
         let st = WorkspaceState {
             view: "database".into(),
             active_table: "客户表".into(),
@@ -127,21 +115,20 @@ mod tests {
             window_w: 1280,
             window_h: 820,
         };
-        save(&conn, &st).unwrap();
-        let got = load(&conn).unwrap();
+        save(&mut db, &st).unwrap();
+        let got = load(&db).unwrap();
         assert_eq!(got, st);
+        // 换一个实例打开同一目录 —— 证明它真的落盘了
+        drop(db);
+        let db2 = Db::open(&d).unwrap();
+        assert_eq!(load(&db2).unwrap(), st);
     }
 
     #[test]
     fn 缺字段给安全默认值() {
-        let conn = fresh_db();
-        // 只写了 view，其余字段缺失
-        conn.execute(
-            "INSERT INTO sys_meta (key, value) VALUES ('workspace', '{\"view\":\"settings\"}')",
-            [],
-        )
-        .unwrap();
-        let got = load(&conn).unwrap();
+        let (_d, mut db) = fresh("partial");
+        db.meta_set(KEY, "{\"view\":\"settings\"}").unwrap();
+        let got = load(&db).unwrap();
         assert_eq!(got.view, "settings");
         assert_eq!(got.active_table, "");
         assert_eq!(got.sidebar, "");
@@ -151,20 +138,16 @@ mod tests {
 
     #[test]
     fn 损坏的记录回退默认而不是崩() {
-        let conn = fresh_db();
-        conn.execute(
-            "INSERT INTO sys_meta (key, value) VALUES ('workspace', '这不是 json')",
-            [],
-        )
-        .unwrap();
-        let got = load(&conn).unwrap();
+        let (_d, mut db) = fresh("corrupt");
+        db.meta_set(KEY, "这不是 json").unwrap();
+        let got = load(&db).unwrap();
         assert_eq!(got, WorkspaceState::default());
     }
 
     #[test]
     fn 没有记录时给默认() {
-        let conn = fresh_db();
-        let got = load(&conn).unwrap();
+        let (_d, db) = fresh("empty");
+        let got = load(&db).unwrap();
         assert_eq!(got, WorkspaceState::default());
     }
 }
