@@ -86,6 +86,15 @@ rfd = "0.15"
 # zune-* 是 MIT OR Apache-2.0 OR Zlib，moxcms 是 BSD-3-Clause OR Apache-2.0）。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
 
+# 零警告是硬标准，但**只约束本 crate**。
+#
+# 为什么不用 CI 里的 RUSTFLAGS=-D warnings：那个环境变量会连带作用在
+# 所有依赖的 build script 上，任何第三方 crate 冒出一个新警告就会让构建
+# 失败 —— 那不是我们能控制的，也不是我们该负责的。
+# [lints] 的作用域是本 crate，守住的正是我们自己的代码质量。
+[lints.rust]
+warnings = "deny"
+
 [profile.release]
 # 生产裁剪，见 docs/14 的体积目标
 opt-level = "z"

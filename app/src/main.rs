@@ -55,12 +55,6 @@ const ICON_SIZE: u32 = 256;
 
 /// 单条 SQL 的默认硬超时（毫秒）。0 表示不设超时。
 ///
-/// 为什么要有它：`schema::run_query` 只限制返回行数，不限制时间。一条带全表扫描
-/// 的谓词能让查询跑上几分钟，而这期间用户除了看"执行中"什么也做不了（Q-042）。
-/// 30 秒是个经验值 —— 正常办公量级的查询远低于它，超过就基本意味着缺索引或
-/// 条件写错了。中断后 SQLite 会回滚这条语句，**不会留下半截写入**。
-const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
-
 /// 项目仓库地址。**只在这里定义一次**，界面里的链接与「打开发布页」都用它。
 ///
 /// 仓库目前是**私有**的（`YJLZSL/DeskBase`）。私有期间：
@@ -91,8 +85,6 @@ fn allowed_urls() -> Vec<String> {
 /// （否则慢查询会把界面连同"中断"按钮一起冻住）。于是工作线程只负责算，
 /// 算完发一个事件，主线程收到后统一回传。
 enum AppEvent {
-    /// 有应答要回传（内容在 [`SqlJob::pending`] 里，主线程按序取走）
-    Reply,
     /// 更新已拉起来，现在该退出了。
     ///
     /// 为什么必须退出：Windows 上**运行中的 exe 不能被覆盖**（它的文件锁还在）。
@@ -384,7 +376,7 @@ fn main() -> wry::Result<()> {
     }
 
     let database = match Db::open(&data_dir) {
-        Ok(mut d) => d,
+        Ok(d) => d,
         Err(e) => {
             // 打不开数据库是致命错误：不静默继续，直接报出来
             log_line(&data_dir, &format!("致命错误：{e}"));
@@ -591,14 +583,6 @@ fn main() -> wry::Result<()> {
             return;
         }
 
-        // 工作线程干完了活：把攒下的应答一次性交回前端。
-        // 必须在主线程做 —— 求值脚本只能在创建 WebView 的那个线程上执行。
-        if let Event::UserEvent(AppEvent::Reply) = event {
-            
-            *control_flow = ControlFlow::Wait;
-            return;
-        }
-
         // 烟测脚本注入（见 [`AppEvent::SmokeInject`]）。走事件循环而不是
         // IPC 回调栈，是这次修的重点：注入必须发生在"当前这次回调已经结束"
         // 之后，否则 ExecuteScript 会被 WebView2 吞掉。
@@ -665,7 +649,7 @@ fn main() -> wry::Result<()> {
 fn current_exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|mut d| d.to_path_buf()))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 /// 把界面烟测脚本注入页面（仅烟测模式，见 `DESKBASE_UI_SMOKE`）。
@@ -719,7 +703,7 @@ fn finalize_workspace(state: &AppState) {
         .last_workspace
         .lock()
         .ok()
-        .and_then(|mut g| g.clone());
+        .and_then(|g| g.clone());
     if let Some(ws) = last {
         if let Ok(mut guard) = state.db.try_lock() {
             let _ = workspace::save(&mut guard, &ws);
@@ -963,7 +947,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             // 栈里，ExecuteScript 会被吞掉（见 [`AppEvent::SmokeInject`]）；
             // 所以只把"该注入了"这件事丢给事件循环，注入在回调结束之后发生。
             if state.smoke_script.is_some() && !state.smoke_fired.swap(true, Ordering::SeqCst) {
-                match state.proxy.lock().ok().and_then(|mut g| g.clone()) {
+                match state.proxy.lock().ok().and_then(|g| g.clone()) {
                     Some(px) => {
                         let _ = px.send_event(AppEvent::SmokeInject);
                     }
@@ -1216,7 +1200,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
             let mut created = 0usize;
             let mut guard = match state.db.lock() {
-                Ok(mut g) => g,
+                Ok(g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             for row in &body {
@@ -1376,7 +1360,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
             let t0 = std::time::Instant::now();
             let mut guard = match state.db.lock() {
-                Ok(mut g) => g,
+                Ok(g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             match excel_import::begin_import(
@@ -1418,7 +1402,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(2000) as usize;
             let mut guard = match state.db.lock() {
-                Ok(mut g) => g,
+                Ok(g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             match excel_import::write_chunk(&mut guard, sid, batch) {
@@ -1481,8 +1465,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 列出未跑完的导入作业 —— 上次崩在中间的作业会在这里出现，
         // 让用户看到"已导入多少、还剩多少"，而不是自动回滚
         "import.pending" => {
-            let mut conn = match state.db.lock() {
-                Ok(mut g) => g,
+            let conn = match state.db.lock() {
+                Ok(g) => g,
                 Err(_) => return err(id, "数据库锁失败"),
             };
             match import_pipeline::recovery_notice(&&conn) {
@@ -1618,7 +1602,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // ============================================================
 
         "shared.list" => match state.db.lock() {
-            Ok(mut d) => ok(id, serde_json::to_value(d.list_shared_fields()).unwrap_or_default()),
+            Ok(d) => ok(id, serde_json::to_value(d.list_shared_fields()).unwrap_or_default()),
             Err(_) => err(id, "数据库锁失败"),
         }
 
@@ -1643,7 +1627,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         "sync.list" => match state.db.lock() {
-            Ok(mut d) => match d.list_sync_rules() {
+            Ok(d) => match d.list_sync_rules() {
                 Ok(r) => ok(id, serde_json::to_value(r).unwrap_or_default()),
                 Err(e) => err(id, e),
             },
@@ -1710,7 +1694,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 table");
             };
             match state.db.lock() {
-                Ok(mut d) => ok(id, serde_json::to_value(d.list_views(table)).unwrap_or_default()),
+                Ok(d) => ok(id, serde_json::to_value(d.list_views(table)).unwrap_or_default()),
                 Err(_) => err(id, "数据库锁失败"),
             }
         }
@@ -1760,7 +1744,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
             match state.db.lock() {
-                Ok(mut d) => {
+                Ok(d) => {
                     match d.find_view(vid) {
                         Some(v) => match d.view_page(&v, cursor, limit) {
                             Ok(p) => ok(id, serde_json::to_value(p).unwrap_or_default()),
@@ -1774,7 +1758,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         }
 
         "schema.listTables" => match state.db.lock() {
-            Ok(mut d) => match d.list_tables() {
+            Ok(d) => match d.list_tables() {
                 Ok(list) => ok(id, serde_json::to_value(list).unwrap_or_default()),
                 Err(e) => err(id, e),
             },
@@ -1786,7 +1770,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 name");
             };
             match state.db.lock() {
-                Ok(mut d) => match d.get_table(name) {
+                Ok(d) => match d.get_table(name) {
                     Ok(t) => ok(id, serde_json::to_value(t).unwrap_or_default()),
                     Err(e) => err(id, e),
                 },
@@ -1799,7 +1783,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "缺少参数 name");
             };
             match state.db.lock() {
-                Ok(mut d) => match d.column_meta(name) {
+                Ok(d) => match d.column_meta(name) {
                     Ok(m) => ok(id, serde_json::to_value(m).unwrap_or_default()),
                     Err(e) => err(id, e),
                 },
@@ -2009,7 +1993,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 _ => Vec::new(),
             };
             match state.db.lock() {
-                Ok(mut d) => {
+                Ok(d) => {
                     let page = if filters.is_empty() {
                         d.page_rows(table, order_by, desc, cursor, limit)
                     } else {
@@ -2321,7 +2305,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
 
             let install_dir = match current_exe_dir() {
-                Some(mut d) => d,
+                Some(d) => d,
                 None => return err(id, "取不到程序所在目录"),
             };
             let cur = updater::current_version();
@@ -2393,7 +2377,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 return err(id, "暂存目录里没有 plan.json（替换计划）");
             }
             let install_dir = match current_exe_dir() {
-                Some(mut d) => d,
+                Some(d) => d,
                 None => return err(id, "取不到程序所在目录"),
             };
 
@@ -2425,7 +2409,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
             // 让主进程退出，把 exe 的文件锁让出来（替换进程正在等它）。
             // 走 `AppEvent::Quit` 而不是 `process::exit` —— 后者会绕过"退出前保存"。
-            let proxy = state.proxy.lock().ok().and_then(|mut g| g.clone());
+            let proxy = state.proxy.lock().ok().and_then(|g| g.clone());
             match proxy {
                 Some(p) => {
                     let _ = p.send_event(AppEvent::Quit);
@@ -2487,7 +2471,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 ),
             );
             // 走与"关闭窗口"相同的收尾路径退出（退出前保存一次都不能省）
-            if let Some(p) = state.proxy.lock().ok().and_then(|mut g| g.clone()) {
+            if let Some(p) = state.proxy.lock().ok().and_then(|g| g.clone()) {
                 let _ = p.send_event(AppEvent::SmokeDone);
             }
             ok(id, serde_json::json!({ "written": true }))
@@ -2504,7 +2488,7 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 来验证重名保护，而第一次导入收尾时会把令牌用掉。
         "app.e2eSource" => {
             let path = match state.e2e_source.lock() {
-                Ok(mut g) => g.as_ref().map(PathBuf::from),
+                Ok(g) => g.as_ref().map(PathBuf::from),
                 Err(_) => None,
             };
             match path {

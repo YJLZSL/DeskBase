@@ -15,8 +15,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # 与 ci.yml 一致：零警告是硬标准，只有变成硬失败才守得住
-  RUSTFLAGS: -D warnings
+  # 与 ci.yml 一致：零警告由 app/Cargo.toml 的 [lints.rust] 保证，
+  # 不用 RUSTFLAGS（它会连带把依赖的 build script 警告变成错误）。
 
 jobs:
   release:

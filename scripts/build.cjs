@@ -143,7 +143,8 @@ const die = (s) => {
 // ---------------- 参数 ----------------
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
-const MODE = has('--test') ? 'test' : has('--check') ? 'check' : has('--debug') ? 'debug' : 'release';
+const STRICT = has('--strict');
+const MODE = has('--fix') ? 'fix' : has('--test') ? 'test' : has('--check') ? 'check' : has('--debug') ? 'debug' : 'release';
 
 // ---------------- 1. 捕获 MSVC 环境 ----------------
 function msvcEnv() {
@@ -216,7 +217,14 @@ function msvcEnv() {
   env.CARGO_HOME = CARGO_HOME;
   env.RUSTUP_TOOLCHAIN = TOOLCHAIN;
   env.RUSTC = path.join(RUSTUP_HOME, 'toolchains', TOOLCHAIN, 'bin', 'rustc.exe');
-  delete env.RUSTFLAGS; // 之前为 GNU 路线加的 link-self-contained 必须清掉
+  // --strict：复现 CI 的零警告硬标准（CI 用 RUSTFLAGS=-D warnings）。
+  // 为什么要能在本地跑：警告只有变成硬失败才守得住，而本地不验的话，
+  // "推上去才发现 CI 红了"会反复发生 —— 一次编译几分钟，来回很贵。
+  if (STRICT) {
+    env.RUSTFLAGS = '-D warnings';
+  } else {
+    delete env.RUSTFLAGS; // 之前为 GNU 路线加的 link-self-contained 必须清掉
+  }
 
   // ---------------- 4. 关掉 TLS 吊销检查（本机第四处非标准环境）----------------
   // 本机访问 crates.io 时 schannel 报 CRYPT_E_REVOCATION_OFFLINE：
@@ -260,6 +268,8 @@ if (!fs.existsSync(cargo)) {
 const args =
   MODE === 'test'
     ? ['test', '--', ...(has('--ignored') ? ['--ignored'] : []), '--nocapture']
+    : MODE === 'fix'
+    ? ['fix', '--bin', 'deskbase', '--allow-dirty', '--allow-staged']
     : MODE === 'check'
     ? ['check']
     : ['build', ...(MODE === 'release' ? ['--release'] : [])];

@@ -2419,8 +2419,13 @@ mod tests_settings {
     use super::*;
     use crate::model::Db;
 
+    // ⚠️ 目录必须**每个用例一份**：Rust 的测试是并行的，共用同一个目录时
+    // 一个用例写进去的设置会被另一个用例读到（实测：更新档位被隔壁用例改成了
+    // download_ask，「默认从不联网」这条红线断言就红了）。
     fn db() -> Db {
-        let d = std::env::temp_dir().join(format!("dkb_updater_{}", std::process::id()));
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("dkb_updater_{}_{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         Db::open(&d).unwrap()

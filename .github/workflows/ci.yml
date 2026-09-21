@@ -25,9 +25,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # 警告即错误。项目的标准是**零编译警告**，而"零警告"只有变成硬失败才守得住 ——
-  # 否则它会随着时间慢慢退化回一屏警告，然后所有人都不再看它们。
-  RUSTFLAGS: -D warnings
+  # 零编译警告由 app/Cargo.toml 的 [lints.rust] 保证（只约束本 crate）。
+  # 这里**不设** RUSTFLAGS=-D warnings：它会一起作用到所有依赖的 build script，
+  # 第三方 crate 冒一个新警告就让构建失败，那是不可控也不该由我们背的。
 
 jobs:
   # ------------------------------------------------------------
@@ -52,10 +52,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('app/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # libsqlite3-sys 会编译 bundled 的 sqlite3.c（约 9 MB 的单体 C 文件）。
-      # 本机 MSVC 14.51 用优化编译它时编译器自己会崩（0xc0000005），
-      # 所以 profile 里把它的 opt-level 关掉了 —— 那一段在 Cargo.toml 里，
-      # 这里不需要重复，只是提一句免得有人以为是 CI 配置漏了。
+      # 注：这里原本有一段关于 libsqlite3-sys 的说明（bundled 的 sqlite3.c
+      # 在本机 MSVC 上开优化会把编译器搞崩）。v0.4.0 去掉 SQL 之后它已经不存在了，
+      # 连带那处 workaround 一起删除。CI 因此也不用再关心它。
       - name: 跑测试
         working-directory: app
         run: cargo test --all-targets -- --nocapture

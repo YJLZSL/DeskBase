@@ -460,6 +460,9 @@ impl Db {
         self.store.commit(b)
     }
 
+    /// 删除一个系统键值。目前界面上还没有"清空某项设置"的入口，
+    /// 但重置设置时一定用得到 —— 保留而不是等到需要时再写。
+    #[allow(dead_code)]
     pub fn meta_del(&mut self, key: &str) -> Result<u64> {
         self.store.remove(format!("sys/{key}"))
     }
@@ -683,6 +686,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)] // 与 set_table_comment 成对存在，界面下一步会接
     pub fn set_column_comment(&mut self, table: &str, column: &str, comment: &str) -> Result<()> {
         let mut t = self.load_table(table)?;
         let f = t
@@ -1556,6 +1560,7 @@ pub enum Value {
     Integer(i64),
     Real(f64),
     Text(String),
+    #[allow(dead_code)] // 保留二进制列类型；导入含二进制的表时会用到
     Blob(Vec<u8>),
 }
 
@@ -1656,6 +1661,9 @@ pub fn money_parse(raw: &str) -> Result<i64> {
     Ok(if neg { -v } else { v })
 }
 
+/// 分 → 元字符串。前端有同一份实现（`db.js` 的 centsToYuan），
+/// 后端保留它是为了导出与报表 —— 两条规则必须永远一致，改一处要改两处。
+#[allow(dead_code)]
 pub fn money_display(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let a = cents.abs();
