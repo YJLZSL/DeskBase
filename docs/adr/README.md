@@ -122,6 +122,7 @@ ADR（Architecture Decision Record）是一份**简短的、不可变的历史�
 | [0020](0020-table-first-ui-and-ai-tables.md) | 表格优先的界面形态与 AI 表格（取代 0009 界面结论） | 已接受 |
 | [0021](0021-remove-sql-own-storage-engine.md) | 彻底移除 SQL，改用自研单文件存储（日志 + 快照）（取代 0003「不自研存储引擎」一条） | 已接受 | 2026-09-20 |
 | [0022](0022-linked-tables-and-sync-rules.md) | 用共通字段 + 同步规则 + 关联字段 + 命名视图取代 JOIN / 外键级联 / 触发器 / SELECT | 已接受 | 2026-09-20 |
+| [0023](0023-office-suite-extension.md) | 产品定位转向「Office 三件套的扩展与升级 + 办公实用功能集」（接管 0020 的定位部分） | 已接受 | 2026-09-22 |
 
 ---
 

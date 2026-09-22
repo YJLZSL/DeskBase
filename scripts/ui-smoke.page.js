@@ -264,6 +264,43 @@
     {
       const $sch = $("#btn-db-schema");
       step("数据库页有「表结构」入口", !!$sch);
+      // ---------- 设置页能滚 + 教程在 ----------
+      // 这两条是一条链上的：设置页有 7 张卡片，教程挂在最后一张。
+      // 视图不能滚 ⇒ 下面几张永远够不到 ⇒ 用户会以为"教程没写"。
+      // 所以不能只断言"元素存在"，必须断言"滚得到"。
+      const $sv = document.querySelector('[data-view="settings"]');
+      step("设置页视图存在", !!$sv);
+      if ($sv) {
+        const oy = getComputedStyle($sv).overflowY;
+        step("设置页可纵向滚动（overflow-y 不是 visible）", oy === "auto" || oy === "scroll", oy);
+        // 内容确实超出一屏 —— 否则"能滚"就是空话
+        step(
+          "设置页内容确实超过一屏（有东西可滚）",
+          $sv.scrollHeight > $sv.clientHeight + 20,
+          `scrollH=${$sv.scrollHeight} clientH=${$sv.clientHeight}`
+        );
+        // 真的滚一下，看能不能到底
+        $sv.scrollTop = $sv.scrollHeight;
+        const scrolled = await waitFor(() => $sv.scrollTop > 100, 2000);
+        step("设置页真的能滚下去", scrolled, "scrollTop=" + Math.round($sv.scrollTop));
+      }
+      const $help = document.getElementById("db-help-card");
+      step("教程卡片已挂上", !!$help);
+      if ($help) {
+        const txt = ($help.textContent || "").slice(0, 60);
+        step(
+          "教程标题已按新定位更新（办公套件）",
+          /办公套件使用教程/.test($help.textContent || ""),
+          txt
+        );
+        // v0.4.0 的关联/共通/同步是新能力，教程里必须有
+        step(
+          "教程里讲到了关联与同步（新能力）",
+          /共通字段/.test($help.textContent || "") && /同步规则/.test($help.textContent || ""),
+          ""
+        );
+      }
+
       const $aiEn = $("#ai-enabled");
       step("设置页有 AI 开关", !!$aiEn);
       step("AI 默认是关闭的", !!($aiEn && $aiEn.checked === false));

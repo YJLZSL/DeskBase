@@ -16,7 +16,7 @@
 | 项 | 值 |
 |----|-----|
 | 项目 | DeskBase（桌库）· Apache-2.0 开源 |
-| 定位 | 本地优先、隐私优先的办公工具箱 + 给非程序员用的轻量 SQL 数据库桌面工具 |
+| 定位 | **Office 三件套的扩展与升级 + 办公实用功能集**（ADR-0023）。不替代 Office，补它不做与做不好的那块；本地优先、隐私优先、单文件 |
 | 形态 | Windows 单机桌面应用（Rust + `tao`/`wry` + 系统 WebView2） |
 | 代码 | `app/src/*.rs`（后端与全部能力）+ `app/ui/*.js|css`（WebView 里的手写前端） |
 | 通道 | `window.__deskbase.call(cmd, args)` ↔ Rust `dispatch()`，命令在 `app/src/main.rs` 显式列出 |

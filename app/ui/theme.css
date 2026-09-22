@@ -983,8 +983,14 @@ code {
 /* ---------- 主区 ---------- */
 .main {
   display: grid;
-  grid-template-rows: auto 1fr;
+  /* ⚠️ 必须是 minmax(0, 1fr) 而不是 1fr：
+     grid 行的默认 min-height 是 auto —— 内容比剩余高度还高时，这一行会被撑开，
+     于是 .view 的 clientHeight 等于内容高度，overflow-y:auto 永远不触发。
+     实测过：设置页 clientH 一度是 5093（= 内容高），滚不动也不知道自己滚不动。
+     minmax(0, 1fr) 把行的下限压成 0，视图才会被限制在剩余高度里，滚动才生效。 */
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
 }
 
 .topbar {
@@ -1074,6 +1080,33 @@ code {
   animation: view-in var(--dur-slow) var(--ease-glide) both;
 }
 
+/* 视图默认可纵向滚动。
+   为什么要显式加：网格的 `1fr` 行只是"分到剩余高度"，并不自带滚动 ——
+   内容超出时会被裁掉且滚不动。设置页有 7 张卡片（教程挂在最后一张），
+   没有这条的话下面几张永远点不到，用户会以为功能没做。
+   database 视图自己管理滚动（内部是网格 + 分页容器），排除在外。 */
+.view[data-active="true"]:not([data-view="database"]) {
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 滚到头别把滚动传给外层（外层的弹性滚动在桌面端很突兀） */
+  overscroll-behavior-y: contain;
+  /* 滚动条跟着主题走，而不是系统默认那条粗灰条 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong, var(--line)) transparent;
+}
+.view[data-active="true"]:not([data-view="database"])::-webkit-scrollbar {
+  width: 10px;
+}
+.view[data-active="true"]:not([data-view="database"])::-webkit-scrollbar-thumb {
+  background: var(--line-strong, var(--line));
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.view[data-active="true"]:not([data-view="database"])::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 /* 视图进场：淡入 + 轻微上浮。方向由 JS 通过 --dir 给出 ——
    往下翻与往上翻的感觉因此不同 */
 @keyframes view-in {
@@ -1091,6 +1124,9 @@ code {
   display: flex;
   flex-direction: column;
   gap: var(--gap);
+  /* 视图自己滚动之后，最后一屏需要一点余量 ——
+     否则滚到底时最后一张卡片紧贴窗口下沿，看着像被切掉 */
+  padding-bottom: var(--sp-6);
 }
 
 /* ============================================================
