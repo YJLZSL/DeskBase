@@ -1636,12 +1636,12 @@
   async function openBackupDialog() {
     const dlg = buildDialog(
       "db-dialog-backup",
-      "备份数据库",
+      "备份数据",
       "备份是当前数据的一份完整快照（先把状态压实成快照，再复制它 —— 不是直接复制数据文件），" +
         "放在数据目录的 backups/ 里。生成后会立刻三步校验：非空、能被解析回一份完整状态、表数与当前库一致。"
     );
     dlg.textContent = "";
-    dlg.append(el("h3", null, "备份数据库"));
+    dlg.append(el("h3", null, "备份数据"));
     dlg.append(
       el("p", { class: "hint" },
         "备份是当前数据的完整快照（先压实成快照再复制，不是直接复制数据文件 —— 直接复制正在写入的日志可能拿到半截状态）。" +

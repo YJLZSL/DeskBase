@@ -311,9 +311,9 @@
   // ============================================================
   const VIEW_ORDER = ["workbench", "notes", "database", "settings"];
   const TITLES = {
-    workbench: "工作台",
+    workbench: "工具",
     notes: "笔记",
-    database: "数据库",
+    database: "表格",
     settings: "设置",
   };
   let currentView = "notes";

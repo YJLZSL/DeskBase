@@ -70,9 +70,9 @@
 
     <nav class="nav" id="nav">
       <div class="nav-pill" id="nav-pill" aria-hidden="true"></div>
-      <button class="nav-item" data-target="workbench" data-label="工作台"><svg class="ico"><use href="#i-bench"/></svg><span>工作台</span></button>
+      <button class="nav-item" data-target="workbench" data-label="工具"><svg class="ico"><use href="#i-bench"/></svg><span>工具</span></button>
       <button class="nav-item" data-target="notes" data-label="笔记" aria-current="true"><svg class="ico"><use href="#i-note"/></svg><span>笔记</span></button>
-      <button class="nav-item" data-target="database" data-label="数据库"><svg class="ico"><use href="#i-db"/></svg><span>数据库</span></button>
+      <button class="nav-item" data-target="database" data-label="表格"><svg class="ico"><use href="#i-db"/></svg><span>表格</span></button>
       <button class="nav-item" data-target="settings" data-label="设置"><svg class="ico"><use href="#i-gear"/></svg><span>设置</span></button>
     </nav>
 
@@ -103,7 +103,7 @@
 
     <div class="content" id="content">
 
-      <!-- ---------- 工作台 ---------- -->
+      <!-- ---------- 工具（原「工作台」；2026-09-22 按 ADR-0023 改名） ---------- -->
       <section class="view" data-view="workbench">
         <div class="stack">
           <div class="card">
@@ -138,7 +138,7 @@
         </div>
       </section>
 
-      <!-- ---------- 数据库 ---------- -->
+      <!-- ---------- 表格（原「数据库」；去掉 SQL 后这个名字是误导，2026-09-22 改） ---------- -->
       <!-- 页面外壳只是容器：表格列表与数据网格（DeskBaseGrid）。
            SQL 编辑器已于 2026-09-20 按 ADR-0020 撤下（表格优先形态）——
            （DeskBaseSql）都由 db.js 在运行时挂进来。 -->
@@ -155,8 +155,8 @@
               从 Excel 导入
             </button>
             <button class="btn btn-ghost db-import" id="btn-db-backup" type="button"
-                    title="把当前数据库整份备份到数据目录的 backups/ 并做完整性校验">
-              备份数据库
+                    title="把当前数据整份备份到数据目录的 backups/ 并做完整性校验">
+              备份数据
             </button>
             <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
                     title="查看并编辑当前表的结构：改名、加列、删列、改表注释">

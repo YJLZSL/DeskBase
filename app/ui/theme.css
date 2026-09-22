@@ -1106,6 +1106,13 @@ code {
 .view[data-active="true"]:not([data-view="database"])::-webkit-scrollbar-track {
   background: transparent;
 }
+/* 视图内的平滑滚动：标准 / 丰富档才有。
+   「关」与「精简」档必须真的没有过渡 —— 平滑滚动在这两档下属于多余的位移，
+   尤其对晕动敏感的人。档位由 html[data-motion] 给出（见 motion.css）。 */
+html:not([data-motion="off"]):not([data-motion="minimal"])
+.view[data-active="true"]:not([data-view="database"]) {
+  scroll-behavior: smooth;
+}
 
 /* 视图进场：淡入 + 轻微上浮。方向由 JS 通过 --dir 给出 ——
    往下翻与往上翻的感觉因此不同 */
