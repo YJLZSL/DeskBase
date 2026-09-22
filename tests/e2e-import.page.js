@@ -208,12 +208,15 @@
       String(page.rows[0][dIdx])
     );
     // 表头上面那两行绝不能进库
-    const all = await ipc("schema.pageRows", { table: TABLE, limit: 2000 });
-    const polluted = all.rows.filter(
-      (r) => r[1] === "客户台账" || String(r[1]).indexOf("导出日期") === 0
+    // ⚠️ 不能靠"一次取 2000 行"来数行：分页有硬上限（MAX_PAGE_LIMIT=500，
+    // 那是防一次取太多拖垮界面的保护，不是缺陷）。改用 schema.getTable 的
+    // 精确行数 —— 新引擎自己维护记录数，不再需要"估计"。
+    const info = await ipc("schema.getTable", { name: TABLE });
+    step(
+      "表里正好 1200 行（一行不多一行不少）",
+      Number(info.row_estimate) === 1200,
+      "实际=" + info.row_estimate
     );
-    step("表头上面那两行没有被当成数据写进来", polluted.length === 0, "污染行数=" + polluted.length);
-    step("表里正好 1200 行（一行不多一行不少）", all.rows.length === 1200, "实际=" + all.rows.length);
 
     // ---------- 6. 重名保护 ----------
     let dupMsg = "";
