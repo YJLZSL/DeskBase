@@ -1032,7 +1032,8 @@
         ui: !!(window.DeskBaseUI && window.DeskBaseUI.toast),
         palette: !!(window.DeskBasePalette && window.DeskBasePalette.open),
         grid: !!(window.DeskBaseGrid && window.DeskBaseGrid.mount),
-        sql: !!(window.DeskBaseSql && window.DeskBaseSql.mount),
+        // 注：这里原本还查 sql 模块。SQL 编辑器在 v0.4.0 随 SQL 一起移除
+        // （ADR-0021），继续检查一个不存在的模块只会让 app.log 恒报"未加载"。
         dbpage: !!(window.DeskBaseDb && window.DeskBaseDb.onShow),
         motionTier: (window.DeskBaseMotion && window.DeskBaseMotion.tier && window.DeskBaseMotion.tier()) || "?",
         commands: cmdCount || 0,
@@ -1046,6 +1047,36 @@
   // ============================================================
   // 启动
   // ============================================================
+  /**
+   * 旧版 SQLite 数据文件（main.db）的提示。
+   *
+   * 为什么必须有它：v0.4.0 换掉了存储引擎，旧的 main.db 既读不了也删不掉，
+   * 它就躺在数据目录里。用户看到新界面空空如也，最自然的理解就是"数据丢了" ——
+   * 而实际上数据还在那个文件里，只是需要走一次导出再导入。
+   * 这件事**必须主动说**，不能等用户来问。
+   */
+  async function checkLegacyDb() {
+    try {
+      const r = await call("app.legacyDb", {});
+      if (!r || !r.found) return;
+      const mb = (r.size / 1024 / 1024).toFixed(1);
+      const U = window.DeskBaseUI;
+      const msg =
+        "检测到旧版数据文件（main.db，" +
+        mb +
+        " MB）。v0.4.0 换掉了存储引擎，它读不了也删不掉 —— 你的数据还在里面，没丢。" +
+        "迁移办法：用旧版 DeskBase 打开，导出 CSV/Excel，再用新版「从 Excel 导入」。\n\n位置：" +
+        r.path;
+      if (U && typeof U.toast === "function") {
+        U.toast({ text: msg, kind: "warn", timeout: 15000 });
+      } else {
+        console.warn("[DeskBase] " + msg);
+      }
+    } catch (e) {
+      // 检测本身失败不影响使用
+    }
+  }
+
   async function boot() {
     let lastCmdCount = 0;
     // 主题（默认宣纸；D-016 决定不让"跟随系统"当默认，保证用户第一眼看到宣纸）
@@ -1297,6 +1328,7 @@
 
     // 自检放最后：首屏渲染完再报，不占启动路径
     selfCheck(lastCmdCount);
+    checkLegacyDb();
   }
 
   // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）

@@ -208,11 +208,17 @@
       `「${probe}」命中 ${filtered.rows.length} 行 用时=${Date.now() - t7}ms`
     );
 
-    // 大结果集查询：SQL 页签那条路（有行数上限，必须能截断而不是卡死）
+    // 整表行数：SQL 移除前这一步是 `SELECT COUNT(*)`（那时 COUNT 在大表上要全表扫，
+    // 所以只能给估计值）。新引擎自己维护记录，行数是**精确值** ——
+    // 顺带把这条从"估计"升级成"确定"，断言也就敢写等号了。
     const t8 = Date.now();
-    const q = await ipc("schema.runQuery", { sql: "SELECT COUNT(*) AS n FROM " + TABLE, maxRows: 100 });
+    const cntInfo = await ipc("schema.getTable", { name: TABLE });
     const qms = Date.now() - t8;
-    step("聚合查询可用", q && q.rows && Number(q.rows[0][0]) === EXPECT, `count=${q && q.rows ? q.rows[0][0] : "?"} 用时=${qms}ms`);
+    step(
+      "行数可数（精确值，不再是估计）",
+      !!cntInfo && Number(cntInfo.row_estimate) === EXPECT,
+      `count=${cntInfo ? cntInfo.row_estimate : "?"} 用时=${qms}ms`
+    );
 
     // ---------- 4. 值抽查：每一类字段都验 ----------
     // 值抽查：**按金额升序取第一行** —— 金额随 i 单调递增，第一行必然是 i=1

@@ -897,6 +897,30 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 所以组件库没加载时页面看起来一切正常，只是某个功能悄悄不工作。
         // 这种情况下"页面能打开"是完全不可信的验收依据 —— 必须让界面自己报告。
         // 出问题时用户把 app.log 发过来就能定位，不用远程调试。
+        // 升级到 v0.4.0 之后，旧的 SQLite 库（main.db）**读不了也删不掉**，
+        // 它就静静躺在数据目录里。用户最容易的理解是"我的数据没了"。
+        // 所以只要它还在，就必须主动说清楚 —— 不能等用户来问。
+        "app.legacyDb" => {
+            let legacy = state.data_dir.join("data").join("main.db");
+            let (found, size) = match std::fs::metadata(&legacy) {
+                Ok(m) => (true, m.len()),
+                Err(_) => (false, 0),
+            };
+            let tables = match state.db.lock() {
+                Ok(d) => d.list_tables().map(|t| t.len()).unwrap_or(0),
+                Err(_) => 0,
+            };
+            ok(
+                id,
+                serde_json::json!({
+                    "found": found,
+                    "size": size,
+                    "path": legacy.to_string_lossy(),
+                    "new_tables": tables,
+                }),
+            )
+        }
+
         "app.diag" => {
             let a = &req.args;
             let b = |k: &str| a.get(k).and_then(|v| v.as_bool()).unwrap_or(false);

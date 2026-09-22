@@ -52,7 +52,14 @@
     let st = null;
     try { st = await ipc("recovery.status"); } catch (_) {}
     step("recovery.status 报出「上次未正常退出」", st && st.unclean === true, st ? "unclean=" + st.unclean : "无应答");
-    step("完整性自检通过（quick_check=ok）", !!(st && st.quick_check_ok && st.quick_check === "ok"), st && st.quick_check);
+    // 新引擎（ADR-0021）不再有 PRAGMA quick_check，一致性判据是"日志能否被完整解析"。
+    // 结论文字是 "ok（N 条事务完整）" 或 "可恢复：…尾部半写已丢弃" —— 两者都算通过，
+    // 所以判 st.quick_check_ok 且结论以 ok / 可恢复 开头，而不是死盯着 "ok" 这个字面量。
+    step(
+      "完整性自检通过（日志能被解析）",
+      !!(st && st.quick_check_ok && /^(ok|可恢复)/.test(st.quick_check || "")),
+      st && st.quick_check
+    );
     step("WAL 检查 ok", !!(st && st.wal_checkpoint === "ok"), st && st.wal_checkpoint);
     step(
       "报告里带着上次启动的信息",
