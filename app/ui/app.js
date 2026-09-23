@@ -1061,16 +1061,59 @@
       if (!r || !r.found) return;
       const mb = (r.size / 1024 / 1024).toFixed(1);
       const U = window.DeskBaseUI;
-      const msg =
+
+      // 旧库读不了、也删不掉，最容易被理解成"数据丢了"。
+      // 所以这里不给一句干巴巴的提示，而是把路指清楚：三步，外加一个能直接
+      // 打开数据目录的按钮 —— 让人立刻能动手，而不是先去猜目录在哪儿。
+      const box = document.createElement("div");
+      box.style.cssText = "display:flex;flex-direction:column;gap:10px";
+
+      const lead = document.createElement("p");
+      lead.textContent =
         "检测到旧版数据文件（main.db，" +
         mb +
-        " MB）。v0.4.0 换掉了存储引擎，它读不了也删不掉 —— 你的数据还在里面，没丢。" +
-        "迁移办法：用旧版 DeskBase 打开，导出 CSV/Excel，再用新版「从 Excel 导入」。\n\n位置：" +
-        r.path;
-      if (U && typeof U.toast === "function") {
-        U.toast({ text: msg, kind: "warn", timeout: 15000 });
+        " MB）。v0.4.0 换掉了存储引擎，它读不了也删不掉 —— 你的数据还在里面，没丢。";
+
+      const stepsTitle = document.createElement("p");
+      stepsTitle.textContent = "迁移三步：";
+      const ol = document.createElement("ol");
+      ol.style.cssText =
+        "margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px";
+      [
+        "用旧版 DeskBase 打开它，把每张表导出成 Excel / CSV；",
+        "回到新版，在表格页用「从 Excel 导入」把表一张张导进来；",
+        "确认新版里数据齐了，旧文件留着或删掉都随你。",
+      ].forEach((t) => {
+        const li = document.createElement("li");
+        li.textContent = t;
+        ol.appendChild(li);
+      });
+
+      const path = document.createElement("div");
+      path.style.cssText =
+        "font-size:12px;opacity:.75;word-break:break-all";
+      path.textContent = r.path;
+
+      box.append(lead, stepsTitle, ol, path);
+
+      if (U && typeof U.modal === "function") {
+        U.modal({
+          title: "旧版数据文件",
+          body: box,
+          actions: [
+            {
+              label: "打开数据目录",
+              kind: "primary",
+              close: false, // 点开目录不关对话框 —— 用户还要回来照着三步做
+              onClick: () => {
+                call("recovery.reveal", {}).catch(() => {});
+              },
+            },
+            { label: "知道了" },
+          ],
+        });
       } else {
-        console.warn("[DeskBase] " + msg);
+        console.warn("[DeskBase] 检测到旧版数据文件：" + r.path);
       }
     } catch (e) {
       // 检测本身失败不影响使用

@@ -1846,6 +1846,26 @@ mod tests_release {
         assert_eq!(rs[0].tag, "v0.2.0-beta.3");
     }
 
+    /// **真联网**取一次 Releases。
+    ///
+    /// 为什么标 #[ignore]：它依赖网络，而常规测试必须可重复、不联网。
+    /// 现有那些测试全是对着夹具测解析 —— 解析对了不等于**发得出请求**。
+    /// WinHTTP 那段胶水代码此前没有任何一次真实调用，这是一条没人走过的路。
+    /// 跑法：`cargo test -- --ignored`
+    #[test]
+    #[ignore]
+    fn 真联网能取到发布列表() {
+        let rs = match fetch_releases() {
+            Ok(x) => x,
+            Err(e) => panic!("取不到发布列表：{e}"),
+        };
+        assert!(!rs.is_empty(), "本仓库至少有一个发布");
+        let top = &rs[0];
+        let v = top.version().expect("最新发布的 tag 应当能解析出版本号");
+        println!("最新发布：{} → v{}.{}.{}", top.tag, v.major, v.minor, v.patch);
+        println!("资产数：{}", top.usable_assets().len());
+    }
+
     #[test]
     fn 标签带前缀v也能解析出版本() {
         let r = Release {

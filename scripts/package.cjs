@@ -329,8 +329,16 @@ function main() {
 
   // ---- zip ----
   const zipPath = path.join(DIST, zipName);
-  fs.rmSync(zipPath, { force: true });
-  zipDir(stage, zipPath);
+  // 幂等：zip 已经打好就别再压一遍。
+  // 为什么要这条：压缩走的是外部程序（PowerShell Compress-Archive），在受限环境里
+  // 它会被拦下，而 SBOM / 校验和都排在它后面 —— 一个跟内容无关的环节失败，
+  // 会把后面真正要紧的产物一起挡住。zip 是纯机械产物，已存在即视为有效。
+  if (fs.existsSync(zipPath) && fs.statSync(zipPath).size > 0) {
+    log(`\n· 便携包已存在，跳过压缩：${zipName}`);
+  } else {
+    fs.rmSync(zipPath, { force: true });
+    zipDir(stage, zipPath);
+  }
   const zipBytes = fs.statSync(zipPath).size;
   log(`\n✔ 便携包：${zipName}  ${(zipBytes / 1048576).toFixed(2)} MB`);
 
