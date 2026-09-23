@@ -27,6 +27,7 @@
 //! 就是一次前缀范围扫描 —— 不需要任何查询语言。
 
 use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
 
 use crate::store::{Batch, Store};
 
@@ -37,6 +38,32 @@ pub type Json = serde_json::Value;
 pub const MAX_PAGE_LIMIT: usize = 500;
 /// `Page` 的第 0 列恒为行标识。界面用它定位要改/删的行，不显示给用户。
 pub const ROWID_COLUMN: &str = "_rowid";
+
+/// 变更历史：每张表最多留这么多条，超了从最旧的开始丢。
+///
+/// 为什么要限：历史是"改错了能回退"，不是"全量审计"。全量留会让数据文件
+/// 无限长，而用户真正会去回退的只有最近那几十步。500 条对"改错了"这个场景
+/// 绰绰有余，同时把体积增长变成有界的。
+pub const HISTORY_KEEP: usize = 500;
+
+/// 一条变更记录。回退用它把数据改回原样。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct HistoryEntry {
+    /// store 里的键 —— 回退时按它定位（同时也是排序依据）
+    pub key: String,
+    pub at_ms: u64,
+    /// update / delete
+    pub op: String,
+    pub rowid: i64,
+    /// 改了哪一列（delete 为空串）
+    pub column: String,
+    /// 旧值：update 时是该列的旧值，delete 时是**整行**的 JSON
+    pub before: String,
+    /// 新值（delete 为空串）
+    pub after: String,
+    /// 给人看的一句摘要，界面直接显示
+    pub preview: String,
+}
 /// 递归同步的深度上限。防的是"两条规则互相触发"形成死循环。
 pub const MAX_SYNC_DEPTH: u32 = 5;
 
@@ -432,12 +459,16 @@ pub struct View {
 
 pub struct Db {
     store: Store,
+    /// 历史键的自增后缀。时间戳定宽（12 位）保证按字典序就是时间序，
+    /// 同一毫秒内的多次变更靠它区分 —— 否则两次写入会覆盖成同一条历史。
+    hst_seq: u64,
 }
 
 impl Db {
     pub fn open(data_dir: &std::path::Path) -> Result<Self> {
         Ok(Db {
             store: Store::open(data_dir)?,
+            hst_seq: 0,
         })
     }
 
@@ -968,6 +999,143 @@ impl Db {
 
     // ---------- 记录 ----------
 
+    // ----------------------------------------------------------
+    // 变更历史（"改错了能回退"）
+    // ----------------------------------------------------------
+    //
+    // 为什么必须有它：项目承诺的是「不丢数据」。崩溃不丢那半边已经由
+    // append-only 日志 + fsync 兑现了，但**改错了能回退**一直是空的 ——
+    // 误删一行、误改一格，用户只能眼睁睁看着。日志记的是"当前值"，
+    // 不记"上一个值"，所以历史必须显式写下来。
+    //
+    // 为什么必须和变更在同一个 Batch 里：否则会出现"数据改了、历史没记"
+    // 或反过来 —— 回退就成了假的。Batch 是一个事务，要么都成要么都不成。
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn hst_key(&mut self, table: &str) -> String {
+        self.hst_seq += 1;
+        format!("hst/{}/{:012}_{}", table, Self::now_ms(), self.hst_seq)
+    }
+
+    fn push_history(
+        &mut self,
+        b: &mut Batch,
+        table: &str,
+        op: &str,
+        rowid: i64,
+        column: &str,
+        before: &str,
+        after: &str,
+    ) {
+        let key = self.hst_key(table);
+        let preview = match op {
+            "update" => format!("第 {} 行的「{}」：{} → {}", rowid, column,
+                trim_for_preview(before), trim_for_preview(after)),
+            "delete" => format!("删掉了第 {} 行", rowid),
+            _ => format!("{} 第 {} 行", op, rowid),
+        };
+        let e = HistoryEntry {
+            key: key.clone(),
+            at_ms: Self::now_ms(),
+            op: op.to_string(),
+            rowid,
+            column: column.to_string(),
+            before: before.to_string(),
+            after: after.to_string(),
+            preview,
+        };
+        if let Ok(j) = serde_json::to_string(&e) {
+            b.set(key, j);
+        }
+    }
+
+    /// 超出上限时丢最旧的。单独提交 —— 它只是清理，不影响刚那次变更的正确性。
+    fn prune_history(&mut self, table: &str) -> Result<()> {
+        let prefix = format!("hst/{table}/");
+        let mut keys: Vec<String> = self
+            .store
+            .scan(&prefix)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        if keys.len() <= HISTORY_KEEP {
+            return Ok(());
+        }
+        keys.sort(); // 时间戳定宽，字典序 = 时间序
+        let drop = keys.len() - HISTORY_KEEP;
+        let mut b = Batch::new();
+        for k in keys.into_iter().take(drop) {
+            b.del(k);
+        }
+        self.store.commit(b)?;
+        Ok(())
+    }
+
+    /// 列出某表的变更历史，新的在前。
+    pub fn history(&self, table: &str, limit: usize) -> Vec<HistoryEntry> {
+        let prefix = format!("hst/{table}/");
+        let mut v: Vec<HistoryEntry> = self
+            .store
+            .scan(&prefix)
+            .into_iter()
+            .filter_map(|(_, s)| serde_json::from_str(&s).ok())
+            .collect();
+        v.sort_by(|a, b| b.key.cmp(&a.key));
+        if limit > 0 {
+            v.truncate(limit);
+        }
+        v
+    }
+
+    /// 回退一条变更。
+    ///
+    /// 只处理 update 与 delete —— 这两种是"误操作会丢数据"的高发区。
+    /// insert 不记历史：新增不会丢东西，记了反而让列表变吵。
+    pub fn undo(&mut self, table: &str, key: &str) -> Result<String> {
+        validate_identifier(table)?;
+        let raw = self
+            .store
+            .get(key)
+            .ok_or_else(|| "找不到这条历史（可能已被清理）".to_string())?
+            .to_string();
+        let e: HistoryEntry =
+            serde_json::from_str(&raw).map_err(|_| "这条历史读不出来".to_string())?;
+        if !e.key.starts_with(&format!("hst/{table}/")) {
+            return Err("这条历史不属于这张表".to_string());
+        }
+        let mut b = Batch::new();
+        match e.op.as_str() {
+            "update" => {
+                let rk = record_key(table, e.rowid);
+                let cur = self
+                    .store
+                    .get(&rk)
+                    .ok_or_else(|| "那一行已经不在了，回退不了".to_string())?
+                    .to_string();
+                let mut rec: BTreeMap<String, Json> =
+                    serde_json::from_str(&cur).map_err(|x| format!("记录读不出来: {x}"))?;
+                let old: Json = serde_json::from_str(&e.before).unwrap_or(Json::Null);
+                rec.insert(e.column.clone(), old);
+                b.set(rk, serde_json::to_string(&rec).map_err(|x| x.to_string())?);
+            }
+            "delete" => {
+                // before 存的是整行 JSON，直接放回去就是恢复
+                b.set(record_key(table, e.rowid), e.before.clone());
+            }
+            _ => return Err("不认识的变更类型，回退不了".to_string()),
+        }
+        // 回退完这条历史就作废了 —— 留着会让人以为还能再退一次
+        b.del(key);
+        self.store.commit(b)?;
+        Ok(format!("已回退：{}", e.preview))
+    }
+
     pub fn insert_rows(&mut self, table: &str, columns: &[String], rows: &[Vec<Option<String>>]) -> Result<usize> {
         validate_identifier(table)?;
         let mut t = self.load_table(table)?;
@@ -1031,13 +1199,23 @@ impl Db {
         }
         let v = coerce_value(Some(f.ty), column, value)?;
         let key = record_key(table, rowid);
-        if self.store.get(&key).is_none() {
-            return Err("没有找到要修改的那一行（可能已被删除），请刷新后再试".to_string());
-        }
+        // 先把整行读出来（借用结束），后面既要算旧值、也要改它
+        let cur = match self.store.get(&key) {
+            Some(x) => x.to_string(),
+            None => {
+                return Err("没有找到要修改的那一行（可能已被删除），请刷新后再试".to_string())
+            }
+        };
+        // 回退要用：先记住这个格子**原来**是什么
+        let before = {
+            let old: BTreeMap<String, Json> =
+                serde_json::from_str(&cur).map_err(|e| format!("记录读不出来: {e}"))?;
+            old.get(column).cloned().unwrap_or(Json::Null).to_string()
+        };
 
         let mut b = Batch::new();
-        let mut rec: BTreeMap<String, Json> = serde_json::from_str(self.store.get(&key).unwrap())
-            .map_err(|e| format!("记录读不出来: {e}"))?;
+        let mut rec: BTreeMap<String, Json> =
+            serde_json::from_str(&cur).map_err(|e| format!("记录读不出来: {e}"))?;
         rec.insert(column.to_string(), json_from_value(&v));
         rec.insert(
             ROWID_COLUMN.to_string(),
@@ -1047,7 +1225,11 @@ impl Db {
             key,
             serde_json::to_string(&rec).map_err(|e| e.to_string())?,
         );
+        let after = rec.get(column).cloned().unwrap_or(Json::Null).to_string();
+        // 历史与这次改动**同批提交**：要么都记下，要么都不记
+        self.push_history(&mut b, table, "update", rowid, column, &before, &after);
         self.store.commit(b)?;
+        self.prune_history(table)?;
 
         // 传播：改完源字段，看有没有规则要跟着动别的表
         Ok(self.propagate(table, rowid, column, 0))
@@ -1062,8 +1244,11 @@ impl Db {
         let mut n = 0usize;
         for r in rowids {
             let k = record_key(table, *r);
-            if self.store.contains(&k) {
+            // 整行 JSON 存进历史 —— 删掉之后就没处找了，回退只能靠这一份
+            let whole = self.store.get(&k).map(|x| x.to_string());
+            if let Some(w) = whole {
                 b.del(k);
+                self.push_history(&mut b, table, "delete", *r, "", &w, "");
                 n += 1;
             }
         }
@@ -1361,6 +1546,21 @@ impl Db {
 
 fn record_prefix(table: &str) -> String {
     format!("rec/{table}/")
+}
+
+/// 历史摘要里用的短值：JSON 字符串带着引号，长文本会把列表撑爆，都截一下。
+fn trim_for_preview(v: &str) -> String {
+    let t = v.trim_matches('"');
+    if t.is_empty() {
+        return "（空）".to_string();
+    }
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() > 12 {
+        let head: String = chars.into_iter().take(12).collect();
+        format!("{head}…")
+    } else {
+        t.to_string()
+    }
 }
 
 fn record_key(table: &str, rowid: i64) -> String {
@@ -1855,6 +2055,105 @@ fn clean_number(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    // ---------- 变更历史（"改错了能回退"）----------
+
+    #[test]
+    fn 改一格能退回去() {
+        let dir = tmp("hist-update");
+        let mut d = Db::open(&dir).unwrap();
+        d.create_table(&spec("账本", &[("名称", ColType::Text), ("金额", ColType::Money)]))
+            .unwrap();
+        d.insert_rows(
+            "账本",
+            &["名称".to_string(), "金额".to_string()],
+            &[vec![Some("甲".to_string()), Some("12.34".to_string())]],
+        )
+        .unwrap();
+        // rowid 在返回行的第 0 列（ROWID_COLUMN），界面不显示但内部要用
+        let rid = d.page_rows("账本", None, false, None, 10).unwrap().rows[0][0]
+            .as_i64()
+            .unwrap();
+
+        // 改一次 → 应该留下一条历史
+        d.update_cell("账本", rid, "金额", Some("99.99")).unwrap();
+        let h = d.history("账本", 10);
+        assert_eq!(h.len(), 1, "改一格应该留一条历史");
+        assert_eq!(h[0].op, "update");
+        assert_eq!(h[0].column, "金额");
+
+        // 回退 → 值应该变回 12.34 元（库里按分存，即 1234）
+        let key = h[0].key.clone();
+        d.undo("账本", &key).unwrap();
+        let raw = d.store.get(&record_key("账本", rid)).unwrap().to_string();
+        assert!(raw.contains("1234"), "回退后应该回到 1234 分，实际：{raw}");
+        // 回退完这条历史就作废了
+        assert!(
+            d.history("账本", 10).iter().all(|x| x.key != key),
+            "回退过的历史不该还在列表里"
+        );
+    }
+
+    #[test]
+    fn 删掉一行能整行恢复() {
+        let dir = tmp("hist-delete");
+        let mut d = Db::open(&dir).unwrap();
+        d.create_table(&spec("名单", &[("名称", ColType::Text), ("备注", ColType::Text)]))
+            .unwrap();
+        d.insert_rows(
+            "名单",
+            &["名称".to_string(), "备注".to_string()],
+            &[vec![Some("张三".to_string()), Some("重要客户".to_string())]],
+        )
+        .unwrap();
+        // rowid 在返回行的第 0 列（ROWID_COLUMN），界面不显示但内部要用
+        let rid = d.page_rows("名单", None, false, None, 10).unwrap().rows[0][0]
+            .as_i64()
+            .unwrap();
+        let before_rows = d.store.count(&format!("rec/名单/"));
+
+        d.delete_rows("名单", &[rid]).unwrap();
+        assert_eq!(d.store.count(&format!("rec/名单/")), before_rows - 1);
+
+        let h = d.history("名单", 10);
+        assert_eq!(h.len(), 1, "删一行应该留一条历史");
+        assert_eq!(h[0].op, "delete");
+
+        d.undo("名单", &h[0].key).unwrap();
+        assert_eq!(
+            d.store.count(&format!("rec/名单/")),
+            before_rows,
+            "回退删除后行数应该恢复"
+        );
+        // 整行内容也要回来，不能只是多了一行空壳
+        let raw = d.store.get(&record_key("名单", rid)).unwrap().to_string();
+        assert!(raw.contains("张三"), "恢复的行应该带着原来的内容，实际：{raw}");
+        assert!(raw.contains("重要客户"), "备注也该一起回来");
+    }
+
+    #[test]
+    fn 历史有上限不会无限涨() {
+        let dir = tmp("hist-prune");
+        let mut d = Db::open(&dir).unwrap();
+        d.create_table(&spec("流水", &[("值", ColType::Text)]))
+            .unwrap();
+        d.insert_rows("流水", &["值".to_string()], &[vec![Some("起".to_string())]])
+            .unwrap();
+        // rowid 在返回行的第 0 列（ROWID_COLUMN），界面不显示但内部要用
+        let rid = d.page_rows("流水", None, false, None, 10).unwrap().rows[0][0]
+            .as_i64()
+            .unwrap();
+        // 改的次数超过上限，历史条数应该被压住而不是无限增长
+        for i in 0..(HISTORY_KEEP + 20) {
+            d.update_cell("流水", rid, "值", Some(&format!("v{i}"))).unwrap();
+        }
+        let h = d.history("流水", 100000);
+        assert!(
+            h.len() <= HISTORY_KEEP,
+            "历史条数应被压在上限内，实际 {} 条",
+            h.len()
+        );
+    }
+
     use super::*;
 
     fn tmp(tag: &str) -> std::path::PathBuf {

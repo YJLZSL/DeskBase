@@ -1226,6 +1226,7 @@
   document.getElementById("btn-db-schema").addEventListener("click", () => { openSchemaDialog(); });
   document.getElementById("btn-db-relations").addEventListener("click", () => { openRelationsDialog(); });
   document.getElementById("btn-db-views").addEventListener("click", () => { openViewsDialog(); });
+  document.getElementById("btn-db-history").addEventListener("click", () => { openHistoryDialog(); });
   tabsEl.addEventListener("click", (ev) => {
     const b = ev.target.closest(".db-tab");
     if (b) showTab(b.dataset.tab);
@@ -1513,6 +1514,80 @@
   // 没有查询语句、没有输入框：把「筛选哪些行、按什么排序、隐藏哪些列」
   // 存成一个有名字的视角，下次点一下就回到这个视角。
   // ============================================================
+  /**
+   * 变更历史：改错了、删错了，在这里退回去。
+   *
+   * 为什么要有它：项目承诺「不丢数据」。崩溃不丢那半边由日志 + fsync 兑现了，
+   * 但"改错了能回退"一直没有 —— 误删一行只能眼睁睁看着。这个对话框就是那半边。
+   * 只记「改」与「删」：新增不会丢东西，记进去只会让列表变吵。
+   */
+  async function openHistoryDialog() {
+    if (!state.current) {
+      toast("先打开一张表，再看它的历史", "error");
+      return;
+    }
+    const dlg = buildDialog(
+      "db-dialog-history",
+      "变更历史 · " + state.current,
+      "这里列出最近改了什么、删了什么，每一条都能退回去。最多留 500 条，超了从最旧的开始丢 —— 它是「改错了能回退」，不是全量审计。"
+    );
+    dlg.textContent = "";
+    dlg.append(node("h3", null, "变更历史 · " + state.current));
+    const box = node("div", { class: "db-backup-list" });
+    dlg.append(box);
+
+    async function reload() {
+      box.textContent = "";
+      let list = [];
+      try {
+        const r = await call("schema.history", { table: state.current, limit: 100 });
+        list = (r && r.items) || [];
+      } catch (e) {
+        box.append(node("div", { class: "db-empty" }, "读不到历史：" + errText(e)));
+        return;
+      }
+      if (!list.length) {
+        box.append(node("div", { class: "db-empty" }, "这张表还没有改动记录"));
+        return;
+      }
+      list.forEach((h) => {
+        const when = h.at_ms
+          ? new Date(Number(h.at_ms)).toLocaleString("zh-CN", { hour12: false })
+          : "";
+        const undo = node("button", { class: "btn btn-ghost db-mini", type: "button" }, "回退");
+        undo.addEventListener("click", async () => {
+          undo.disabled = true;
+          try {
+            const r = await call("schema.undo", { table: state.current, key: h.key });
+            toast((r && r.message) || "已回退", "ok");
+            await reload();
+            await loadPage();
+          } catch (e2) {
+            toast("回退失败：" + errText(e2), "error");
+            undo.disabled = false;
+          }
+        });
+        box.append(
+          node(
+            "div",
+            { class: "db-backup-item" },
+            node("span", { class: "t" }, (h.op === "delete" ? "✕ " : "✎ ") + (h.preview || "")),
+            node("span", { class: "s" }, when),
+            undo
+          )
+        );
+      });
+    }
+
+    const actions = node("div", { class: "db-dialog-actions" });
+    const btnClose = node("button", { class: "btn", type: "button" }, "关闭");
+    btnClose.addEventListener("click", () => closeDialog(dlg));
+    actions.append(btnClose);
+    dlg.append(actions);
+    dlg.showModal();
+    await reload();
+  }
+
   async function openViewsDialog() {
     if (!state.current) {
       toast("先打开一张表，再建视图", "error");

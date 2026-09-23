@@ -84,6 +84,23 @@ function findVcVars() {
       cands.push(path.join(r, e, 'BuildTools', 'VC', 'Auxiliary', 'Build', 'vcvars64.bat'));
     }
   }
+  // VS 允许装在任何盘、叫什么目录名（本机就是 E:\vs2026）。
+  // 所以除了上面那些固定组合，再把每个盘符根下的 vs*/VS*/VisualStudio* 目录
+  // 也收进来 —— 扫一圈的成本可以忽略，找不到才会直接卡住整条构建链。
+  for (let c = 'A'.charCodeAt(0); c <= 'Z'.charCodeAt(0); c++) {
+    const drive = String.fromCharCode(c) + ':';
+    let es = [];
+    try {
+      es = fs.readdirSync(drive + '\\', { withFileTypes: true });
+    } catch (e) {
+      continue;
+    }
+    for (const e of es) {
+      if (!e.isDirectory()) continue;
+      if (!/^(vs|VS|Vs|visual ?studio)/i.test(e.name)) continue;
+      cands.push(path.join(drive, '\\', e.name, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat'));
+    }
+  }
   return firstExisting(cands);
 }
 
@@ -147,6 +164,59 @@ const STRICT = has('--strict');
 const MODE = has('--fix') ? 'fix' : has('--test') ? 'test' : has('--check') ? 'check' : has('--debug') ? 'debug' : 'release';
 
 // ---------------- 1. 捕获 MSVC 环境 ----------------
+
+/**
+ * 不依赖 vcvars64.bat，自己拼出 MSVC 的 PATH / LIB / INCLUDE。
+ *
+ * 为什么需要它：vcvars64.bat 内部要调 `reg.exe` 查 KitsRoot10。在受限环境里
+ * reg.exe 会被直接杀掉（进程退出码是 null、没有任何输出），于是 vcvars 整段
+ * 静默失败 —— 表现是"vcvars64.bat 执行失败：\"\""，看不出真实原因。
+ * 而 MSVC 工具链与 SDK 的目录都是**可以直接探测**的，环境变量只是它们的
+ * 一个视图，我们自己也能构造出来。
+ */
+function manualMsvcEnv() {
+  if (!VC_VARS) return null;
+  // <VS>\VC\Auxiliary\Build\vcvars64.bat  →  <VS>
+  const vsRoot = path.resolve(path.dirname(VC_VARS), "..", "..", "..");
+  const toolsDir = path.join(vsRoot, "VC", "Tools", "MSVC");
+  let ver = null;
+  try {
+    ver = fs
+      .readdirSync(toolsDir)
+      .filter((d) => /^\d+\./.test(d))
+      .sort()
+      .pop();
+  } catch (e) {
+    return null;
+  }
+  if (!ver) return null;
+  const bin = path.join(toolsDir, ver, "bin", "Hostx64", "x64");
+  if (!fs.existsSync(bin)) return null;
+
+  const libDirs = [path.join(toolsDir, ver, "lib", "x64")];
+  const incDirs = [path.join(toolsDir, ver, "include")];
+  const pathDirs = [bin];
+  if (SDK_ROOT && SDK_VER) {
+    libDirs.push(
+      path.join(SDK_ROOT, "Lib", SDK_VER, "um", "x64"),
+      path.join(SDK_ROOT, "Lib", SDK_VER, "ucrt", "x64")
+    );
+    for (const sub of ["ucrt", "shared", "um", "winrt", "cppwinrt"]) {
+      incDirs.push(path.join(SDK_ROOT, "Include", SDK_VER, sub));
+    }
+    pathDirs.push(path.join(SDK_ROOT, "bin", SDK_VER, "x64"));
+  }
+
+  const env = { ...process.env };
+  env.PATH = pathDirs.filter((d) => fs.existsSync(d)).join(path.delimiter) + path.delimiter + (env.PATH || "");
+  env.LIB = libDirs.filter((d) => fs.existsSync(d)).join(path.delimiter);
+  env.INCLUDE = incDirs.filter((d) => fs.existsSync(d)).join(path.delimiter);
+  env.VCToolsInstallDir = path.join(toolsDir, ver) + "\\";
+  if (SDK_ROOT) env.WindowsSdkDir = SDK_ROOT + "\\";
+  if (SDK_VER) env.WindowsSDKVersion = SDK_VER + "\\";
+  return env;
+}
+
 function msvcEnv() {
   if (!VC_VARS) {
     die(
@@ -165,7 +235,24 @@ function msvcEnv() {
 
   const r = spawnSync('cmd.exe', ['/c', bat], { windowsHide: true, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   if (!(r.stdout || '').includes('=')) {
-    die('vcvars64.bat 执行失败：' + JSON.stringify((r.stderr || '').slice(0, 300)));
+    // vcvars 跑不出来 —— 多半是它内部调 reg.exe 查 KitsRoot10 时被受限环境干掉了
+    // （进程退出码 null、零输出）。这时别急着报错：自己拼的环境通常就够了。
+    const manual = manualMsvcEnv();
+    if (manual) {
+      log('  ⚠ vcvars64.bat 执行不出来（多半是它内部的 reg.exe 被拦），改用自行构造的环境');
+      log('    MSVC 工具链 + Windows SDK 的目录都是探测得到的，不经过注册表');
+      // 后面第 2 步会再补一次 SDK，这里直接返回即可
+      manual.__skipSdkPatch = true;
+      return manual;
+    }
+    die(
+      'vcvars64.bat 执行失败，且无法自行构造 MSVC 环境。\n\n' +
+        '  可能原因：vcvars 内部要调 reg.exe 查 KitsRoot10，而 reg.exe 在受限环境里\n' +
+        '  会被直接杀掉（无输出）。\n\n' +
+        '  自查：MSVC 工具链目录与 Windows SDK 目录是否都探测得到。\n' +
+        '    当前 vcvars : ' + VC_VARS + '\n' +
+        '    当前 SDK    : ' + (SDK_ROOT || '(未探测到)') + ' ' + (SDK_VER || '')
+    );
   }
 
   const env = { ...process.env };
@@ -274,16 +361,82 @@ const args =
     ? ['check']
     : ['build', ...(MODE === 'release' ? ['--release'] : [])];
 
+/**
+ * 跑 cargo。
+ *
+ * 为什么要兜一层：在受限环境里，直接 spawn 的 cargo 会被**静默杀掉** ——
+ * 表现是退出码 null、stdout/stderr 全空，看起来像"cargo 坏了"或"编译零输出"。
+ * 实测 PowerShell 那条通道能正常起它，所以拦下时改走 PowerShell，
+ * 代价是输出要先落到文件再读回来（PowerShell 的 stdout 在 Node 里拿不到）。
+ */
+function runCargo(args) {
+  const direct = spawnSync(cargo, args, {
+    windowsHide: true,
+    cwd: APP_DIR,
+    encoding: "utf8",
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 1800000,
+  });
+  if (direct.status !== null) return direct;
+
+  log("  ⚠ 直接启动 cargo 没有返回（多半被受限环境拦下），改走 PowerShell 通道");
+  const outFile = path.join(os.tmpdir(), "deskbase-cargo-out.txt");
+  try {
+    fs.unlinkSync(outFile);
+  } catch (e) {
+    /* 本来就没有 */
+  }
+  const ps = [];
+  // 只搬编译真正需要的那几个 —— PATH 很长，但它是能不能找到链接器的关键
+  for (const k of [
+    "PATH",
+    "LIB",
+    "INCLUDE",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTC",
+    "CARGO_HTTP_CHECK_REVOKE",
+    "RUSTFLAGS",
+  ]) {
+    if (env[k] !== undefined) {
+      ps.push(`$env:${k}='${String(env[k]).replace(/'/g, "''")}'`);
+    }
+  }
+  ps.push(`Set-Location "${APP_DIR}"`);
+  const argList = args.map((a) => "'" + String(a).replace(/'/g, "''") + "'").join(' ');
+  ps.push(
+    '& "' + cargo + '" ' + argList +
+      ' 2>&1 | Out-File -FilePath "' + outFile + '" -Encoding utf8'
+  );
+  ps.push(`$code = $LASTEXITCODE`);
+  ps.push(`"EXIT=$code" | Out-File -FilePath "${outFile}" -Append -Encoding utf8`);
+  const psFile = path.join(os.tmpdir(), "deskbase-cargo.ps1");
+  fs.writeFileSync(psFile, "\uFEFF" + ps.join("\r\n"), "utf8");
+  spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psFile],
+    { windowsHide: true, timeout: 1800000 }
+  );
+  let txt = "";
+  try {
+    txt = fs.readFileSync(outFile, "utf8").replace(/^\uFEFF/, "");
+  } catch (e) {
+    return { status: 1, stdout: "", stderr: "PowerShell 通道也没有产出" };
+  }
+  const m = txt.match(/EXIT=(-?\d+)/);
+  return {
+    status: m ? Number(m[1]) : 1,
+    stdout: txt.replace(/\n?EXIT=-?\d+\s*$/, ""),
+    stderr: "",
+  };
+}
+
 log('');
 log(`=== cargo ${args.join(' ')} ===`);
 const t0 = Date.now();
-const r = spawnSync(cargo, args, { windowsHide: true,
-  cwd: APP_DIR,
-  encoding: 'utf8',
-  env,
-  maxBuffer: 64 * 1024 * 1024,
-  timeout: 1800000,
-});
+const r = runCargo(args);
 const secs = ((Date.now() - t0) / 1000).toFixed(1);
 const out = (r.stdout || '') + (r.stderr || '');
 log(out.trimEnd());

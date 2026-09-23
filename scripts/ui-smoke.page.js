@@ -479,6 +479,33 @@
       }
     }
 
+    // 变更历史：「改错了能回退」的界面入口。
+    // 只断言"点了有反馈" —— 没打开表时给出提示也是正确反馈，
+    // 断言"一定打开对话框"会把正确行为判成失败。
+    const $hist = $("#btn-db-history");
+    step("数据库页有「历史」入口", !!$hist);
+    if ($hist) {
+      $hist.click();
+      const histFeedback = await waitFor(
+        () => !!$("#db-dialog-history") || !!document.querySelector(".dbui-toast, .toast"),
+        4000
+      );
+      step("点「历史」后界面有反馈（打开对话框或给出提示）", histFeedback);
+      const histDlg = $("#db-dialog-history");
+      if (histDlg) {
+        // 要么列出历史条目，要么明说"还没有改动记录" —— 空列表不能是空白一片
+        const txt = histDlg.textContent || "";
+        step(
+          "历史对话框如实说明当前状态（有条目或明说没有）",
+          /还没有改动记录/.test(txt) || /回退/.test(txt),
+          txt.slice(0, 60)
+        );
+      }
+      const closer = histDlg && [...histDlg.querySelectorAll("button")]
+        .find((b) => /关闭/.test(b.textContent || ""));
+      if (closer) closer.click();
+    }
+
     const $vw = $("#btn-db-views");
     step("数据库页有「视图」入口", !!$vw);
     if ($vw) {

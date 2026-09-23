@@ -2038,6 +2038,39 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // 变更历史：列出某表最近改了什么（新的在前）
+        "schema.history" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let limit = req
+                .args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+            match state.db.lock() {
+                Ok(d) => ok(id, serde_json::json!({ "items": d.history(table, limit) })),
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // 回退一条变更。只支持 update / delete —— insert 不记历史（新增不会丢东西）
+        "schema.undo" => {
+            let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 table");
+            };
+            let Some(key) = req.args.get("key").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 key（历史条目的标识）");
+            };
+            match state.db.lock() {
+                Ok(mut d) => match d.undo(table, key) {
+                    Ok(msg) => ok(id, serde_json::json!({ "message": msg })),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "schema.updateCell" => {
             let Some(table) = req.args.get("table").and_then(|v| v.as_str()) else {
                 return err(id, "缺少参数 table");
