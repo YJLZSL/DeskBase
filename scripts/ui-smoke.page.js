@@ -482,6 +482,42 @@
     // 变更历史：「改错了能回退」的界面入口。
     // 只断言"点了有反馈" —— 没打开表时给出提示也是正确反馈，
     // 断言"一定打开对话框"会把正确行为判成失败。
+    // ---------- 安装到本机：只验控件与状态可读 ----------
+    //
+    // **故意不点「安装到本机」**：那会真的往 %LOCALAPPDATA% 和注册表里写东西。
+    // 测试必须可重复、不该改系统状态 —— 真实安装是人工验收的事。
+    const $installCard = $("#card-install");
+    step("设置页有「安装到本机」卡片", !!$installCard);
+    const $instState = $("#install-state");
+    step("安装状态能读出来（不是报错）", !!$instState);
+    if ($instState) {
+      // 等它从"正在读取…"变成真实状态
+      const gotState = await waitFor(
+        () => $instState.textContent && !/正在读取/.test($instState.textContent),
+        5000
+      );
+      step(
+        "安装状态已加载且不是失败态",
+        gotState && !/失败/.test($instState.textContent),
+        ($instState.textContent || "").slice(0, 70)
+      );
+    }
+    step(
+      "安装状态里说明了卸载会保留数据目录",
+      !!($("#install-note") && /数据目录/.test($("#install-note").textContent || ""))
+    );
+
+    // ---------- 笔记：模板与导出 ----------
+    const $tpl = $("#note-tpl");
+    const $exp = $("#btn-note-export");
+    step("笔记编辑区有「套用模板」下拉", !!$tpl);
+    step("笔记编辑区有「导出 .md」按钮", !!$exp);
+    if ($tpl) {
+      // 下拉里得真有模板，否则是个摆设
+      const opts = [...$tpl.options].filter((o) => o.value);
+      step("模板下拉里有可选模板", opts.length >= 3, opts.length + " 个：" + opts.map((o) => o.textContent).join("/"));
+    }
+
     const $hist = $("#btn-db-history");
     step("数据库页有「历史」入口", !!$hist);
     if ($hist) {

@@ -95,11 +95,19 @@ fn info_of(path: &Path, size: u64) -> BackupInfo {
 
 /// 创建一份备份（含三步校验）。
 pub fn create(db: &mut Db, data_dir: &Path) -> Result<BackupInfo, String> {
+    create_named(db, data_dir, &format!("deskbase-{}.dkb", stamp()))
+}
+
+/// create 的内核：文件名由调用方给。
+///
+/// 拆出来的唯一原因是**可测**：文件名里的时间戳来自真实时钟，而"同一秒内
+/// 连点两次"这个条件没法靠真实时钟稳定构造（机器一卡就跨秒）。
+/// 把名字交给调用方，测试就能确定地制造"同名"，而不必赌时序。
+pub fn create_named(db: &mut Db, data_dir: &Path, name: &str) -> Result<BackupInfo, String> {
     let dir = backup_dir(data_dir);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("创建备份目录失败（{}）：{e}", dir.display()))?;
-    let name = format!("deskbase-{}.dkb", stamp());
-    let path = dir.join(&name);
+    let path = dir.join(name);
     if path.exists() {
         // 同一秒内点两次：不覆盖，直接把已有的那份校验一遍返回（幂等）
         let size = verify(&path, None)?;
@@ -254,15 +262,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 幂等：同一秒内连点两次不覆盖、不报错。
+    /// 幂等：同一个文件名连做两次，不覆盖、不报错。
+    ///
+    /// **用固定的文件名，不用真实时钟** —— 原来那版靠"两次调用落在同一秒"，
+    /// 机器稍卡就跨秒变红。测试要的是"同名时复用"这条逻辑，不是"时钟走得够慢"。
     #[test]
-    fn 备份_同秒重复调用不覆盖() {
+    fn 备份_同名重复调用不覆盖() {
         let d = tmp_dir("again");
         let mut db = seed(&d);
         two_tables(&mut db);
-        let a = create(&mut db, &d).unwrap();
-        let b = create(&mut db, &d).unwrap();
-        assert_eq!(a.name, b.name, "同一秒内应复用同一份，不覆盖");
+        let a = create_named(&mut db, &d, "deskbase-fixed.dkb").unwrap();
+        let b = create_named(&mut db, &d, "deskbase-fixed.dkb").unwrap();
+        assert_eq!(a.name, b.name, "同名时应复用同一份，不覆盖");
+        // 复用不等于"什么都没做"：内容也要过校验
+        assert!(b.size > 0, "复用返回的那份也必须是有内容的");
+        // 目录里确实只有一份
+        let n = std::fs::read_dir(backup_dir(&d))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "dkb").unwrap_or(false))
+            .count();
+        assert_eq!(n, 1, "同名连点两次不该多出一个文件");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

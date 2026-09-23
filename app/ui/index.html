@@ -132,6 +132,15 @@
                 <svg class="ico"><use href="#i-back"/></svg>
               </button>
               <input class="title-input" id="note-title" placeholder="标题" />
+              <div class="editor-actions">
+                <select class="select select-sm" id="note-tpl" title="套用一个常用文档骨架">
+                  <option value="">套用模板…</option>
+                </select>
+                <button class="btn btn-ghost db-mini" id="btn-note-export" type="button"
+                        title="把这篇导出成 .md 文件（Markdown，任何编辑器都能打开）">
+                  导出 .md
+                </button>
+              </div>
             </div>
             <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。"></textarea>
           </div>
@@ -370,6 +379,23 @@
                 <b>截图内容只存在本机</b>，不上传、不记录。
               </div>
             </div>
+          </div>
+
+          <div class="card" id="card-install">
+            <h3>安装到本机</h3>
+            <p class="hint">
+              现在是<b>便携版</b>：解压即用，不写注册表，换台机器拷过去就能跑。
+              装到本机之后，Windows 的「应用和功能」里会出现一条记录，可以正常卸载。
+            </p>
+            <div class="field">
+              <span>当前状态</span>
+              <div class="hint" id="install-state">正在读取…</div>
+            </div>
+            <div class="db-dialog-actions">
+              <button class="btn btn-primary" id="btn-install" type="button">安装到本机</button>
+              <button class="btn btn-ghost" id="btn-uninstall" type="button" hidden>卸载</button>
+            </div>
+            <div class="hint" id="install-note"></div>
           </div>
 
           <div class="card">

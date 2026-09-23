@@ -676,6 +676,206 @@
     }
   });
 
+  // ---------- 文档方向：模板与导出 ----------
+  //
+  // 为什么先做这两件而不是富文本编辑器：笔记现在"进得去、出不来"。
+  // 模板解决"打开一片空白不知道从哪写起"，导出解决"写完了带不走"。
+  // 富文本是更大的工程（要动存储格式），得等这两件站住再说。
+
+  /**
+   * 常用文档骨架。存的是**纯文本 Markdown** —— 正文本来就是纯文本，
+   * 不引入富文本格式就不会有"粘贴进来样式乱掉"这种麻烦。
+   */
+  const NOTE_TEMPLATES = [
+    {
+      id: "meeting",
+      name: "会议纪要",
+      body: [
+        "## 会议信息",
+        "- 时间：",
+        "- 地点：",
+        "- 参会：",
+        "",
+        "## 议题",
+        "1. ",
+        "",
+        "## 结论",
+        "- ",
+        "",
+        "## 待办",
+        "- [ ] （负责人 / 截止时间）",
+      ].join("\n"),
+    },
+    {
+      id: "daily",
+      name: "工作日报",
+      body: ["## 今天做了什么", "- ", "", "## 遇到什么问题", "- ", "", "## 明天计划", "- "].join("\n"),
+    },
+    {
+      id: "weekly",
+      name: "工作周报",
+      body: [
+        "## 本周进展",
+        "- ",
+        "",
+        "## 数据",
+        "- ",
+        "",
+        "## 风险与需要支持",
+        "- ",
+        "",
+        "## 下周计划",
+        "- ",
+      ].join("\n"),
+    },
+    {
+      id: "todo",
+      name: "待办清单",
+      body: ["## 今天", "- [ ] ", "", "## 这周", "- [ ] ", "", "## 以后再说", "- [ ] "].join("\n"),
+    },
+    {
+      id: "reading",
+      name: "读书 / 学习笔记",
+      body: [
+        "## 出处",
+        "- 书名 / 篇名：",
+        "",
+        "## 要点",
+        "- ",
+        "",
+        "## 我的想法",
+        "- ",
+      ].join("\n"),
+    },
+  ];
+
+  // 模板下拉：选项在界面初始化时填进去
+  (function fillTemplates() {
+    const $tpl = $("#note-tpl");
+    if (!$tpl) return;
+    NOTE_TEMPLATES.forEach((t) => {
+      const o = document.createElement("option");
+      o.value = t.id;
+      o.textContent = t.name;
+      $tpl.appendChild(o);
+    });
+  })();
+
+  $("#note-tpl").addEventListener("change", async () => {
+    const $tpl = $("#note-tpl");
+    const t = NOTE_TEMPLATES.find((x) => x.id === $tpl.value);
+    $tpl.value = ""; // 选完就复位，下次还能再选同一个
+    if (!t) return;
+    if (!currentId) {
+      toast("先选中（或新建）一条笔记", "error");
+      return;
+    }
+    // 正文不是空的就先问一句 —— 直接覆盖掉用户写的东西是不能 undo 的
+    if (bodyEl.value.trim()) {
+      const U = window.DeskBaseUI;
+      const go = U && typeof U.confirm === "function"
+        ? await U.confirm({
+            title: "套用模板会覆盖现在的正文",
+            body: "当前笔记已经有内容了。套用「" + t.name + "」会把正文整段替换掉。",
+            confirmText: "替换",
+            danger: true,
+          })
+        : window.confirm("套用「" + t.name + "」会覆盖现在的正文，继续？");
+      if (!go) return;
+    }
+    bodyEl.value = t.body;
+    dirty = true;
+    await flushSave();
+    toast("已套用「" + t.name + "」");
+  });
+
+  $("#btn-note-export").addEventListener("click", async () => {
+    if (!currentId) {
+      toast("先选中一条笔记", "error");
+      return;
+    }
+    try {
+      const r = await call("note.exportMd", { id: currentId });
+      if (!r || r.cancelled) return; // 用户自己取消了保存对话框
+      toast("已导出：" + r.path);
+    } catch (e) {
+      toast("导出失败：" + e.message, "error");
+    }
+  });
+
+  // ---------- 安装到本机 ----------
+  //
+  // 便携版与安装版**共存于同一份 exe**：不点安装就一个字节都不写注册表。
+  // 这是三条红线里"零污染"的落点：装不装由用户决定，不由程序擅自决定。
+
+  async function loadInstallState() {
+    const $s = $("#install-state");
+    const $in = $("#btn-install");
+    const $un = $("#btn-uninstall");
+    const $note = $("#install-note");
+    if (!$s) return;
+    try {
+      const st = await call("app.installState", {});
+      if (st.installed) {
+        $s.textContent =
+          "已安装到本机（注册表里记的版本 " +
+          (st.version || "?") +
+          "）。安装目录：" +
+          st.dir;
+        $in.hidden = true;
+        $un.hidden = false;
+      } else {
+        $s.textContent = "未安装 —— 当前以便携版方式运行（没有写任何注册表）";
+        $in.hidden = false;
+        $un.hidden = true;
+      }
+      // 数据目录会保留这件事必须**在这里说**：用户点卸载时最担心的正是"我的东西还在吗"
+      $note.textContent =
+        "安装只写当前位置（用户级，不需要管理员权限）。卸载会删掉程序文件，" +
+        "但会保留你的数据目录：" +
+        st.data_dir;
+    } catch (e) {
+      $s.textContent = "读取安装状态失败：" + e.message;
+    }
+  }
+
+  $("#btn-install").addEventListener("click", async () => {
+    const $in = $("#btn-install");
+    $in.disabled = true;
+    try {
+      const r = await call("app.install", {});
+      toast("已安装到：" + r.dir + "（Windows 的「应用和功能」里能看到）");
+      await loadInstallState();
+    } catch (e) {
+      toast("安装失败：" + e.message, "error");
+    } finally {
+      $in.disabled = false;
+    }
+  });
+
+  $("#btn-uninstall").addEventListener("click", async () => {
+    const U = window.DeskBaseUI;
+    const go =
+      U && typeof U.confirm === "function"
+        ? await U.confirm({
+            title: "确定要卸载吗",
+            body:
+              "会删掉安装目录里的程序文件，并清掉「应用和功能」里的那条记录。" +
+              "你的数据目录不受影响 —— 数据一直留在原地。",
+            confirmText: "卸载",
+            danger: true,
+          })
+        : window.confirm("确定要卸载吗？数据目录会保留。");
+    if (!go) return;
+    try {
+      const r = await call("app.uninstall", {});
+      toast(r.message || "已卸载");
+      await loadInstallState();
+    } catch (e) {
+      toast("卸载失败：" + e.message, "error");
+    }
+  });
+
   async function refreshAudit() {
     try {
       const a = await call("audit.tail");
@@ -1372,6 +1572,7 @@
     // 自检放最后：首屏渲染完再报，不占启动路径
     selfCheck(lastCmdCount);
     checkLegacyDb();
+    loadInstallState();
   }
 
   // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）

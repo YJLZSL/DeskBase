@@ -1127,6 +1127,21 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   }
 }
 
+/* 笔记编辑区右上角那组动作（套模板 / 导出）。
+   放在标题输入框同一行里 —— 它们是"对这篇文档做的事"，不该挤到正文下面去。 */
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.editor-actions .select-sm {
+  width: auto;
+  min-width: 108px;
+  padding-block: 3px;
+  font-size: var(--fs-sm);
+}
+
 .stack {
   display: flex;
   flex-direction: column;

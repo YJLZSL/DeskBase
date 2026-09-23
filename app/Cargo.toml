@@ -1,6 +1,6 @@
 [package]
 name = "deskbase"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "DeskBase 桌库 —— 本地优先、隐私优先的办公工具箱，内置轻量数据表引擎（多表 + 关联 + 协同更新，无 SQL）"
 license = "Apache-2.0"
@@ -63,7 +63,16 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # 引纯 Rust 的 rustls 会拉进上 MB；WinHTTP 用的是系统 schannel，
 # **体积代价只在"我们自己的胶水代码"上**。`windows` 本来就在依赖树里（webview2-com），
 # 所以这一步不新增包。要实测的正是"开了这个 feature 之后到底涨多少"。
-windows = { version = "0.62", features = ["Win32_Networking_WinHttp", "Win32_Foundation"] }
+windows = { version = "0.62", features = [
+    "Win32_Networking_WinHttp",
+    "Win32_Foundation",
+    # 安装版要写"添加/删除程序"的条目。reg.exe（命令行工具）在本机被安全策略拉黑，
+    # 但注册表本身可以直接用 Win32 API 读写 —— 不经过那个进程，就不受影响。
+    # windows 本来就在依赖树里（webview2-com），加特性不新增包。
+    "Win32_System_Registry",
+    # 卸载时把"正在运行的自己"标记为重启后删除（MoveFileExW）
+    "Win32_Storage_FileSystem",
+] }
 
 # 原生文件选择框（导入 Excel、选备份目录等）。
 # 为什么必须是原生对话框而不是 <input type="file">：WebView2 里后者只给
