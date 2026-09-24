@@ -1337,6 +1337,33 @@
           cols.textContent = (t.columns || []).join(" · ");
           item.appendChild(cols);
           // 前两行预览：这是"数据真的在"最直观的证据
+          // 「导入到新版」—— 这才是用户真正要的那一步。
+          // 看见只是确认没丢，搬过来才是接着用。
+          const imp = document.createElement("button");
+          imp.type = "button";
+          imp.className = "btn btn-ghost db-mini";
+          imp.textContent = "导入到新版";
+          imp.title = "把这张表整张搬进新版（不改动旧文件）";
+          imp.addEventListener("click", async () => {
+            imp.disabled = true;
+            try {
+              const r = await call("legacy.import", { table: t.name });
+              if (r && r.message) {
+                toast(r.message);
+              } else {
+                toast("已导入「" + t.name + "」：" + (r && r.imported) + " 行");
+              }
+              // 刷新表列表 —— 让人关掉对话框就能在表格页看到它
+              if (window.DeskBaseDb && typeof window.DeskBaseDb.refreshTables === "function") {
+                await window.DeskBaseDb.refreshTables();
+              }
+            } catch (e) {
+              toast("导入失败：" + ((e && e.message) || e), "error");
+            } finally {
+              imp.disabled = false;
+            }
+          });
+          item.appendChild(imp);
           (t.sample || []).slice(0, 2).forEach((row) => {
             const line = document.createElement("div");
             line.className = "db-legacy-row";
@@ -1349,13 +1376,14 @@
         });
         box.append(list);
 
-        // 如实说导入还没接上 —— 别让人以为点一下就能导
-        const todo = document.createElement("p");
-        todo.className = "hint";
-        todo.textContent =
-          "「一键导入」还在做。在那之前，可以先用旧版程序导出成 Excel，" +
-          "再用表格页的「从 Excel 导入」—— 结果是一样的。";
-        box.append(todo);
+        // 说清"点下去会发生什么"，尤其是**不会动旧文件**这件事 ——
+        // 用户把唯一的数据交出来之前，最想确认的就是这个。
+        const note = document.createElement("p");
+        note.className = "hint";
+        note.textContent =
+          "点「导入到新版」会把整张表搬进新版，**旧文件一个字节都不会改**。" +
+          "搬完在表格页就能看到；名字撞了会拦下来让你改名，不会覆盖你现在的表。";
+        box.append(note);
       } else {
         // 读不出来：说清**为什么**，再给退路。一句"读不出来"等于没说。
         const bad = document.createElement("p");

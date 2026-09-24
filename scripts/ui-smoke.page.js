@@ -550,6 +550,19 @@
       } catch (e) {
         step("legacy.scan 能跑通并如实回答（有无旧库都不该报错）", false, String(e));
       }
+      // 导入端点也要能应答 —— 没有旧库时报"找不到那张表"才对，
+      // 不该是"未知命令"（那说明接线漏了）
+      try {
+        await ipc("legacy.import", { table: "烟测不存在的表" });
+        step("legacy.import 没有那张表时要报出来", false, "居然成功了？");
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        step(
+          "legacy.import 接线通（没有旧库/没那张表时给可读的报错）",
+          !/未知命令/.test(msg),
+          msg.slice(0, 60)
+        );
+      }
     }
 
     // ---------- 11. 备份：真实点击 → 对话框 → 生成 → 文件名约定 ----------

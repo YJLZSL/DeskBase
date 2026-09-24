@@ -953,6 +953,130 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             )
         }
 
+        // ---------- 旧库：把它的一张表导进新库 ----------
+        //
+        // 上半段（legacy.scan）是"能看见"，这一段是"能搬过来" ——
+        // 两件事差着用户的全部目的：看见只是确认没丢，搬过来才是接着用。
+        "legacy.import" => {
+            let want = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if want.is_empty() {
+                return err(id, "缺少参数 table（要导旧库里的哪一张表）");
+            }
+            let path = state.data_dir.join("data").join("main.db");
+            let ldb = match legacy::LegacyDb::open(&path) {
+                Ok(d) => d,
+                Err(e) => return err(id, e),
+            };
+            let tables = match ldb.tables() {
+                Ok(t) => t,
+                Err(e) => return err(id, e),
+            };
+            let Some(t) = tables.iter().find(|x| x.name == want) else {
+                return err(id, format!("旧库里没有「{want}」这张表"));
+            };
+            let new_name = req
+                .args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&t.name)
+                .to_string();
+
+            let rows = match ldb.rows(t, usize::MAX) {
+                Ok(r) => r,
+                Err(e) => return err(id, e),
+            };
+            if rows.is_empty() {
+                return ok(
+                    id,
+                    serde_json::json!({ "imported": 0, "message": "这张表在旧库里是空的" }),
+                );
+            }
+
+            let ncols = t.columns.len();
+            let cols: Vec<model::ColumnDef> = t
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    let decl = t.column_types.get(i).map(|s| s.as_str()).unwrap_or("");
+                    model::ColumnDef {
+                        name: n.clone(),
+                        ty: match legacy::map_decl_type(decl) {
+                            "integer" => model::ColType::Integer,
+                            "real" => model::ColType::Real,
+                            _ => model::ColType::Text,
+                        },
+                        not_null: false,
+                        default: None,
+                        primary_key: false,
+                        comment: None,
+                        shared: None,
+                        link: None,
+                        lookup: None,
+                        rollup: None,
+                    }
+                })
+                .collect();
+
+            // 每行补齐到列数：旧库里个别行的字段可能比声明少（SQLite 允许），
+            // 不补的话 insert_rows 会整批失败
+            let data: Vec<Vec<Option<String>>> = rows
+                .iter()
+                .map(|r| {
+                    let mut line: Vec<Option<String>> = r.iter().map(legacy_to_string).collect();
+                    while line.len() < ncols {
+                        line.push(None);
+                    }
+                    line.truncate(ncols);
+                    line
+                })
+                .collect();
+
+            let spec = model::TableSpec {
+                name: new_name.clone(),
+                comment: Some(format!("从旧版数据文件的「{want}」导入")),
+                columns: cols,
+            };
+
+            match state.db.lock() {
+                Ok(mut d) => {
+                    // 同名表先拦下：覆盖掉用户现有的表是不可接受的
+                    if d.get_table(&new_name).is_ok() {
+                        return err(
+                            id,
+                            format!("新库里已经有「{new_name}」这张表了 —— 换个名字，或者先把它删掉"),
+                        );
+                    }
+                    if let Err(e) = d.create_table(&spec) {
+                        return err(id, format!("建表失败：{e}"));
+                    }
+                    match d.insert_rows(&new_name, &t.columns, &data) {
+                        Ok(n) => {
+                            log_line(
+                                &state.data_dir,
+                                &format!("从旧库导入「{want}」→「{new_name}」：{n} 行"),
+                            );
+                            ok(
+                                id,
+                                serde_json::json!({ "imported": n, "table": new_name }),
+                            )
+                        }
+                        // 表建好了但数据没写进去 —— 必须说清是"建了空表"，
+                        // 否则用户看到一张空表会以为旧库是空的
+                        Err(e) => err(
+                            id,
+                            format!("表「{new_name}」建好了，但写数据失败：{e}（它现在是空的）"),
+                        ),
+                    }
+                }
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "app.legacyDb" => {
             let legacy = state.data_dir.join("data").join("main.db");
             let (found, size) = match std::fs::metadata(&legacy) {
@@ -2744,6 +2868,21 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 /// 与 `open_in_browser` 一样是**显式的用户动作**，且路径只允许来自导出目录
 /// （调用方已做前缀校验）。不引入任何网络行为。
 #[cfg(target_os = "windows")]
+/// 旧库的值 → 新库存的字符串。
+///
+/// 二进制在原库里少见（笔记和表格都是文本），但**不能因此丢掉整行** ——
+/// 丢行会让"导入了多少条"和旧库对不上，用户会以为数据丢了。
+/// 存个能看懂的占位，比悄悄少几行诚实。
+fn legacy_to_string(v: &legacy::LegacyValue) -> Option<String> {
+    match v {
+        legacy::LegacyValue::Null => None,
+        legacy::LegacyValue::Int(i) => Some(i.to_string()),
+        legacy::LegacyValue::Real(f) => Some(f.to_string()),
+        legacy::LegacyValue::Text(s) => Some(s.clone()),
+        legacy::LegacyValue::Blob(b) => Some(format!("<二进制 {} 字节>", b.len())),
+    }
+}
+
 fn reveal_in_explorer(path: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;

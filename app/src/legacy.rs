@@ -53,6 +53,10 @@ pub struct LegacyTable {
     pub root_page: u32,
     /// 从建表语句里解出来的列名
     pub columns: Vec<String>,
+    /// 与 columns 一一对应的**声明类型**（解不出来就是空串）。
+    /// 导入时按它决定新表的列类型 —— 金额列若一律按文本存，
+    /// "按分存"的语义就没了，之后排序和计算都会出问题。
+    pub column_types: Vec<String>,
 }
 
 pub struct LegacyDb {
@@ -170,12 +174,15 @@ impl LegacyDb {
                 Some(LegacyValue::Text(s)) => s.clone(),
                 _ => String::new(),
             };
-            let columns = parse_create_table_columns(&sql);
+            let decls = parse_column_decls(&sql);
+            let columns: Vec<String> = decls.iter().map(|(n, _)| n.clone()).collect();
+            let column_types: Vec<String> = decls.iter().map(|(_, t)| t.clone()).collect();
             out.push(LegacyTable {
                 name,
                 sql,
                 root_page,
                 columns,
+                column_types,
             });
         }
         Ok(out)
@@ -473,16 +480,34 @@ fn decode_utf16(raw: &[u8], little: bool) -> String {
     String::from_utf16_lossy(&u)
 }
 
-/// 从 `CREATE TABLE xxx (a, b, c)` 里把列名抠出来。
+/// SQLite 的声明类型 → DeskBase 的列类型。
 ///
-/// 为什么手写而不是引 SQL parser：我们要的只是列名，而且只面对**我们自己**
-/// 旧版建出来的表。手写一个"够用就好"的解析器，比引一个几百 KB 的解析器划算。
-/// 但**必须承认它不完整** —— 解不出来时返回空，界面就只显示原始建表语句。
-pub fn parse_create_table_columns(sql: &str) -> Vec<String> {
+/// 为什么不一律按文本存：金额列用文本会丢掉"按分存"的语义，
+/// 之后排序和计算都会出问题 —— 导入的意义是"接着用"，不是"存下来看看"。
+///
+/// 判断方式照着 SQLite 官方的类型亲和性规则来（类型名是宽松的，
+/// INT / INTEGER / VARCHAR(10) / BOOLEAN 都合法），所以按**关键字包含**判，
+/// 不要求完全匹配。
+pub fn map_decl_type(decl: &str) -> &'static str {
+    let d = decl.trim().to_uppercase();
+    if d.is_empty() {
+        return "text";
+    }
+    if d.contains("INT") {
+        return "integer";
+    }
+    if d.contains("REAL") || d.contains("FLOA") || d.contains("DOUB") {
+        return "real";
+    }
+    // CHAR / CLOB / TEXT / 其他一律按文本 —— 文本能装下任何东西，不会丢数据
+    "text"
+}
+
+/// 解出 (列名, 声明类型)。列名后面没写类型时给空串。
+pub fn parse_column_decls(sql: &str) -> Vec<(String, String)> {
     let Some(open) = sql.find('(') else {
         return Vec::new();
     };
-    // 从最后一个 ')' 往回找（列定义里可能有 '(10)' 这种）
     let Some(close) = sql.rfind(')') else {
         return Vec::new();
     };
@@ -504,23 +529,23 @@ pub fn parse_create_table_columns(sql: &str) -> Vec<String> {
                 cur.push(ch);
             }
             ',' if depth == 0 => {
-                push_col(&mut out, &cur);
+                push_decl(&mut out, &cur);
                 cur.clear();
             }
             _ => cur.push(ch),
         }
     }
-    push_col(&mut out, &cur);
+    push_decl(&mut out, &cur);
     out
 }
 
-fn push_col(out: &mut Vec<String>, raw: &str) {
+fn push_decl(out: &mut Vec<(String, String)>, raw: &str) {
     let s = raw.trim();
     if s.is_empty() {
         return;
     }
-    let first = s.split_whitespace().next().unwrap_or("");
-    // 去掉可能的引号
+    let mut it = s.split_whitespace();
+    let first = it.next().unwrap_or("");
     let name = first
         .trim_matches('"')
         .trim_matches('`')
@@ -530,7 +555,6 @@ fn push_col(out: &mut Vec<String>, raw: &str) {
     if name.is_empty() {
         return;
     }
-    // 表级约束（不是列）
     let upper = name.to_uppercase();
     if matches!(
         upper.as_str(),
@@ -538,9 +562,21 @@ fn push_col(out: &mut Vec<String>, raw: &str) {
     ) {
         return;
     }
-    out.push(name);
+    // 类型是第二个词（可能带括号，如 VARCHAR(10)）。没有就留空。
+    let ty = it.next().unwrap_or("").to_string();
+    out.push((name, ty));
 }
 
+/// 只取列名（内部复用 parse_column_decls）。**只给测试用** ——
+/// 生产代码走 tables()，它要的是"列名 + 类型"两样。
+/// 为什么不各写一套实现：两套解析迟早分叉，而这两件事本来就是同一份解析的两种读法。
+#[cfg(test)]
+pub fn parse_create_table_columns(sql: &str) -> Vec<String> {
+    parse_column_decls(sql)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +718,95 @@ mod tests {
         assert_eq!(rows[0][0], LegacyValue::Text("hello".to_string()));
         assert_eq!(rows[0][1], LegacyValue::Int(42));
         let _ = std::fs::remove_file(&d);
+    }
+
+    /// **整条导入链**：从旧库读出来 → 建新表 → 写行 → 读回确认。
+    ///
+    /// 为什么这个测试值得单写：上面那些只证明"解析对了"，
+    /// 而用户要的是"数据真的进了新库"。中间还有类型映射、行补齐、
+    /// 值转换三段胶水，任何一段错了，用户看到的都是"导进去是空的"。
+    #[test]
+    fn 导入链路_从旧库读出来能建新表写进去() {
+        use crate::model::{ColType, ColumnDef, Db, TableSpec};
+
+        let old = std::env::temp_dir().join("dkb_legacy_chain.db");
+        std::fs::write(&old, build_two_page_db()).unwrap();
+        let ldb = LegacyDb::open(&old).unwrap();
+        let ts = ldb.tables().unwrap();
+        let t = &ts[0];
+        let rows = ldb.rows(t, usize::MAX).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        // 类型映射：a 是 TEXT、b 是 INTEGER（不能让金额类的东西落到文本上）
+        assert_eq!(map_decl_type(&t.column_types[0]), "text");
+        assert_eq!(map_decl_type(&t.column_types[1]), "integer");
+
+        let dir = std::env::temp_dir().join("dkb_legacy_chain_new");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = Db::open(&dir).unwrap();
+
+        let columns: Vec<ColumnDef> = t
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let decl = t.column_types.get(i).map(|s| s.as_str()).unwrap_or("");
+                ColumnDef {
+                    name: n.clone(),
+                    ty: match map_decl_type(decl) {
+                        "integer" => ColType::Integer,
+                        "real" => ColType::Real,
+                        _ => ColType::Text,
+                    },
+                    not_null: false,
+                    default: None,
+                    primary_key: false,
+                    comment: None,
+                    shared: None,
+                    link: None,
+                    lookup: None,
+                    rollup: None,
+                }
+            })
+            .collect();
+        db.create_table(&TableSpec {
+            name: "导入的表".to_string(),
+            comment: None,
+            columns,
+        })
+        .unwrap();
+
+        let data: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| match v {
+                        LegacyValue::Null => None,
+                        LegacyValue::Int(i) => Some(i.to_string()),
+                        LegacyValue::Real(f) => Some(f.to_string()),
+                        LegacyValue::Text(s) => Some(s.clone()),
+                        LegacyValue::Blob(b) => Some(format!("<二进制 {} 字节>", b.len())),
+                    })
+                    .collect()
+            })
+            .collect();
+        let n = db.insert_rows("导入的表", &t.columns, &data).unwrap();
+        assert_eq!(n, 1, "应当写进 1 行");
+
+        // 读回来 —— 值真的进去了才算数
+        let p = db.page_rows("导入的表", None, false, None, 10).unwrap();
+        assert_eq!(p.rows.len(), 1, "新表里应当有 1 行");
+        // 首列是 rowid，所以值从下标 1 开始
+        assert_eq!(p.rows[0][1], serde_json::json!("hello"));
+        // b 列映射成了 integer，所以写进去的字符串 "42" 会被引擎规范化成数字 42。
+        // **这正是类型映射想要的效果** —— 旧库里的整数进来还是整数，
+        // 排序和计算能接着用；全按文本存的话，它们会退化成字符串比较
+        // （"10" < "9"）。这条断言是被测试逼着改对的，一开始我写成字符串了。
+        assert_eq!(p.rows[0][2], serde_json::json!(42));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&old);
     }
 
     #[test]
