@@ -1126,6 +1126,123 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // ---------- 工作台：一眼看到状态 ----------
+        //
+        // 「有几个库、多少条、占了多大、上次备份什么时候」—— 尤其最后一条：
+        // 它直接对应「不丢数据」这条承诺，看不见的备份等于没有备份。
+        "app.dashboard" => {
+            let (tables, notes, rows) = match state.db.lock() {
+                Ok(mut d) => {
+                    let ts = d.list_tables().unwrap_or_default();
+                    let rows: i64 = ts.iter().map(|t| t.row_estimate).sum();
+                    let n = db::count_notes(&mut d).unwrap_or(0);
+                    (ts.len(), n, rows)
+                }
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            let bytes = dir_bytes(&state.data_dir);
+            // 最近一次备份：拿 backups/ 里最新的那个文件的修改时间
+            let last_backup_ms = {
+                let bd = backup::backup_dir(&state.data_dir);
+                let mut best: Option<u64> = None;
+                if let Ok(rd) = std::fs::read_dir(&bd) {
+                    for e in rd.flatten() {
+                        let Ok(m) = e.metadata() else {
+                            continue;
+                        };
+                        if !m.is_file() {
+                            continue;
+                        }
+                        let t = m
+                            .modified()
+                            .ok()
+                            .and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        if best.map(|b| t > b).unwrap_or(true) {
+                            best = Some(t);
+                        }
+                    }
+                }
+                best
+            };
+            ok(
+                id,
+                serde_json::json!({
+                    "tables": tables,
+                    "notes": notes,
+                    "rows": rows,
+                    "data_bytes": bytes,
+                    "last_backup_ms": last_backup_ms,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+            )
+        }
+
+        // ---------- 全局搜索 ----------
+        //
+        // 功能矩阵里它标的是 **MVP**（"缺了它，产品无法成立"），而代码里此前 0 处实现。
+        // 先覆盖两处最常被找的东西：表名（含注释）与笔记（标题 + 摘要）。
+        // **刻意不扫表里的每一行** —— 那是全表遍历，库一大就会卡住界面；
+        // 真需要"找某一格内容"时再单做带索引的检索。
+        "app.search" => {
+            let q = req
+                .args
+                .get("q")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if q.is_empty() {
+                return ok(id, serde_json::json!({ "tables": [], "notes": [] }));
+            }
+            let limit = req
+                .args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
+            let ql = q.to_lowercase();
+            let mut hit_tables = Vec::new();
+            let mut hit_notes = Vec::new();
+            match state.db.lock() {
+                Ok(mut d) => {
+                    if let Ok(ts) = d.list_tables() {
+                        for t in ts {
+                            let cm = t.comment.clone().unwrap_or_default();
+                            if t.name.to_lowercase().contains(&ql) || cm.to_lowercase().contains(&ql) {
+                                hit_tables.push(serde_json::json!({
+                                    "name": t.name,
+                                    "comment": t.comment,
+                                    "rows": t.row_estimate,
+                                }));
+                            }
+                        }
+                    }
+                    if let Ok(ns) = db::list_notes(&mut d) {
+                        for n in ns {
+                            if n.title.to_lowercase().contains(&ql)
+                                || n.excerpt.to_lowercase().contains(&ql)
+                            {
+                                hit_notes.push(serde_json::json!({
+                                    "id": n.id,
+                                    "title": n.title,
+                                    "excerpt": n.excerpt,
+                                    "updated_at": n.updated_at,
+                                }));
+                            }
+                        }
+                    }
+                }
+                Err(_) => return err(id, "数据库锁失败"),
+            }
+            hit_tables.truncate(limit);
+            hit_notes.truncate(limit);
+            ok(
+                id,
+                serde_json::json!({ "tables": hit_tables, "notes": hit_notes })
+            )
+        }
+
         "app.diag" => {
             let a = &req.args;
             let b = |k: &str| a.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2458,6 +2575,68 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
         }
 
+        // ---------- 导出网页（可打印成 PDF）----------
+        //
+        // 为什么是 HTML 而不是直接生成 PDF：真做 PDF 要引排版/字体嵌入的依赖，
+        // 体积与复杂度都不划算；而**用户真正的目的**是"能打印、能发给别人看"，
+        // 一个打印友好的 HTML 在浏览器里 Ctrl+P 就是 PDF —— 目的达到了，代价小得多。
+        "note.exportHtml" => {
+            let Some(nid) = req.args.get("id").and_then(|v| v.as_str()) else {
+                return err(id, "缺少参数 id");
+            };
+            let note = match state.db.lock() {
+                Ok(d) => match db::get_note(&d, nid) {
+                    Ok(Some(n)) => n,
+                    Ok(None) => return err(id, "找不到这篇笔记"),
+                    Err(e) => return err(id, e),
+                },
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            let safe: String = note
+                .title
+                .chars()
+                .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
+                .collect();
+            let name = if safe.trim().is_empty() {
+                "未命名".to_string()
+            } else {
+                safe.trim().to_string()
+            };
+            let Some(dst) = rfd::FileDialog::new()
+                .set_title("导出为网页（在浏览器里 Ctrl+P 即可存成 PDF）")
+                .set_file_name(format!("{name}.html"))
+                .add_filter("网页", &["html", "htm"])
+                .save_file()
+            else {
+                return ok(id, serde_json::json!({ "cancelled": true }));
+            };
+            let t = html_escape(note.title.trim());
+            let c = html_escape(&note.content);
+            let mut h = String::new();
+            h.push_str("<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n");
+            h.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+            h.push_str(&format!("<title>{}</title>\n", t));
+            h.push_str("<style>\n");
+            // 打印友好：白底黑字、正文用等宽感良好的系统字体、@media print 去掉不必要的装饰
+            h.push_str("body{max-width:42em;margin:2.5em auto;padding:0 1.2em;color:#1a1a1a;background:#fff;\n");
+            h.push_str("font-family:system-ui,-apple-system,\"Segoe UI\",\"Noto Sans CJK SC\",sans-serif;line-height:1.75}\n");
+            h.push_str("h1{font-size:1.6em;margin:0 0 .4em}\n");
+            h.push_str("main{white-space:pre-wrap;word-break:break-word}\n");
+            h.push_str("footer{margin-top:2.5em;padding-top:.8em;border-top:1px solid #ddd;color:#888;font-size:.85em}\n");
+            h.push_str("@media print{body{margin:0;max-width:none}footer{border-top:none}}\n");
+            h.push_str("</style>\n</head>\n<body>\n");
+            h.push_str(&format!("<h1>{}</h1>\n<main>{}</main>\n", if t.is_empty() { "未命名" } else { &t }, c));
+            // 页脚只署名，不写时间 —— 标准库里没有现成的日期格式化（不引 chrono），
+            h.push_str("</body>\n</html>\n");
+            match std::fs::write(&dst, h.as_bytes()) {
+                Ok(()) => {
+                    log_line(&state.data_dir, &format!("导出笔记为网页：{}", dst.display()));
+                    ok(id, serde_json::json!({ "path": dst.to_string_lossy() }))
+                }
+                Err(e) => err(id, format!("写文件失败：{e}")),
+            }
+        }
+
         "note.delete" => {
             let note_id = req.args.get("id").and_then(|v| v.as_str()).unwrap_or("");
             if note_id.is_empty() {
@@ -2873,6 +3052,46 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 /// 二进制在原库里少见（笔记和表格都是文本），但**不能因此丢掉整行** ——
 /// 丢行会让"导入了多少条"和旧库对不上，用户会以为数据丢了。
 /// 存个能看懂的占位，比悄悄少几行诚实。
+/// 递归算一个目录占多少字节。仪表盘用（"占了多大"）。
+/// 目录很深或文件很多时会有点慢，所以**只统计、不用它做任何判断**，
+/// 且界面上标成"约"。
+/// HTML 转义。导出网页时必须做 —— 笔记里写个 `<script>` 就会把导出的页面
+/// 变成可执行的东西（**这也是一种注入**），不能只顾着"能显示就行"。
+fn html_escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '&' => o.push_str("&amp;"),
+            '"' => o.push_str("&quot;"),
+            '\'' => o.push_str("&#39;"),
+            _ => o.push(c),
+        }
+    }
+    o
+}
+
+
+fn dir_bytes(p: &std::path::Path) -> u64 {
+    let mut s = 0u64;
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    for e in rd.flatten() {
+        let ep = e.path();
+        let Ok(m) = std::fs::metadata(&ep) else {
+            continue;
+        };
+        if m.is_file() {
+            s += m.len();
+        } else if m.is_dir() {
+            s += dir_bytes(&ep);
+        }
+    }
+    s
+}
+
 fn legacy_to_string(v: &legacy::LegacyValue) -> Option<String> {
     match v {
         legacy::LegacyValue::Null => None,

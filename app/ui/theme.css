@@ -1163,6 +1163,61 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   text-overflow: ellipsis;
 }
 
+/* 工作台（首页）：状态与搜索结果。
+   状态那块要能"一眼扫过去"，所以键值分行对齐、数字用等宽感一点的排版。 */
+.wb-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+}
+.wb-stat {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 120px;
+}
+.wb-stat .k {
+  color: var(--ink-3);
+  font-size: var(--fs-aux);
+}
+.wb-stat .v {
+  color: var(--ink-1);
+  font-weight: 600;
+}
+
+.wb-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--sp-2);
+}
+.wb-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: var(--sp-2);
+  border: var(--line-w) solid transparent;
+  border-radius: var(--radius-md, 8px);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.wb-hit:hover {
+  border-color: var(--line);
+  background: var(--card);
+}
+.wb-hit .t {
+  color: var(--ink-1);
+}
+.wb-hit .s {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-nav {
   position: sticky;
   top: 0;

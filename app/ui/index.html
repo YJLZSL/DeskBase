@@ -104,14 +104,24 @@
     <div class="content" id="content">
 
       <!-- ---------- 工具（原「工作台」；2026-09-22 按 ADR-0023 改名） ---------- -->
+      <!-- ---------- 工作台（首页）----------
+           以前这里只有一句"尚未实现"。功能矩阵里把「全局搜索」标成 MVP
+           （"缺了它，产品无法成立"），所以这一屏先把搜索和状态补上。 -->
       <section class="view" data-view="workbench">
         <div class="stack">
           <div class="card">
-            <h3>说明</h3>
-            <p class="muted">
-              工作台尚未实现。当前版本打通了「外壳 + 存储 + 界面 + 字体 + 主题与动效」这条链路，
-              用来验证架构可行。完整规划见内部调研资料（未随仓库分发）。
+            <h3>搜索</h3>
+            <input class="input" id="wb-search" type="search" autocomplete="off"
+                   placeholder="搜表名或笔记…" aria-label="全局搜索" />
+            <p class="hint">
+              现在搜的是**表名（含说明）与笔记的标题和开头**。刻意不扫表里每一行 ——
+              那是全表遍历，库一大界面就卡住；真要"找某一格内容"得先做索引。
             </p>
+            <div id="wb-results" class="wb-results"></div>
+          </div>
+          <div class="card">
+            <h3>状态</h3>
+            <div id="wb-stats" class="wb-stats"></div>
           </div>
         </div>
       </section>
@@ -141,6 +151,10 @@
                 <button class="btn btn-ghost db-mini" id="btn-note-export" type="button"
                         title="把这篇导出成 .md 文件（Markdown，任何编辑器都能打开）">
                   导出 .md
+                </button>
+                <button class="btn btn-ghost db-mini" id="btn-note-export-html" type="button"
+                        title="导出成网页：浏览器打开后 Ctrl+P（打印）即可存成 PDF —— 不用额外装东西">
+                  导出网页
                 </button>
               </div>
             </div>

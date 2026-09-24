@@ -80,7 +80,36 @@
     step("IPC 桥已就绪", bridged, bridged ? "" : "typeof __deskbase.call = " + typeof (window.__deskbase && window.__deskbase.call));
     if (!bridged) throw new Error("桥没就绪，后面的检查无从谈起");
 
-    // ---------- 1. 导航：真实点击每个标签页 ----------
+    // ---------- 工作台（首页）：全局搜索 + 状态 ----------
+    // 功能矩阵把「全局搜索」标成 MVP（"缺了它，产品无法成立"），而此前 0 处实现。
+    // 这里盖的是接线与"确实去搜了"，不断言一定搜得到（库里可能没东西）。
+    {
+      const $q = $("#wb-search");
+      step("工作台有全局搜索框", !!$q);
+      const $st = $("#wb-stats");
+      step("工作台有状态区", !!$st);
+      if ($st) {
+        // 状态不是装饰：**"上次备份什么时候"对应「不丢数据」的承诺** ——
+        // 没备份过也要说出来，不能留空让人以为备份了
+        await waitFor(() => ($st.textContent || "").trim().length > 0, 4000);
+        const txt = ($st.textContent || "").trim();
+        step("状态真的读出来了（不是空壳）", txt.length > 0, txt.slice(0, 60));
+        step("状态里讲了备份情况", /备份/.test(txt), txt.slice(0, 80));
+      }
+      if ($q) {
+        $q.value = "烟测";
+        $q.dispatchEvent(new Event("input", { bubbles: true }));
+        // 搜索是防抖的（180ms），等它跑完
+        const did = await waitFor(() => {
+          const r = document.getElementById("wb-results");
+          return !!(r && (r.children.length > 0));
+        }, 4000);
+        step("输入关键词后确实去搜了（有结果或明说没找到）", did,
+          ((document.getElementById("wb-results") || {}).textContent || "").slice(0, 40));
+      }
+    }
+
+    // ---------- 导航：真实点击每个标签页 ----------
     for (const t of ["workbench", "notes", "database", "settings"]) {
       const btn = document.querySelector('.nav-item[data-target="' + t + '"]');
       if (!btn) {

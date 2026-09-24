@@ -357,6 +357,23 @@
     });
   }
 
+  /**
+   * 建元素的小助手。**和 db.js 里那份是同款** —— 之前 app.js 里只有 `$()`，
+   * 而工作台那段代码直接用了 `el(...)`：语法检查过得去、**运行到那一行才炸**。
+   * 这类问题只能靠"真跑一遍"发现，所以顺手把它补齐并留个注释。
+   */
+  function el(tag, attrs, text) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        if (attrs[k] == null) continue;
+        node.setAttribute(k, attrs[k]);
+      }
+    }
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
   function showView(name, opts) {
     const from = VIEW_ORDER.indexOf(currentView);
     const to = VIEW_ORDER.indexOf(name);
@@ -787,6 +804,23 @@
     dirty = true;
     await flushSave();
     toast("已套用「" + t.name + "」");
+  });
+
+  // 导出网页（可打印成 PDF）。
+  // 真生成 PDF 要引排版与字体嵌入的依赖，不划算；而用户要的是"能打印、能发给别人"，
+  // 一个打印友好的 HTML 在浏览器里 Ctrl+P 就是 PDF —— 目的一样，代价小得多。
+  $("#btn-note-export-html").addEventListener("click", async () => {
+    if (!currentId) {
+      toast("先选中一条笔记", "error");
+      return;
+    }
+    try {
+      const r = await call("note.exportHtml", { id: currentId });
+      if (!r || r.cancelled) return;
+      toast("已导出网页：" + r.path + "（浏览器打开后 Ctrl+P 可存成 PDF）");
+    } catch (e) {
+      toast("导出失败：" + ((e && e.message) || e), "error");
+    }
   });
 
   $("#btn-note-export").addEventListener("click", async () => {
@@ -1437,6 +1471,134 @@
       // 检测本身失败不影响使用
     }
   }
+  // ---------- 工作台：搜索 + 状态 ----------
+  //
+  // 功能矩阵把「全局搜索」标成 MVP，而代码里此前 0 处实现 —— 这一屏补的就是它。
+  // 状态那块不是装饰：**"上次备份什么时候"直接对应「不丢数据」这条承诺**，
+  // 看不见的备份等于没有备份。
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < u.length - 1) {
+      v /= 1024;
+      i += 1;
+    }
+    return (i === 0 ? v : v.toFixed(1)) + " " + u[i];
+  }
+
+  function fmtWhen(ms) {
+    if (!ms) return null;
+    const d = new Date(Number(ms));
+    const days = Math.floor((Date.now() - Number(ms)) / 86400000);
+    if (days === 0) return "今天 " + d.toLocaleTimeString("zh-CN", { hour12: false });
+    if (days === 1) return "昨天";
+    return days + " 天前";
+  }
+
+  async function loadDashboard() {
+    const box = $("#wb-stats");
+    if (!box) return;
+    let d;
+    try {
+      d = await call("app.dashboard", {});
+    } catch (e) {
+      box.innerHTML = "";
+      box.appendChild(el("p", { class: "hint" }, "读不到状态：" + (e && e.message)));
+      return;
+    }
+    const items = [
+      ["表格", d.tables + " 张"],
+      ["记录", (d.rows || 0) + " 行"],
+      ["笔记", d.notes + " 篇"],
+      ["占用", fmtBytes(d.data_bytes)],
+    ];
+    // 备份这一条单独拎出来 —— 没备份过要明说，不能留空让人以为备份了
+    const when = fmtWhen(d.last_backup_ms);
+    items.push(["上次备份", when || "**还没备份过**"]);
+    box.innerHTML = "";
+    items.forEach(([k, v]) => {
+      const row = document.createElement("div");
+      row.className = "wb-stat";
+      const kk = document.createElement("span");
+      kk.className = "k";
+      kk.textContent = k;
+      const vv = document.createElement("span");
+      vv.className = "v";
+      vv.textContent = v;
+      row.append(kk, vv);
+      box.appendChild(row);
+    });
+  }
+
+  async function runSearch(q) {
+    const box = $("#wb-results");
+    if (!box) return;
+    const kw = (q || "").trim();
+    box.innerHTML = "";
+    if (!kw) return;
+    let r;
+    try {
+      r = await call("app.search", { q: kw, limit: 20 });
+    } catch (e) {
+      box.appendChild(el("p", { class: "hint" }, "搜索失败：" + (e && e.message)));
+      return;
+    }
+    const ts = (r && r.tables) || [];
+    const ns = (r && r.notes) || [];
+    if (!ts.length && !ns.length) {
+      box.appendChild(el("p", { class: "hint" }, "没找到「" + kw + "」"));
+      return;
+    }
+    ts.forEach((t) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "wb-hit";
+      const n = document.createElement("span");
+      n.className = "t";
+      n.textContent = t.name;
+      const s = document.createElement("span");
+      s.className = "s";
+      s.textContent = "表格 · " + (t.rows || 0) + " 行" + (t.comment ? " · " + t.comment : "");
+      b.append(n, s);
+      b.addEventListener("click", () => {
+        showView("database");
+        if (window.DeskBaseDb && typeof window.DeskBaseDb.openTable === "function") {
+          window.DeskBaseDb.openTable(t.name);
+        }
+      });
+      box.appendChild(b);
+    });
+    ns.forEach((n) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "wb-hit";
+      const t = document.createElement("span");
+      t.className = "t";
+      t.textContent = n.title || "（无标题）";
+      const s = document.createElement("span");
+      s.className = "s";
+      s.textContent = "笔记 · " + (n.excerpt || "");
+      b.append(t, s);
+      b.addEventListener("click", () => {
+        showView("notes");
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function wireWorkbench() {
+    const inp = $("#wb-search");
+    if (!inp) return;
+    let timer = null;
+    inp.addEventListener("input", () => {
+      if (timer) clearTimeout(timer);
+      // 稍微等一下再搜：每敲一个字都发一次请求没必要，也让后端少做点无用功
+      timer = setTimeout(() => runSearch(inp.value), 180);
+    });
+  }
+
   async function boot() {
     let lastCmdCount = 0;
     // 主题（默认宣纸；D-016 决定不让"跟随系统"当默认，保证用户第一眼看到宣纸）
@@ -1691,6 +1853,8 @@
     checkLegacyDb();
     loadInstallState();
     buildSettingsNav();
+    wireWorkbench();
+    loadDashboard();
   }
 
   // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）
