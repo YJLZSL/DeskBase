@@ -1129,11 +1129,57 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
 
 /* 笔记编辑区右上角那组动作（套模板 / 导出）。
    放在标题输入框同一行里 —— 它们是"对这篇文档做的事"，不该挤到正文下面去。 */
+/* 设置页分区导航。
+   8 张卡片只能一路滚 —— 想改"外观"得先越过一整屏 AI 设置。
+   吸顶是为了滚到中途也能直接跳走，而不是先滚回顶部。 */
+.settings-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0 var(--sp-3);
+  background: var(--bg);
+}
+.settings-nav-item {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-glide),
+    border-color var(--dur-fast) var(--ease-glide);
+}
+.settings-nav-item:hover {
+  color: var(--ink-1);
+  border-color: var(--ink-3);
+}
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .editor-actions {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  /* 这组按钮不收缩：文字挤成一团比换行难看得多 */
   flex: none;
+}
+
+/* 标题 + 动作挤不下时**换行**，别硬撑。
+   走查体实测：800 宽下这一行会溢出 33px（动作按钮加进来之后才有的）——
+   flex 子项默认 min-width: auto，标题输入框不肯让位，于是整行把容器顶破。 */
+.editor-head {
+  flex-wrap: wrap;
+  row-gap: var(--sp-2);
+}
+.editor-head .title-input {
+  min-width: 0;
+  flex: 1 1 12ch;
 }
 .editor-actions .select-sm {
   width: auto;

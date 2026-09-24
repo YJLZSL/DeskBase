@@ -32,8 +32,18 @@
 
 /* ---------- 左栏：库表列表 ---------- */
 .db-side {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* 不要在这里加 overflow-x: hidden —— 试过，它把空态正文裁成"…"，
+     信息直接丢了，比溢出还糟。真正要做的是让内容**放得下**，见下面的宽度约束。 */
+  min-width: 0;
+  /* 用 flex 而不是 grid-template-rows。
+     原来写的是 `grid-template-rows: auto auto minmax(0, 1fr) auto`（4 行），
+     而侧栏实际有 **10 个**子元素：8 个按钮 + 列表 + 页脚。
+     行数对不上，那个 1fr 就落到了第 3 个子元素——"从 Excel 导入"按钮上，
+     把它拉长去当留白用。空态引导块换行变高之后留白被挤掉，
+     几个按钮的间距骤然缩小，看着像坏掉了。
+     不逐行点名，就没有"行数对不上"这回事。 */
+  display: flex;
+  flex-direction: column;
   gap: var(--sp-2);
   min-height: 0;
   padding: var(--sp-3);
@@ -41,6 +51,29 @@
   border: var(--line-w) solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-1);
+}
+
+/* 逐层按住宽度，让内容**放得下**（而不是裁掉）。
+   实测踩过：空态引导块被塞进 .db-empty 之后整块宽到 326px，而侧栏只有 236 ——
+   正文直接画到右边的表格区上。
+   根子是 grid / flex 子项默认 min-width: auto：它不肯收缩到"内容最小宽度"以下，
+   而中文虽然能逐字断行，中间没有断点算得出"最小宽度"时就会被当成一整块。
+   每一层都显式允许收缩，宽度才会真的传到最里面那行字上。 */
+.db-side > *,
+.db-table-list > *,
+.db-empty,
+.db-onboard,
+.db-onboard-steps {
+  min-width: 0;
+  max-width: 100%;
+}
+.db-table-list {
+  width: 100%;
+}
+.db-onboard-steps li {
+  /* 中文长句在这里必须能断 */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .db-side-head {
@@ -66,6 +99,8 @@
 }
 
 .db-table-list {
+  /* 侧栏里唯一"吃剩余空间"的那一块 */
+  flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
   display: flex;
@@ -81,6 +116,10 @@
   padding: var(--sp-3) var(--sp-2);
   line-height: var(--lh-body);
   text-align: center;
+  /* 它是 .db-table-list（flex）的子项，而 flex 子项默认 min-width: auto —— 
+     不肯收缩到内容宽度以下。空态里被塞进一个三步列表之后，正文就把窄窄的
+     侧栏顶破了（实测越出侧栏约 70px，压在右边的表格区上）。 */
+  min-width: 0;
 }
 
 .db-table-item {
@@ -369,13 +408,24 @@
   }
   .db-side {
     position: absolute;
-    inset: 0;
+    /* 不用 inset: 0 —— 那样 left 与 right 同时为 0，宽度会被"拉满容器"，
+       于是"关起来"时只移出了自身宽度的一部分，右边缘还露在屏幕里。
+       实测过：640 宽下露出 74px，用户看到半截按钮，比彻底看不见更糟。 */
+    top: 0;
+    bottom: 0;
+    left: 0;
     z-index: 20;
     width: min(300px, 84vw);
     background: var(--card);
     box-shadow: var(--shadow-2);
-    transform: translateX(-110%);
+    /* 多移 12px：把阴影也带出去，免得留一条灰边 */
+    transform: translateX(calc(-100% - 12px));
     transition: transform var(--dur-normal) var(--ease-glide);
+    /* 抽屉本身移出屏幕之后，**里面比容器宽的东西仍会漏出来**。
+       实测：抽屉的 rect 已经是 -300..0（干净地出去了），但它的头部伸到 +92 ——
+       于是屏幕左边还能看见半截"刷新"按钮。容器裁掉才是根治：
+       移出就该整块不可见，别指望每个子元素都自觉。 */
+    overflow-x: hidden;
   }
   /* 窄屏下由 db.js 挂 data-open 控制；浮在内容上方而不是把网格挤扁 */
   .db-side[data-open="true"] {

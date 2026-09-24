@@ -149,6 +149,75 @@ const AUDIT_JS = `(() => {
     if (r.right > vw + 2 && cs.position !== "fixed") {
       issues.push({ type: "out-of-viewport", sel: sel(el), detail: Math.round(r.left) + "…" + Math.round(r.right) + " / vw " + vw });
     }
+    // 横跨左边界 = **一部分露在屏外**。抽屉类元素（窄屏隐藏的左栏）本该
+    // 整块移出去，只露一条边说明「没关干净」—— 用户看到的是半截内容，
+    // 比彻底看不见更糟。原来只查右边界超出，抓不到这一种。
+    // 横跨左边界 = 可能有内容露在屏外。
+    //
+    // ⚠️ 判据不能只看几何位置：getBoundingClientRect 返回的是**布局位置**，
+    // 祖先设了 overflow: hidden 时它照样往外报。实测踩过 —— 抽屉已经
+    // 干净地移出屏幕、也加了 overflow-x: hidden，元素几何却仍是 -287…92，
+    // 于是 40 条误报把真问题埋了。
+    // 真正的判据是"那一块到底能不能被用户碰到"：拿可见部分的中点去问
+    // elementFromPoint，点得到才算真露出来。
+    if (r.left < -2 && r.right > 2 && cs.position !== "fixed") {
+      const px = Math.min(r.right - 4, vw - 1);
+      const py = Math.max(0, Math.min(r.top + r.height / 2, window.innerHeight - 1));
+      let reallyVisible = false;
+      if (px > 0 && py >= 0) {
+        const hit = document.elementFromPoint(px, py);
+        reallyVisible = !!hit && (hit === el || el.contains(hit) || hit.contains(el));
+      }
+      if (reallyVisible) {
+        issues.push({
+          type: "partially-offscreen",
+          sel: sel(el),
+          detail: Math.round(r.left) + "…" + Math.round(r.right) + "（露出 " + Math.round(r.right) + "px）",
+        });
+      }
+    }
+    // 窄屏下的**可用性**：目标太小就点不准。
+    // 布局溢出类的问题上面两条能抓，但「按钮被压成 8px 宽」不算溢出 ——
+    // 它老老实实待在视口里，只是没法用。
+    if (vw < 720 && el.matches("button, input, select, textarea, a[href]")) {
+      // 被 <label> 包着的 checkbox / radio：真正能点的是整个 label，
+      // 13×13 是浏览器的方框尺寸，不是点击目标。按 label 的量。
+      const box = el.closest("label") || el;
+      const br = box.getBoundingClientRect();
+      const tiny = br.width < 24 || br.height < 20;
+      if (tiny) {
+        issues.push({
+          type: "target-too-small",
+          sel: sel(el),
+          detail: Math.round(br.width) + "×" + Math.round(br.height) + "  " + (el.textContent || "").trim().slice(0, 14),
+        });
+      }
+    }
+    // 文字**画到盒子外面**（内容溢出）。
+    //
+    // 这一种 rect 查不出来：元素盒子老老实实待在容器里，是里面的字越界了 ——
+    // 实测踩过：侧栏里的引导正文横向捅出去 70px、压在右边的表格区上，
+    // 而所有元素的 rect 都规规矩矩。overflow: visible 时 scrollWidth 也不反映，
+    // 得用 Range 量**文字实际占了多宽**。
+    if (el.children.length === 0) {
+      const tx = (el.textContent || "").trim();
+      if (tx.length > 1) {
+        try {
+          const rg = document.createRange();
+          rg.selectNodeContents(el);
+          const rr = rg.getBoundingClientRect();
+          if (rr.width > 0 && rr.right > r.right + 3) {
+            issues.push({
+              type: "text-overflow",
+              sel: sel(el),
+              detail: tx.slice(0, 18) + "… 越界 " + Math.round(rr.right - r.right) + "px",
+            });
+          }
+        } catch (_) {
+          /* Range 不可用就算了 */
+        }
+      }
+    }
     if (el.children.length === 0) {
       const tx = (el.textContent || "").trim();
       if (tx && el.scrollWidth > el.clientWidth + 2 && cs.overflow === "hidden" && cs.textOverflow !== "ellipsis") {
@@ -304,6 +373,33 @@ const AUDIT_JS = `(() => {
         });
         for (const t of PAGES) {
           const ok = await navTo(t);
+          // 等这一页**真的活过来**再量。
+          //
+          // 踩过两次坑，都是"量了个寂寞"却报 0 处问题：
+          //  1. 视图刚切、还没激活（.view 非 active 时是 display: none）——
+          //     量到的每个元素 rect 都是 0，体检自然全过；
+          //  2. 表格页的列表是懒加载的（切过去才调 IPC 拉表），空态引导块
+          //     还要等 MutationObserver 回调，固定等 320ms 仍然拍不到。
+          // 所以：先等视图可见，再等异步内容落地。
+          await waitPage(
+            "(function(){var v=document.querySelector('.view[data-view=\"' + t + '\"]');" +
+              "return !!v && getComputedStyle(v).display !== 'none'})()",
+            1200
+          ).catch(function () {});
+          // 只有表格页的列表是懒加载 + 异步插引导块的，别的页不用等
+          if (t === "database") {
+            await waitPage(
+              "(function(){var l=document.getElementById('db-table-list');" +
+                "return !!l && l.children.length > 0})()",
+              1500
+            ).catch(function () {});
+          }
+          await sleep(100);
+          try {
+            await cdp.eval(
+              "new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(true)})})})"
+            );
+          } catch (_) {}
           if (!ok) continue;
           await sleep(250);
           let audit = null;

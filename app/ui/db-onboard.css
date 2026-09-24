@@ -6,8 +6,14 @@
    不给空态堆装饰。样式跟随主题 token，不写死颜色。
    ============================================================ */
 
+/* ⚠️ 这个块是被**塞进 .db-empty 里面**的（见 db-onboard.js 的 sync()），
+   而 .db-empty 是给"一行提示文字"设计的：text-align: center + 为单行留的边距。
+   塞一个三步列表进去，整块就居中了 —— 实测里正文被推到容器右半边、
+   甚至越出侧栏，看着像排版坏了。
+   这里显式改回左对齐，并把为单行设计的边距压成适合列表的。 */
 .db-onboard {
-  padding: var(--sp-1) var(--sp-1) var(--sp-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-3);
+  text-align: left;
 }
 
 .db-onboard-lead {
@@ -15,18 +21,24 @@
   color: var(--ink-2);
   font-size: var(--fs-sub);
   line-height: var(--lh-body);
+  text-align: left;
 }
 
 .db-onboard-steps {
   margin: 0 0 var(--sp-3);
-  padding-left: 1.35em;
+  padding-left: 1.6em;
   color: var(--ink-3);
   font-size: var(--fs-aux);
   line-height: var(--lh-body);
+  text-align: left;
 }
 
 .db-onboard-steps li {
   margin-bottom: 2px;
+  /* 侧栏只有 236px，中文长句必须能断。万一有人往里粘 URL 或长英文串，
+     这两条保证它断而不是横着捅出去。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* 按钮撑满窄栏：空态里它是唯一可点的东西，别让人去找它 */

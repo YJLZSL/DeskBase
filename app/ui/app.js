@@ -803,6 +803,39 @@
     }
   });
 
+  // ---------- 设置页分区导航 ----------
+  //
+  // 设置页有 8 张卡片。以前只能一路滚 —— 想改"外观"得先越过一整屏 AI 设置，
+  // 想找"教程"更是要滚到底（教程在第 9 张卡里）。
+  //
+  // 锚点从卡片标题**自动生成**，不手写清单：手写的话，将来加一张卡片就得
+  // 记得改两处，迟早对不上。自动生成还有个好处 —— 卡片改名，导航跟着改。
+  function buildSettingsNav() {
+    const nav = $("#settings-nav");
+    const view = document.querySelector('.view[data-view="settings"]');
+    if (!nav || !view) return;
+    const cards = [...view.querySelectorAll(".card")].filter((c) => c.querySelector("h3"));
+    nav.textContent = "";
+    // 卡片太少就不必给导航（比卡片本身还占地方）
+    nav.hidden = cards.length < 4;
+    if (nav.hidden) return;
+    cards.forEach((card, i) => {
+      const h = card.querySelector("h3");
+      const id = card.id || "set-card-" + i;
+      card.id = id;
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "settings-nav-item";
+      b.textContent = h.textContent.trim();
+      b.addEventListener("click", () => {
+        // 吸顶导航会挡住卡片标题，所以往上留一点余量
+        const top = card.getBoundingClientRect().top + view.scrollTop - 56;
+        view.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      });
+      nav.appendChild(b);
+    });
+  }
+
   // ---------- 安装到本机 ----------
   //
   // 便携版与安装版**共存于同一份 exe**：不点安装就一个字节都不写注册表。
@@ -1573,6 +1606,7 @@
     selfCheck(lastCmdCount);
     checkLegacyDb();
     loadInstallState();
+    buildSettingsNav();
   }
 
   // 关闭前尽力保存（窗口关闭不保证能走完，主要靠输入时的自动保存）

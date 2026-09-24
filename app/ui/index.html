@@ -208,6 +208,9 @@
 
       <!-- ---------- 设置 ---------- -->
       <section class="view" data-view="settings">
+        <!-- 分区导航由 app.js 从卡片标题自动生成（见 buildSettingsNav）——
+             手写清单的话，将来加一张卡片就得记得改两处，迟早对不上。 -->
+        <nav class="settings-nav" id="settings-nav" aria-label="设置分区"></nav>
         <div class="stack">
           <div class="card" id="card-ai">
             <h3>AI 表格</h3>

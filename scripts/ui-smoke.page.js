@@ -486,6 +486,27 @@
     //
     // **故意不点「安装到本机」**：那会真的往 %LOCALAPPDATA% 和注册表里写东西。
     // 测试必须可重复、不该改系统状态 —— 真实安装是人工验收的事。
+    // ---------- 设置页分区导航 ----------
+    const $setNav = $("#settings-nav");
+    step("设置页有分区导航", !!$setNav && !$setNav.hidden);
+    if ($setNav && !$setNav.hidden) {
+      const items = [...$setNav.querySelectorAll(".settings-nav-item")];
+      step("分区导航从卡片标题自动生成（≥4 项）", items.length >= 4, items.length + " 项：" + items.map((b) => b.textContent).join("/"));
+      // 点最后一项，真的滚下去了才算数 —— 只断言"有按钮"证明不了它能用
+      const view = document.querySelector('.view[data-view="settings"]');
+      if (items.length && view) {
+        // 先回顶部，让"往下滚"这个方向是确定的 —— 前面的步骤可能已经把页面
+        // 滚到底了（实测就踩到：before=4778，点"教程"反而往上滚，断言随即变红）
+        view.scrollTop = 0;
+        await waitFor(() => view.scrollTop === 0, 1000);
+        const before = view.scrollTop;
+        items[items.length - 1].click();
+        const scrolled = await waitFor(() => view.scrollTop > before + 100, 4000);
+        step("点最后一个分区真的滚过去了", scrolled, before + " → " + Math.round(view.scrollTop));
+        view.scrollTop = 0;
+      }
+    }
+
     const $installCard = $("#card-install");
     step("设置页有「安装到本机」卡片", !!$installCard);
     const $instState = $("#install-state");
