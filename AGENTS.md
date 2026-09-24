@@ -101,7 +101,13 @@ DeskBase/
 | **端到端验收**（真实数据走完整导入链路，28 步） | `node scripts/build.cjs --e2e` 或 `node tests/e2e-import.cjs <表格文件>` |
 | **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
 | **崩溃恢复端到端**（强杀→重启验尸→复检，三阶段） | `node tests/crash-recovery.cjs` |
-| **界面自动走查**（截图 + 文案导出 + 布局体检，出 HTML 报告） | `node tests/ui-walkthrough.cjs` |
+| **界面自动走查**（截图 + 文案导出 + 布局体检 + **无障碍体检**，出 HTML 报告） | `node tests/ui-walkthrough.cjs` |
+| **真实输入测试**（走 CDP `Input` 域的**真鼠标 + 真键盘**） | `node tests/ui-input.cjs [exe]` |
+
+> 三套界面测试的分工别搞混：`ui-smoke` 用页面内 `element.click()`（验逻辑接线）；
+> `ui-walkthrough` 不点，切页面 + 截图（验观感与静态体检）；
+> **`ui-input` 才走真实输入** —— 带屏幕坐标、过命中测试、会移焦点，和真人操作等价。
+> 只有它能验"键盘能不能用""点击有没有被挡住"这类事。
 | 门禁五件套 | `check-motion` · `check-contrast` · `check-wiring` · `check-size` · **`check-docs`**（文档与实现是否一致）|
 | 打包（zip + SHA-256 + SBOM） | `node scripts/package.cjs` |
 | 发布（打标签即发布） | `node scripts/publish-release.cjs vX.Y.Z [--dry-run] [--prerelease]` |
