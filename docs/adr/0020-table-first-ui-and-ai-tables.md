@@ -3,7 +3,10 @@
 - **状态**：已接受（2026-09-20，发起人决定）
 - **取代**：[ADR-0009 简洁 / 高级双界面模式](0009-dual-ui-mode.md) 的界面结论
 - **遵循**：[ADR-0017 AI 协助的隐私边界](0017-ai-assistance-privacy-boundary.md)（本 ADR 不修订它，只引用）
-- **不变**：[ADR-0003 单文件 SQLite 存储](0003-storage-sqlite.md) —— 存储层保留，只是不再露面
+- **不变**：[ADR-0003 单文件存储](0003-single-file-embedded-database.md) —— 存储层保留，只是不再露面
+  > ⚠️ **后记（2026-09-20）**：本条已被 [ADR-0021](0021-remove-sql-own-storage-engine.md) 取代 ——
+  > SQL 后来被彻底移除，换成自研单文件存储引擎。这里保留原文（ADR 不改已接受的结论），
+  > 但**不要按它理解现状**。
 - **相关**：[ADR-0005 网络默认关闭](0005-network-closed-by-default.md)、[ADR-0007 AI 默认本地推理](0007-ai-local-first.md)
 
 ## 背景

@@ -4,7 +4,8 @@
 > 多表关联、跨表协同更新、筛选排序，全部用结构化配置表达。
 > 决策依据：[ADR-0021 · 彻底移除 SQL，改用自研单文件存储引擎](adr/0021-remove-sql-own-storage-engine.md)、
 > [ADR-0022 · 多表关联与协同更新模型（可配置、可追溯）](adr/0022-linked-tables-and-sync-rules.md)、
-> 调研 [18 · 存储引擎选型](local-docs/reference/18-storage-engine-research.md)。
+> 选型对比与实测数据见 [ADR-0021](adr/0021-remove-sql-own-storage-engine.md)。
+> （当年的调研原文是**本地文档、不入库**，所以这里不引它 —— 引一个读者拿不到的文件没有意义。）
 
 ---
 
@@ -295,4 +296,4 @@ pub struct View {
 - [ADR-0003 · 单文件嵌入式数据库](adr/0003-single-file-embedded-database.md)（「不自研存储引擎」一条被 ADR-0021 取代，其余继续有效）
 - [ADR-0012 · 元数据存储与 ID 方案](adr/0012-metadata-storage-and-id-scheme.md)
 - [ADR-0020 · 表格优先的 UI](adr/0020-table-first-ui-and-ai-tables.md)
-- 调研：[18 · 存储引擎选型](../../local-docs/reference/18-storage-engine-research.md)
+- 选型对比：见 [ADR-0021](adr/0021-remove-sql-own-storage-engine.md)（原调研为本地文档，不入库）

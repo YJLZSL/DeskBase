@@ -131,9 +131,11 @@
                       aria-label="返回列表" title="返回列表">
                 <svg class="ico"><use href="#i-back"/></svg>
               </button>
-              <input class="title-input" id="note-title" placeholder="标题" />
+              <!-- aria-label 不是装饰：placeholder **不能当标签用** —— 屏幕阅读器读不到它，
+       而它一输入就消失了。这三个控件以前只有 placeholder，无障碍体检抓到了。 -->
+              <input class="title-input" id="note-title" placeholder="标题" aria-label="笔记标题" />
               <div class="editor-actions">
-                <select class="select select-sm" id="note-tpl" title="套用一个常用文档骨架">
+                <select class="select select-sm" id="note-tpl" title="套用一个常用文档骨架" aria-label="套用模板">
                   <option value="">套用模板…</option>
                 </select>
                 <button class="btn btn-ghost db-mini" id="btn-note-export" type="button"
@@ -142,7 +144,7 @@
                 </button>
               </div>
             </div>
-            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。"></textarea>
+            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。" aria-label="笔记正文"></textarea>
           </div>
         </div>
       </section>

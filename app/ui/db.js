@@ -1942,13 +1942,13 @@
     // 引擎早就支持了，但界面上一直没入口 —— 只能靠 IPC 建，
     // 等于两张表连不起来。放在「加列」这里是因为：只有目标表已经存在，
     // 引擎才肯接受这个关联（它会校验「目标表不存在」）。
-    const roleSel = el("select", { class: "select" });
+    const roleSel = el("select", { class: "select", "aria-label": "列角色" });
     roleSel.append(
       el("option", { value: "" }, "普通列"),
       el("option", { value: "link" }, "关联到另一张表")
     );
     const linkBox = el("div", { class: "db-schema-link" });
-    const targetSel = el("select", { class: "select" });
+    const targetSel = el("select", { class: "select", "aria-label": "要关联到哪张表" });
     let otherTables = [];
     try {
       const all = await call("schema.listTables", {});

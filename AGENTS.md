@@ -102,7 +102,7 @@ DeskBase/
 | **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
 | **崩溃恢复端到端**（强杀→重启验尸→复检，三阶段） | `node tests/crash-recovery.cjs` |
 | **界面自动走查**（截图 + 文案导出 + 布局体检，出 HTML 报告） | `node tests/ui-walkthrough.cjs` |
-| 门禁四件套 | `node scripts/check-motion.cjs` · `check-contrast.cjs` · `check-wiring.cjs` · `check-size.cjs` |
+| 门禁五件套 | `check-motion` · `check-contrast` · `check-wiring` · `check-size` · **`check-docs`**（文档与实现是否一致）|
 | 打包（zip + SHA-256 + SBOM） | `node scripts/package.cjs` |
 | 发布（打标签即发布） | `node scripts/publish-release.cjs vX.Y.Z [--dry-run] [--prerelease]` |
 | 发布说明 | `node scripts/gen-changelog.cjs [--to <ref>]` |
@@ -171,6 +171,7 @@ DeskBase/
 | 新增/删除文件 | `FILE_INDEX.md` |
 | 新增 ADR | `docs/adr/00xx-*.md` + 更新 `docs/adr/README.md` 索引 |
 | 用户可见的行为变化 | `CHANGELOG.md`（口径见 `gen-changelog.cjs` 的用法） |
+| **改完文档后** | 跑 `node scripts/check-docs.cjs` —— 版本号、路径引用、门禁清单是否还自洽 |
 
 状态标记约定（全项目统一）：`☐` 待做 / `◐` 进行中 / `☑` 完成 / `⊘` 阻塞。
 

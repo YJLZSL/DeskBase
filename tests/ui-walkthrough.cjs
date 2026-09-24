@@ -126,6 +126,78 @@ async function connectCdp(ms) {
   }
 }
 
+// ---------- 无障碍体检（在页面上下文里执行） ----------
+//
+// v1.0 门槛第 ① 条里有「M8 无障碍」。这一节就是它的机器核对 ——
+// 和布局体检一样，**只查能确定判定对错的东西**，不做主观打分。
+//
+// 查的是四类"屏幕阅读器和键盘用户会直接卡住"的问题：
+//   1. 可点元素没有可读名字 → 屏幕阅读器只会念"按钮"
+//   2. 表单控件没有 label  → 不知道这一栏要填什么
+//   3. 打开的对话框没有标题 → 进去了不知道自己在哪
+//   4. aria-label 是空串    → 比没有更糟（有的实现会直接念空）
+const A11Y_JS = `(() => {
+  const problems = [];
+  const selOf = (el) => {
+    let s = el.tagName.toLowerCase();
+    if (el.id) s += "#" + el.id;
+    else if (typeof el.className === "string" && el.className.trim())
+      s += "." + el.className.trim().split(/\\s+/).slice(0, 2).join(".");
+    return s;
+  };
+  const nameOf = (el) => {
+    const al = (el.getAttribute("aria-label") || "").trim();
+    if (al) return al;
+    const lb = el.getAttribute("aria-labelledby");
+    if (lb) {
+      const ref = document.getElementById(lb);
+      if (ref && (ref.textContent || "").trim()) return ref.textContent.trim();
+    }
+    const txt = (el.textContent || "").trim();
+    if (txt) return txt;
+    return (el.getAttribute("title") || "").trim();
+  };
+  const visible = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    if (el.getAttribute("aria-hidden") === "true") return false;
+    return true;
+  };
+
+  for (const el of document.querySelectorAll("button, a[href], [role=button]")) {
+    if (!visible(el)) continue;
+    if (!nameOf(el)) {
+      problems.push({ type: "no-accessible-name", sel: selOf(el), detail: "可点元素没有可读名字" });
+    }
+  }
+  for (const el of document.querySelectorAll("input, select, textarea")) {
+    if (el.type === "hidden") continue;
+    if (!visible(el)) continue;
+    const id = el.id;
+    const hasFor = id && document.querySelector('label[for="' + id + '"]');
+    const wrapped = el.closest("label");
+    const aria = (el.getAttribute("aria-label") || "").trim();
+    if (!hasFor && !wrapped && !aria) {
+      problems.push({
+        type: "control-no-label",
+        sel: selOf(el),
+        detail: "控件没有关联的 label（placeholder 不算）",
+      });
+    }
+  }
+  for (const d of document.querySelectorAll("dialog[open]")) {
+    if (!nameOf(d)) {
+      problems.push({ type: "dialog-no-title", sel: selOf(d), detail: "打开的对话框没有可读标题" });
+    }
+  }
+  for (const el of document.querySelectorAll("[aria-label]")) {
+    if (!(el.getAttribute("aria-label") || "").trim()) {
+      problems.push({ type: "empty-aria-label", sel: selOf(el), detail: "aria-label 是空串" });
+    }
+  }
+  return { count: problems.length, problems: problems.slice(0, 40) };
+})()`;
+
 // ---------- 页面里的布局体检（在页面上下文里执行） ----------
 const AUDIT_JS = `(() => {
   const issues = [];
@@ -236,6 +308,7 @@ const AUDIT_JS = `(() => {
 
   const steps = [];
   const audits = [];
+  const a11yIssues = [];
   const texts = {};
   const notes = [];
   const embeds = []; // { name, b64 }
@@ -404,6 +477,12 @@ const AUDIT_JS = `(() => {
           await sleep(250);
           let audit = null;
           try { audit = await cdp.eval(AUDIT_JS); } catch (_) {}
+          // 无障碍体检跟着布局体检一起跑 —— 都是"切到这一页、等它活过来、再量"
+          let a11y = null;
+          try { a11y = await cdp.eval(A11Y_JS); } catch (_) {}
+          if (a11y && a11y.count > 0) {
+            a11y.problems.forEach((x) => a11yIssues.push({ page: t, width: w, ...x }));
+          }
           audits.push({ width: w, page: t, count: audit ? audit.count : -1, issues: audit ? audit.issues : [] });
           if (doShot) await shot(`w${w}-${t}`);
         }
@@ -411,6 +490,23 @@ const AUDIT_JS = `(() => {
       await cdp.send("Emulation.clearDeviceMetricsOverride");
       const totalIssues = audits.reduce((s, a) => s + Math.max(0, a.count), 0);
       step(`窄屏布局体检完成（4 档宽度 × 4 页，疑似问题 ${totalIssues} 处）`, true);
+
+      // 无障碍体检汇总：按「问题类型 + 元素」去重 —— 同一处问题在 4 档宽度里
+      // 会各报一次，不去重的话 4 倍噪音会把真问题淹掉。
+      const uniqA11y = new Map();
+      for (const x of a11yIssues) {
+        const k = x.type + "|" + x.sel;
+        if (!uniqA11y.has(k)) uniqA11y.set(k, x);
+      }
+      const a11yList = [...uniqA11y.values()];
+      if (a11yList.length) {
+        console.log(`\n无障碍体检：${a11yList.length} 类问题（已按元素去重）`);
+        a11yList.slice(0, 20).forEach((x) =>
+          console.log(`  · [${x.type}] ${x.sel}（${x.page}）：${x.detail}`)
+        );
+      } else {
+        console.log("\n无障碍体检：✔ 无疑似问题");
+      }
     }
 
     // 回到原生尺寸，收尾

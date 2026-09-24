@@ -127,6 +127,12 @@ jobs:
           node-version: '22'
       - name: check-wiring
         run: node scripts/check-wiring.cjs
+      # 文档一致性核对（v1.0 门槛第 ④ 条：「机器核对，不是肉眼看」）。
+      # 放在这里是因为它和 check-wiring 一样只需要 node，不必等构建。
+      # 它抓的是"文档说的事和代码里的事对不上" —— README 曾经同时写着
+      # "安装版还没做"和"自动更新是手动下载"，而两件事都早就做完了。
+      - name: check-docs
+        run: node scripts/check-docs.cjs
 
   # ------------------------------------------------------------
   # 体积守卫：release 产物 ≤ 10 MB
