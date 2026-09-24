@@ -1132,6 +1132,37 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
 /* 设置页分区导航。
    8 张卡片只能一路滚 —— 想改"外观"得先越过一整屏 AI 设置。
    吸顶是为了滚到中途也能直接跳走，而不是先滚回顶部。 */
+/* 旧库预览（迁移向导里）。
+   给的是数据真的在最直观的证据 —— 表名、列名、前两行。
+   所以行要用等宽字体对齐，读起来像在看表格。 */
+.db-legacy-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 240px;
+  overflow: auto;
+  padding: var(--sp-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md, 8px);
+  background: var(--card);
+}
+.db-legacy-item .t {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.db-legacy-item .s {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+.db-legacy-row {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .settings-nav {
   position: sticky;
   top: 0;

@@ -32,6 +32,7 @@ mod ai;
 mod updater;
 mod xlsx;
 mod installer;
+mod legacy;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -901,6 +902,57 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 升级到 v0.4.0 之后，旧的 SQLite 库（main.db）**读不了也删不掉**，
         // 它就静静躺在数据目录里。用户最容易的理解是"我的数据没了"。
         // 所以只要它还在，就必须主动说清楚 —— 不能等用户来问。
+        // ---------- 旧库（v0.4.0 之前是 SQLite）：只读看一眼里面有什么 ----------
+        //
+        // 为什么值得做：旧库换引擎后读不了。原来的说法是"用旧版导出成 Excel 再导入"，
+        // 但**用户很可能已经没有旧版程序了**（卸载了、换机了），只剩一个 main.db ——
+        // 那句指引等于帮不上忙，而里面是他唯一的数据。
+        // 这里先做到"能看见里面有什么"，导入下一步再接。
+        "legacy.scan" => {
+            let path = state.data_dir.join("data").join("main.db");
+            if !path.exists() {
+                return ok(id, serde_json::json!({ "found": false }));
+            }
+            let db = match legacy::LegacyDb::open(&path) {
+                Ok(d) => d,
+                Err(e) => return err(id, e),
+            };
+            let tables = match db.tables() {
+                Ok(t) => t,
+                Err(e) => return err(id, e),
+            };
+            let mut out = Vec::new();
+            for t in &tables {
+                // 只取前 3 行做预览：旧库可能很大，全读会把界面卡住。
+                // 读失败不算整体失败 —— 一张表读不出来不该让别的表也看不到。
+                let sample: Vec<Vec<serde_json::Value>> = match db.rows(t, 3) {
+                    Ok(rows) => rows
+                        .iter()
+                        .map(|r| r.iter().map(|v| v.to_json()).collect())
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                out.push(serde_json::json!({
+                    "name": t.name,
+                    "columns": t.columns,
+                    "sql": t.sql,
+                    "sample": sample,
+                }));
+            }
+            log_line(
+                &state.data_dir,
+                &format!("读取旧版数据文件：{} 张表", out.len()),
+            );
+            ok(
+                id,
+                serde_json::json!({
+                    "found": true,
+                    "path": db.path().to_string_lossy(),
+                    "tables": out,
+                }),
+            )
+        }
+
         "app.legacyDb" => {
             let legacy = state.data_dir.join("data").join("main.db");
             let (found, size) = match std::fs::metadata(&legacy) {

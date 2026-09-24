@@ -1295,39 +1295,96 @@
       const mb = (r.size / 1024 / 1024).toFixed(1);
       const U = window.DeskBaseUI;
 
-      // 旧库读不了、也删不掉，最容易被理解成"数据丢了"。
-      // 所以这里不给一句干巴巴的提示，而是把路指清楚：三步，外加一个能直接
-      // 打开数据目录的按钮 —— 让人立刻能动手，而不是先去猜目录在哪儿。
       const box = document.createElement("div");
       box.style.cssText = "display:flex;flex-direction:column;gap:10px";
-
       const lead = document.createElement("p");
       lead.textContent =
         "检测到旧版数据文件（main.db，" +
         mb +
-        " MB）。v0.4.0 换掉了存储引擎，它读不了也删不掉 —— 你的数据还在里面，没丢。";
+        " MB）。v0.4.0 换掉了存储引擎，新版不再直接用它 —— 你的数据还在里面，没丢。";
+      box.append(lead);
 
-      const stepsTitle = document.createElement("p");
-      stepsTitle.textContent = "迁移三步：";
-      const ol = document.createElement("ol");
-      ol.style.cssText =
-        "margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px";
-      [
-        "用旧版 DeskBase 打开它，把每张表导出成 Excel / CSV；",
-        "回到新版，在表格页用「从 Excel 导入」把表一张张导进来；",
-        "确认新版里数据齐了，旧文件留着或删掉都随你。",
-      ].forEach((t) => {
-        const li = document.createElement("li");
-        li.textContent = t;
-        ol.appendChild(li);
-      });
+      // 试着**直接读出来**看看。用户最怕的是"数据丢了"，
+      // 能让他亲眼看见里面有几张表、每张表长什么样，比任何解释都管用。
+      let scan = null;
+      let scanErr = "";
+      try {
+        scan = await call("legacy.scan", {});
+      } catch (e) {
+        scanErr = (e && e.message) || String(e);
+      }
+
+      const tables = scan && scan.found ? scan.tables || [] : [];
+      if (tables.length) {
+        const good = document.createElement("p");
+        good.textContent =
+          "已经能直接读出里面的内容（**只读**，不会改动这个文件）：共 " +
+          tables.length +
+          " 张表。";
+        box.append(good);
+
+        const list = document.createElement("div");
+        list.className = "db-legacy-list";
+        tables.forEach((t) => {
+          const item = document.createElement("div");
+          item.className = "db-legacy-item";
+          const head = document.createElement("div");
+          head.className = "t";
+          head.textContent = t.name + "（" + (t.columns || []).length + " 列）";
+          item.appendChild(head);
+          const cols = document.createElement("div");
+          cols.className = "s";
+          cols.textContent = (t.columns || []).join(" · ");
+          item.appendChild(cols);
+          // 前两行预览：这是"数据真的在"最直观的证据
+          (t.sample || []).slice(0, 2).forEach((row) => {
+            const line = document.createElement("div");
+            line.className = "db-legacy-row";
+            line.textContent = row
+              .map((v) => (v == null ? "（空）" : String(v)))
+              .join("  |  ");
+            item.appendChild(line);
+          });
+          list.appendChild(item);
+        });
+        box.append(list);
+
+        // 如实说导入还没接上 —— 别让人以为点一下就能导
+        const todo = document.createElement("p");
+        todo.className = "hint";
+        todo.textContent =
+          "「一键导入」还在做。在那之前，可以先用旧版程序导出成 Excel，" +
+          "再用表格页的「从 Excel 导入」—— 结果是一样的。";
+        box.append(todo);
+      } else {
+        // 读不出来：说清**为什么**，再给退路。一句"读不出来"等于没说。
+        const bad = document.createElement("p");
+        bad.textContent = scanErr
+          ? "试着直接读它，但没成功：" + scanErr
+          : "它能打开，但里面没有找到表（也许是空库）。";
+        box.append(bad);
+
+        const stepsTitle = document.createElement("p");
+        stepsTitle.textContent = "那就走导出再导入这条路：";
+        const ol = document.createElement("ol");
+        ol.style.cssText =
+          "margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px";
+        [
+          "用旧版 DeskBase 打开它，把每张表导出成 Excel / CSV；",
+          "回到新版，在表格页用「从 Excel 导入」把表一张张导进来；",
+          "确认新版里数据齐了，旧文件留着或删掉都随你。",
+        ].forEach((t) => {
+          const li = document.createElement("li");
+          li.textContent = t;
+          ol.appendChild(li);
+        });
+        box.append(stepsTitle, ol);
+      }
 
       const path = document.createElement("div");
-      path.style.cssText =
-        "font-size:12px;opacity:.75;word-break:break-all";
+      path.style.cssText = "font-size:12px;opacity:.75;word-break:break-all";
       path.textContent = r.path;
-
-      box.append(lead, stepsTitle, ol, path);
+      box.append(path);
 
       if (U && typeof U.modal === "function") {
         U.modal({
@@ -1337,7 +1394,7 @@
             {
               label: "打开数据目录",
               kind: "primary",
-              close: false, // 点开目录不关对话框 —— 用户还要回来照着三步做
+              close: false, // 点开目录不关对话框 —— 用户还要回来照着做
               onClick: () => {
                 call("recovery.reveal", {}).catch(() => {});
               },
@@ -1352,7 +1409,6 @@
       // 检测本身失败不影响使用
     }
   }
-
   async function boot() {
     let lastCmdCount = 0;
     // 主题（默认宣纸；D-016 决定不让"跟随系统"当默认，保证用户第一眼看到宣纸）
