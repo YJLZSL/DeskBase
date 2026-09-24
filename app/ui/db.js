@@ -1855,6 +1855,15 @@
       toast("读表结构失败：" + errText(e), "error");
       return;
     }
+    // 列语义（含 link / 共通 / 同步）在 columnMeta 里，getTable 只有裸结构。
+    // 取不到不影响改结构，所以失败就当成空 —— 不必为此挡住整个对话框。
+    let metas = [];
+    try {
+      metas = (await call("schema.columnMeta", { name: tname })) || [];
+    } catch (_) {
+      metas = [];
+    }
+    const metaOf = (n) => metas.find((m) => m.name === n) || null;
     const commentBox = el("div", { class: "db-schema-comment" });
     const commentInput = el("input", { class: "input", type: "text", value: info.comment || "", placeholder: "这张表是干什么用的（表注释）" });
     const btnComment = el("button", { class: "btn btn-ghost", type: "button" }, "保存注释");
@@ -1869,10 +1878,25 @@
         c.not_null ? "必填" : "",
         c.default != null && c.default !== "" ? "默认 " + c.default : "",
       ].filter(Boolean).join(" · ");
+      const meta = metaOf(c.name);
       row.append(
         el("span", { class: "n" }, c.name),
         el("span", { class: "t" }, fmtColType(c.decl_type) + (tags ? "（" + tags + "）" : ""))
       );
+      // 关联列要说清"连到哪张表" —— 光看列名和类型看不出来，
+      // 而这一列的意义全在目标表上。columnMeta.link 早就返回了，界面以前没用。
+      if (meta && meta.link) {
+        row.append(
+          el(
+            "span",
+            { class: "s db-link-tag" },
+            "→ " + meta.link.target + (meta.link.many ? "（可多条）" : "")
+          )
+        );
+      }
+      if (meta && meta.shared) {
+        row.append(el("span", { class: "s" }, "⇄ 共通"));
+      }
       const btnRen = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "改名");
       btnRen.addEventListener("click", () => {
         dlg.close("ok");
@@ -1911,9 +1935,53 @@
     const cmtInput = el("input", { class: "input", type: "text", placeholder: "列说明（可选）" });
     const btnAdd = el("button", { class: "btn btn-primary", type: "button" }, "加列");
     const addErr = el("p", { class: "hint", style: "color: #b00" }, "");
+
+    // ---------- 列角色：普通列 / 关联到另一张表 ----------
+    //
+    // 「关联」在引擎里就是**一个列 + link 属性**，列里存的是目标表某一行的行号。
+    // 引擎早就支持了，但界面上一直没入口 —— 只能靠 IPC 建，
+    // 等于两张表连不起来。放在「加列」这里是因为：只有目标表已经存在，
+    // 引擎才肯接受这个关联（它会校验「目标表不存在」）。
+    const roleSel = el("select", { class: "select" });
+    roleSel.append(
+      el("option", { value: "" }, "普通列"),
+      el("option", { value: "link" }, "关联到另一张表")
+    );
+    const linkBox = el("div", { class: "db-schema-link" });
+    const targetSel = el("select", { class: "select" });
+    let otherTables = [];
+    try {
+      const all = await call("schema.listTables", {});
+      otherTables = (all || [])
+        .map((t) => (typeof t === "string" ? t : t && t.name))
+        .filter((n) => n && n !== tname);
+    } catch (_) {
+      otherTables = [];
+    }
+    otherTables.forEach((n) => targetSel.appendChild(el("option", { value: n }, n)));
+    const manyChk = el("input", { type: "checkbox" });
+    // 反向字段（back_field）引擎目前**没有处理逻辑**，所以这里不给这个选项 ——
+    // 摆了也没用，还会让人以为建了反向列
+    linkBox.append(
+      el("p", { class: "hint" }, "目标表："),
+      targetSel,
+      el("label", { class: "hint" }, " 可以关联多条 ", manyChk)
+    );
+    linkBox.hidden = true;
+    if (!otherTables.length) {
+      // 一张别的表都没有：说清楚该先去做什么，别让人对着空下拉发呆
+      linkBox.append(el("p", { class: "hint" }, "还没有别的表可以关联。先建第二张表，再回来加这一列。"));
+    }
+    roleSel.addEventListener("change", () => {
+      const isLink = roleSel.value === "link";
+      linkBox.hidden = !isLink;
+      // 关联列存的是行号，类型固定文本 —— 让人去选类型只会选错
+      typeSel.disabled = isLink;
+    });
+
     addBox.append(
       el("p", { class: "hint" }, "加一个新列（已有的行会用默认值填充）："),
-      nameInput, typeSel,
+      nameInput, typeSel, roleSel, linkBox,
       el("label", { class: "hint" }, " 必填 ", nnChk),
       defInput, cmtInput, btnAdd, addErr
     );
@@ -1922,18 +1990,30 @@
       if (!cname) { addErr.textContent = "先给列起个名"; return; }
       btnAdd.disabled = true;
       try {
-        await call("schema.addColumn", {
-          table: tname,
-          column: {
-            name: cname,
-            ty: typeSel.value,
-            not_null: nnChk.checked,
-            default: defInput.value.trim() === "" ? null : defInput.value.trim(),
-            primary_key: false,
-            comment: cmtInput.value.trim() === "" ? null : cmtInput.value.trim(),
-          },
-        });
-        toast("已加列「" + cname + "」");
+        const isLink = roleSel.value === "link";
+        if (isLink && !targetSel.value) {
+          addErr.textContent = "先选要关联到哪张表（一张别的表都还没有的话，先去建一张）";
+          btnAdd.disabled = false;
+          return;
+        }
+        const column = {
+          name: cname,
+          // 关联列固定按文本存（里面是目标行的行号）
+          ty: isLink ? "text" : typeSel.value,
+          not_null: nnChk.checked,
+          default: defInput.value.trim() === "" ? null : defInput.value.trim(),
+          primary_key: false,
+          comment: cmtInput.value.trim() === "" ? null : cmtInput.value.trim(),
+        };
+        if (isLink) {
+          column.link = { target: targetSel.value, many: manyChk.checked, back_field: null };
+        }
+        await call("schema.addColumn", { table: tname, column: column });
+        toast(
+          isLink
+            ? "已加关联列「" + cname + "」→ " + targetSel.value
+            : "已加列「" + cname + "」"
+        );
         dlg.close("ok");
         openSchemaDialog();
         openTable(tname);

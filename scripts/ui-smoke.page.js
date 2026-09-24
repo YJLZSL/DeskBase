@@ -387,6 +387,137 @@
         const i3 = await ipc("schema.getTable", { name: newName });
         const names3 = ((i3 && i3.columns) || []).map((c) => c.name);
         step("改列名后新列名在、旧列名没了", names3.includes("品名") && !names3.includes("名称"), names3.join(","));
+
+        // ---------- 关联列（v0.10.0 起界面上有了入口） ----------
+        // 引擎早就支持 link，但界面上一直没法建 —— 等于两张表连不起来。
+        // 这里盖的是**整条链真的通**：建目标表 → 加关联列 → 能读回 link →
+        // 目标表不存在时要被拦下（界面的可读报错就靠它）。
+        const tgt = "烟测目标" + Date.now().toString(36);
+        await ipc("schema.createTable", {
+          spec: {
+            name: tgt,
+            comment: null,
+            columns: [
+              { name: "名字", ty: "text", not_null: false, default: null, primary_key: false, comment: null },
+            ],
+          },
+        });
+        await ipc("schema.addColumn", {
+          table: newName,
+          column: {
+            name: "关联到目标",
+            ty: "text",
+            not_null: false,
+            default: null,
+            primary_key: false,
+            comment: null,
+            link: { target: tgt, many: false, back_field: null },
+          },
+        });
+        const lmeta = await ipc("schema.columnMeta", { name: newName });
+        const lm = (lmeta || []).find((m) => m.name === "关联到目标");
+        step(
+          "关联列建成后 columnMeta 带 link",
+          !!(lm && lm.link),
+          lm && lm.link ? "→ " + lm.link.target : "没有 link"
+        );
+        step(
+          "关联的目标表正确",
+          !!(lm && lm.link && lm.link.target === tgt),
+          lm && lm.link ? lm.link.target : "—"
+        );
+        // 多对多那一档：many=true 要能存回来
+        await ipc("schema.addColumn", {
+          table: newName,
+          column: {
+            name: "可多条",
+            ty: "text",
+            not_null: false,
+            default: null,
+            primary_key: false,
+            comment: null,
+            link: { target: tgt, many: true, back_field: null },
+          },
+        });
+        const lmeta2 = await ipc("schema.columnMeta", { name: newName });
+        const lm2 = (lmeta2 || []).find((m) => m.name === "可多条");
+        step("「可关联多条」这一档能存回来", !!(lm2 && lm2.link && lm2.link.many === true), lm2 && lm2.link ? "many=" + lm2.link.many : "—");
+        // 引擎的校验：目标表不存在必须拦下
+        let linkBlocked = false;
+        let linkWhy = "";
+        try {
+          await ipc("schema.addColumn", {
+            table: newName,
+            column: {
+              name: "坏关联",
+              ty: "text",
+              not_null: false,
+              default: null,
+              primary_key: false,
+              comment: null,
+              link: { target: "根本不存在的表", many: false, back_field: null },
+            },
+          });
+        } catch (e) {
+          linkBlocked = true;
+          linkWhy = String((e && e.message) || e);
+        }
+        step("关联到不存在的表会被拦下", linkBlocked, linkWhy.slice(0, 60));
+
+        // ---------- 关联列的**界面入口**（后端通了 ≠ 界面露出来了）----------
+        // 上面那段走的是编程入口，只能证明 IPC 通。关联功能以前的问题恰恰是
+        // "引擎支持、界面没入口"，所以必须在**真对话框里**点一遍：
+        // 选表 → 打开表结构 → 列角色里选「关联到另一张表」→ 关联选项要出现。
+        const rb = window.DeskBaseDb;
+        if (rb && rb.refreshTables && rb.openSchemaDialog) {
+          await rb.refreshTables();
+          const items = document.querySelectorAll("#db-table-list .db-table-item");
+          if (items.length) {
+            items[items.length - 1].click();
+            await waitFor(
+              () => document.querySelectorAll("#db-table-list .db-table-item[aria-current='true']").length > 0,
+              3000
+            );
+          }
+          rb.openSchemaDialog();
+          // 同上：buildDialog 会先把 <dialog> 放进 DOM，showModal 在最后 ——
+          // 等 .open 为真才是"内容都建好了"。
+          const schemaShown = await waitFor(() => {
+            const d = document.getElementById("db-dialog-schema");
+            return !!d && d.open === true;
+          }, 5000);
+          await waitFor(() => {
+            const d = document.getElementById("db-dialog-schema");
+            if (!d) return false;
+            return [...d.querySelectorAll("select")].some((sel) =>
+              [...sel.options].some((o) => /关联到另一张表/.test(o.textContent || ""))
+            );
+          }, 3000);
+          step("表结构对话框能打开（界面入口）", schemaShown);
+          const sdlg = document.getElementById("db-dialog-schema");
+          if (sdlg) {
+            const role = [...sdlg.querySelectorAll("select")].find((sel) =>
+              [...sel.options].some((o) => /关联到另一张表/.test(o.textContent || ""))
+            );
+            step(
+              "加列表单里有「列角色」且含「关联到另一张表」",
+              !!role,
+              role ? [...role.options].map((o) => o.textContent).join(" / ") : "没找到"
+            );
+            if (role) {
+              role.value = "link";
+              role.dispatchEvent(new Event("change", { bubbles: true }));
+              const linkShown = await waitFor(() => {
+                const box = sdlg.querySelector(".db-schema-link");
+                return !!box && !box.hidden;
+              }, 2000);
+              step("选「关联到另一张表」后关联选项真的出现", linkShown);
+            }
+            sdlg.close("cancel");
+          }
+        } else {
+          step("表结构对话框能打开（界面入口）", false, "DeskBaseDb 上没有 openSchemaDialog");
+        }
         const ip = await ipc("schema.getTable", { name: newName });
         const pk = ((ip && ip.columns) || []).find((c) => c.pk);
         if (pk) {
@@ -550,6 +681,13 @@
       step("点「历史」后界面有反馈（打开对话框或给出提示）", histFeedback);
       const histDlg = $("#db-dialog-history");
       if (histDlg) {
+        // ⚠️ 不能只等"元素存在"：<dialog> 在构建那一刻就进了 DOM，
+        // 而清单是异步加载后才填进去的 —— 早读会读到一个空壳，
+        // 断言随即变成假红灯（实测踩过：文本只有"…关闭"两个字）。
+        await waitFor(() => {
+          const b = histDlg.querySelector(".db-backup-list");
+          return !!b && b.children.length > 0;
+        }, 3000);
         // 要么列出历史条目，要么明说"还没有改动记录" —— 空列表不能是空白一片
         const txt = histDlg.textContent || "";
         step(

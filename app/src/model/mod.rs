@@ -605,11 +605,7 @@ impl Db {
             {
                 return Err(format!("列名「{}」重复", c.name));
             }
-            if let Some(link) = &c.link {
-                if !self.store.contains(&format!("tbl/{}", link.target)) {
-                    return Err(format!("关联的目标表「{}」不存在", link.target));
-                }
-            }
+            self.check_link_target(c)?;
             fields.push(Field {
                 name: c.name.clone(),
                 ty: c.ty,
@@ -733,9 +729,30 @@ impl Db {
         Ok(())
     }
 
+    /// 关联字段指向的目标表必须存在。
+    ///
+    /// 抽出来的原因写在调用处：create_table 有、add_column 漏了，
+    /// 两条入口共用一份实现，就不会再分叉。
+    fn check_link_target(&self, c: &ColumnDef) -> Result<()> {
+        if let Some(link) = &c.link {
+            if !self.store.contains(&format!("tbl/{}", link.target)) {
+                return Err(format!("关联的目标表「{}」不存在", link.target));
+            }
+        }
+        Ok(())
+    }
+
     pub fn add_column(&mut self, table: &str, col: &ColumnDef) -> Result<()> {
         validate_identifier(table)?;
         validate_column_name(&col.name)?;
+        // 关联的目标表必须存在。
+        //
+        // ⚠️ 这条校验 create_table 里一直有，**add_column 却漏了** ——
+        // 于是"不能建指向不存在表的关联"这条约束，在加列时形同不存在。
+        // 实测确认过：通过 schema.addColumn 能建出关联到「根本不存在的表」的列，
+        // 之后读取/同步会拿到一个悬空引用。而**加列才是更常用的入口**
+        // （建表时要先有目标表，加列时往往两边都已存在），漏掉的恰好是常用的那个。
+        self.check_link_target(col)?;
         let mut t = self.load_table(table)?;
         if t.field(&col.name).is_some() {
             return Err(format!("列「{}」已经存在", col.name));
@@ -2467,6 +2484,50 @@ mod tests {
         assert_eq!(mark.source_table, "客户");
         assert_eq!(mark.source_field, "客户名");
         assert!(m.read_only, "Mirror 模式下目标字段只读");
+    }
+
+    /// 加列时也要校验关联目标。
+    ///
+    /// 这条校验以前**只在 create_table 里有，add_column 漏了** —— 于是
+    /// "不能建指向不存在表的关联"这条约束，在加列时形同不存在。
+    /// 实测能建出关联到「根本不存在的表」的列，之后读到的是悬空引用。
+    /// 而加列是更常用的入口（建表时要先有目标表，加列时两边往往都已存在）。
+    #[test]
+    fn 加列关联到不存在的表要被拦下() {
+        let d = tmp("linkadd");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec("订单", &[("单号", ColType::Text)])).unwrap();
+
+        let mk = |target: &str, many: bool| ColumnDef {
+            name: "客户".to_string(),
+            ty: ColType::Text,
+            not_null: false,
+            default: None,
+            primary_key: false,
+            comment: None,
+            shared: None,
+            link: Some(LinkSpec {
+                target: target.to_string(),
+                many,
+                back_field: None,
+            }),
+            lookup: None,
+            rollup: None,
+        };
+
+        let e = db.add_column("订单", &mk("客户", false)).unwrap_err();
+        assert!(e.contains("不存在"), "要说清是目标表不存在：{e}");
+
+        // 目标表建出来之后就该放行
+        db.create_table(&spec("客户", &[("客户名", ColType::Text)]))
+            .unwrap();
+        db.add_column("订单", &mk("客户", true)).unwrap();
+        let meta = db.column_meta("订单").unwrap();
+        let m = meta.iter().find(|x| x.name == "客户").expect("列应当在");
+        let lk = m.link.as_ref().expect("关联属性要存下来");
+        assert_eq!(lk.target, "客户");
+        assert!(lk.many, "「可关联多条」这一档要存住");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

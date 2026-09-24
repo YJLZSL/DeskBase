@@ -53,6 +53,27 @@
   box-shadow: var(--shadow-1);
 }
 
+/* 关联列的标记（表结构列表里）。
+   关联列的意义全在"连到哪张表"上 —— 只显示列名和类型等于没说。 */
+.db-link-tag {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* 「加列」表单里的关联选项：缩进一块，表示它从属于"列角色"这个选择 */
+.db-schema-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border-left: 2px solid var(--line);
+  margin-block: 2px;
+}
+.db-schema-link .hint {
+  margin: 0;
+}
+
 /* 逐层按住宽度，让内容**放得下**（而不是裁掉）。
    实测踩过：空态引导块被塞进 .db-empty 之后整块宽到 326px，而侧栏只有 236 ——
    正文直接画到右边的表格区上。
