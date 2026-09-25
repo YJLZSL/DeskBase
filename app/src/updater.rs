@@ -400,7 +400,7 @@ pub const HTTP_TIMEOUT_MS: i32 = 15_000;
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(target_os = "windows")]
-mod http {
+pub mod http {
     use std::ffi::c_void;
 
     use windows::core::PCWSTR;

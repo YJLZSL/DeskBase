@@ -2028,8 +2028,71 @@
         const opt = document.createElement("option");
         opt.value = p.id;
         opt.textContent = p.label;
-        opt.dataset.base = p.base_url;
+        opt.dataset.base = p.base_url || "";
+        // 本地还是云端 —— 决定旁边那个图标，以及要不要显示"数据会离开本机"
+        opt.dataset.local = p.local ? "1" : "0";
+        opt.dataset.icon = p.icon || "ai-cloud";
         $pv.appendChild(opt);
+      }
+      syncProviderIcon();
+    }
+
+    // 厂商旁边的图标：本机跑的画一台显示器，云端的画一朵云。
+    // 一件事值得一个图标：**"数据出不出本机"必须一眼看见**，
+    // 不能让人去读文字才反应过来。
+    function syncProviderIcon() {
+      const $ic = document.getElementById("ai-provider-icon");
+      const $warn = document.getElementById("ai-cloud-warn");
+      if (!$ic) return;
+      const opt = $pv.selectedOptions && $pv.selectedOptions[0];
+      const isLocal = opt && opt.dataset.local === "1";
+      const icon = (opt && opt.dataset.icon) || "ai-cloud";
+      $ic.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-' + icon + '"/></svg>';
+      $ic.setAttribute("aria-label", isLocal ? "本机运行" : "云端服务");
+      $ic.title = isLocal ? "跑在本机，数据不出本机" : "云端服务，数据会离开本机";
+      if ($warn) $warn.hidden = !!isLocal;
+    }
+
+    // 拉取这个 endpoint 上可用的模型。
+    // 各家模型名是会变的（下架、换版本、加后缀），让人手填只能靠猜；
+    // **能列出来就别让人猜。**
+    async function fetchModels() {
+      const $btn = document.getElementById("ai-fetch-models");
+      const $tip = document.getElementById("ai-models-tip");
+      const $list = document.getElementById("ai-model-list");
+      if (!$btn) return;
+      const base = $base.value.trim();
+      if (!base) {
+        if ($tip) $tip.textContent = "先填 endpoint";
+        return;
+      }
+      $btn.disabled = true;
+      if ($tip) $tip.textContent = "正在向 " + base + " 请求模型列表…";
+      try {
+        const r = await window.__deskbase.call("ai.listModels", {
+          base_url: base,
+          api_key: $key.value,
+          provider: $pv.value,
+        });
+        const models = (r && r.models) || [];
+        if ($list) {
+          $list.textContent = "";
+          models.forEach((m) => {
+            const o = document.createElement("option");
+            o.value = m;
+            $list.appendChild(o);
+          });
+        }
+        if ($tip) {
+          $tip.textContent = models.length
+            ? "找到 " + models.length + " 个模型，点模型框可下拉选择"
+            : "这个地址没有返回任何模型";
+        }
+      } catch (e) {
+        // 报错里带的是**原文开头**（后端刻意这么做的），别把它吞掉
+        if ($tip) $tip.textContent = "取不到：" + ((e && e.message) || e);
+      } finally {
+        $btn.disabled = false;
       }
     }
 
@@ -2051,7 +2114,11 @@
     $pv.addEventListener("change", () => {
       const opt = $pv.selectedOptions && $pv.selectedOptions[0];
       if (opt && opt.dataset.base) $base.value = opt.dataset.base;
+      syncProviderIcon();
     });
+
+    const $fetchBtn = document.getElementById("ai-fetch-models");
+    if ($fetchBtn) $fetchBtn.addEventListener("click", fetchModels);
 
     $save.addEventListener("click", async () => {
       try {
@@ -2062,6 +2129,7 @@
             base_url: $base.value.trim(),
             model: $model.value.trim(),
             api_key: $key.value,
+          provider: $pv.value,
           },
         });
         toast($en.checked ? "AI 已开启（每次调用前还会再问你一次）" : "AI 设置已保存（当前关闭）");

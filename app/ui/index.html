@@ -50,6 +50,14 @@
       <circle cx="9" cy="9" r="5.2"/>
       <path d="M12.9 12.9 17 17"/>
     </symbol>
+    <!-- AI 厂商用的是本地还是云端 —— 一眼分清"数据出不出本机" -->
+    <symbol id="i-ai-local" viewBox="0 0 20 20">
+      <rect x="2.5" y="4" width="15" height="9.5" rx="1.5" />
+      <path d="M7 17h6M10 13.5V17" />
+    </symbol>
+    <symbol id="i-ai-cloud" viewBox="0 0 20 20">
+      <path d="M6 14.5a3 3 0 010-6 4 4 0 017.7.8A2.8 2.8 0 0114 14.5z" />
+    </symbol>
     <symbol id="i-panel" viewBox="0 0 20 20">
       <rect x="2.6" y="3.4" width="14.8" height="13.2" rx="2.2"/>
       <path d="M7.6 3.6v12.8"/>
@@ -264,6 +272,10 @@
             <div class="field">
               <label for="ai-provider">服务商</label>
               <select id="ai-provider" class="select"></select>
+              <span class="ico-wrap" id="ai-provider-icon" title=""></span>
+              <span class="hint" id="ai-cloud-warn" hidden>
+                云端服务：发给它的内容会离开本机。
+              </span>
             </div>
             <div class="field">
               <label for="ai-base">接口地址</label>
@@ -272,7 +284,14 @@
             </div>
             <div class="field">
               <label for="ai-model">模型名</label>
-              <input id="ai-model" class="input" type="text" placeholder="留空用该厂商默认" />
+              <input id="ai-model" class="input" type="text" list="ai-model-list"
+                     placeholder="留空用该厂商默认，或点右边拉取" />
+              <datalist id="ai-model-list"></datalist>
+              <button class="btn btn-ghost" id="ai-fetch-models" type="button"
+                      title="向 endpoint 请求一次模型列表（会发出一个网络请求）">
+                拉取可用模型
+              </button>
+              <span class="hint" id="ai-models-tip"></span>
             </div>
             <div class="field">
               <label for="ai-key">API Key</label>

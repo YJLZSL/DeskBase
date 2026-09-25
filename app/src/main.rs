@@ -2077,6 +2077,67 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 先把"能配"落地，且默认必须是关的（ADR-0017）。
         "app.aiProviders" => ok(id, ai::providers()),
 
+        // 列出这个 endpoint 上可用的模型。
+        //
+        // 为什么允许在"AI 还没启用"时调用：**它是配置的一部分** ——
+        // 不让列模型，用户就得手填模型名，填错只拿到一句 404。
+        // 但每次调用都记审计（含失败），且界面上明说"这会发一次请求"。
+        "ai.listModels" => {
+            let base = req
+                .args
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let key = req
+                .args
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if base.trim().is_empty() {
+                return err(id, "先填 endpoint");
+            }
+            let r = ai::list_models(&base, &key);
+            // 审计：连失败也记（ADR-0017 第 2 条：被拒/失败同样要留痕）。
+            //
+            // ⚠️ **绝不把 base_url / 报错原文记进审计** —— base_url 可能带查询串里的密钥，
+            // 报错原文里也可能含它。`AuditEntry` 的字段注释明确写了这条，照做。
+            let result = match &r {
+                Ok(m) => format!("ok:{}", m.len()),
+                Err(_) => "failed".to_string(),
+            };
+            // 审计写不进去**不该打断主流程**（用户只是想列个模型），
+            // 但也不能静默 —— 落一条到主日志，否则「审计没记上」这件事本身就没痕了。
+            if let Err(e) = ai::audit_append(
+                &state.data_dir,
+                &ai::AuditEntry {
+                    at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                    action: "list_models".to_string(),
+                    provider: req
+                        .args
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    table: String::new(),
+                    column: String::new(),
+                    rows: 0,
+                    result,
+                    note: String::new(),
+                },
+            ) {
+                log_line(&state.data_dir, &format!("AI 审计写入失败：{e}"));
+            }
+            match r {
+                Ok(models) => ok(id, serde_json::json!({ "models": models })),
+                Err(e) => err(id, e),
+            }
+        }
+
         // 读 AI 审计（最近 N 条，新的在前）。给设置页/AI 面板显示"到底往外发过什么"。
         "app.aiAuditTail" => {
             let n = req.args.get("n").and_then(|v| v.as_u64()).unwrap_or(20) as usize;

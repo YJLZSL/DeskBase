@@ -13,16 +13,22 @@ use crate::model::Db;
 /// 主流厂商清单。**加一家只加一行**（ADR-0020 的要求：厂商名单进配置数据，
 /// 不散落在代码里）。只放"名字 + OpenAI 兼容 base_url"，不引入任何厂商 SDK ——
 /// 这样新增一家不需要改代码逻辑，也避免把厂商凭据逻辑散到各处。
-pub const PROVIDERS: &[(&str, &str, &str)] = &[
-    ("deepseek", "深度求索 DeepSeek", "https://api.deepseek.com/v1"),
-    ("qwen", "阿里通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-    ("zhipu", "智谱 GLM", "https://open.bigmodel.cn/api/paas/v4"),
-    ("kimi", "月之暗面 Kimi", "https://api.moonshot.cn/v1"),
-    ("doubao", "字节豆包（方舟）", "https://ark.cn-beijing.volces.com/api/v3"),
-    ("openai", "OpenAI", "https://api.openai.com/v1"),
-    ("anthropic", "Anthropic Claude", "https://api.anthropic.com/v1"),
-    ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai"),
-    ("custom", "自定义 / 本机 Ollama", "http://127.0.0.1:11434/v1"),
+/// 元组是 `(id, 显示名, 默认 endpoint, 是否跑在本机)`。
+///
+/// **本机项排在最前**：ADR-0007 是"AI 默认本地推理"。界面也靠第 4 项
+/// 决定显示哪个图标 —— 让用户一眼分清"数据出不出本机"。
+pub const PROVIDERS: &[(&str, &str, &str, bool)] = &[
+    ("ollama", "本机 Ollama（数据不出本机）", "http://127.0.0.1:11434/v1", true),
+    ("lmstudio", "本机 LM Studio（数据不出本机）", "http://127.0.0.1:1234/v1", true),
+    ("deepseek", "深度求索 DeepSeek", "https://api.deepseek.com/v1", false),
+    ("qwen", "阿里通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1", false),
+    ("zhipu", "智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", false),
+    ("kimi", "月之暗面 Kimi", "https://api.moonshot.cn/v1", false),
+    ("doubao", "字节豆包（方舟）", "https://ark.cn-beijing.volces.com/api/v3", false),
+    ("openai", "OpenAI", "https://api.openai.com/v1", false),
+    ("anthropic", "Anthropic Claude", "https://api.anthropic.com/v1", false),
+    ("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", false),
+    ("custom", "自定义（OpenAI 兼容）", "http://127.0.0.1:11434/v1", true),
 ];
 
 const K_ENABLED: &str = "ai.enabled";
@@ -47,6 +53,7 @@ impl Default for AiSettings {
         Self {
             enabled: false,
             provider: "deepseek".into(),
+            // PROVIDERS[0] 现在是本机 Ollama —— ADR-0007「AI 默认本地推理」
             base_url: PROVIDERS[0].2.into(),
             model: String::new(),
             api_key: String::new(),
@@ -98,8 +105,15 @@ pub fn providers() -> serde_json::Value {
     serde_json::Value::Array(
         PROVIDERS
             .iter()
-            .map(|(id, label, base)| {
-                serde_json::json!({ "id": id, "label": label, "base_url": base })
+            .map(|(id, label, base, local)| {
+                serde_json::json!({
+                    "id": id,
+                    "label": label,
+                    "base_url": base,
+                    // 前端靠这两个字段决定**显示哪个图标**与要不要显示警告
+                    "local": local,
+                    "icon": if *local { "ai-local" } else { "ai-cloud" },
+                })
             })
             .collect(),
     )
@@ -267,4 +281,58 @@ mod tests {
         assert!(audit_tail(&dir, 5).is_empty(), "没审计过就是空表，不是错误");
     }
 
+}
+
+// ---------------- 识别这个 endpoint 上有哪些模型 ----------------
+
+/// 列出可用模型（OpenAI 兼容的 `/v1/models`）。
+///
+/// 为什么值得单独做：各家模型的名字是会变的（下架、换版本号、加后缀），
+/// 让用户手填模型名，填错只能拿到一句冷冰冰的 404。
+/// **能列出来就别让人猜。**
+///
+/// 两种返回格式都认（OpenAI 的 `data[].id`、Ollama 的 `models[].name`）——
+/// 认不出来就把**原文开头**报出来，让人看得见到底收到了什么，
+/// 而不是一句"解析失败"。
+pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/v1/models");
+    let mut headers = "Accept: application/json\r\n".to_string();
+    let key = api_key.trim();
+    if !key.is_empty() {
+        headers.push_str(&format!("Authorization: Bearer {key}\r\n"));
+    }
+    // 复用更新器那套 WinHTTP（含代理回退与超时），**不新增依赖**
+    let body = crate::updater::http::get(&url, &headers, 15000, 2 * 1024 * 1024)?;
+    let text = String::from_utf8(body).map_err(|_| "响应不是合法的 UTF-8".to_string())?;
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(arr) = v.get("data").and_then(|x| x.as_array()) {
+            let ids: Vec<String> = arr
+                .iter()
+                .filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                .collect();
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+        if let Some(arr) = v.get("models").and_then(|x| x.as_array()) {
+            let names: Vec<String> = arr
+                .iter()
+                .filter_map(|m| {
+                    m.get("name")
+                        .or_else(|| m.get("model"))
+                        .or_else(|| m.get("id"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            if !names.is_empty() {
+                return Ok(names);
+            }
+        }
+    }
+    Err(format!(
+        "没从这个地址认出模型列表：{url}\n开头是：{}",
+        text.chars().take(150).collect::<String>()
+    ))
 }
