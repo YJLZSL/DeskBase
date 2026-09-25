@@ -80,6 +80,49 @@
     step("IPC 桥已就绪", bridged, bridged ? "" : "typeof __deskbase.call = " + typeof (window.__deskbase && window.__deskbase.call));
     if (!bridged) throw new Error("桥没就绪，后面的检查无从谈起");
 
+    // ---------- 滚动长截图（v1.6.0）----------
+    //
+    // capture.rs 里的位移估计/拼接/PNG 编码**早就有测试**，这里验的是那条
+    // 新接上的往返链路（scrollStart → scrollFrame × N → scrollFinish）。
+    //
+    // **刻意不在这里做一次完整的长截图**：它抓的是真实屏幕，烟测跑起来时
+    // 前台是谁不确定，断言"拼出来对不对"会变成一个看运气的测试。
+    // 抓屏内容对不对属于**人眼验收**，代码里只能验"链路通、异常拦得住"。
+    {
+      try {
+        const st = await ipc("capture.scrollStart", {});
+        step("长截图能开一轮", !!(st && st.started));
+
+        // 只抓一帧就收尾：应当被拦下（一帧拼不出长图）
+        await ipc("capture.scrollFrame", { x: 0, y: 0, w: 60, h: 60 });
+        let blocked = false;
+        let why = "";
+        try {
+          await ipc("capture.scrollFinish", { max_shift: 60 });
+        } catch (e) {
+          blocked = true;
+          why = String((e && e.message) || e);
+        }
+        step("只有一帧时会被拦下（拼不出长图）", blocked, why.slice(0, 40));
+
+        // 抓两帧再收尾：应当真的产出文件，且高度 > 单帧高
+        await ipc("capture.scrollStart", {});
+        await ipc("capture.scrollFrame", { x: 0, y: 0, w: 60, h: 60 });
+        await ipc("capture.scrollFrame", { x: 0, y: 40, w: 60, h: 60 });
+        const r = await ipc("capture.scrollFinish", { max_shift: 60 });
+        step(
+          "两帧能拼出长图并落盘",
+          !!(r && r.path && r.height >= 60 && r.frames === 2),
+          r ? `${r.height}px · ${r.frames} 帧` : "没有返回"
+        );
+        // 不再另问一次"文件在不在"：`save_png` 是**先写成功才返回路径**的，
+        // 能拿到 path 就已经说明落盘了。多一次 IPC 只是多一处会误报的地方。
+        step("长图路径看起来对（在截图目录下）", !!(r && /\.png$/.test(r.path || "")), r ? r.path : "");
+      } catch (e) {
+        step("长截图链路接线通", false, String(e && e.message));
+      }
+    }
+
     // ---------- 富文本：Markdown 工具栏 + 预览 ----------
     // 重点不是"按钮在不在"，而是**渲染器真的把 Markdown 变成了标签** ——
     // 只断言"预览区有文字"是会被空壳骗过去的（原样吐文本也有文字）。

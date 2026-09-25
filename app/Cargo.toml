@@ -1,6 +1,6 @@
 [package]
 name = "deskbase"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 description = "DeskBase 桌库 —— 本地优先、隐私优先的办公工具箱，内置轻量数据表引擎（多表 + 关联 + 协同更新，无 SQL）"
 license = "Apache-2.0"

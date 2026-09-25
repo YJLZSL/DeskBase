@@ -1241,9 +1241,79 @@
     }
   });
 
+  // ---------- 滚动长截图 ----------
+  //
+  // **为什么由界面驱动滚动**：滚哪个元素、滚多少，只有界面知道 ——
+  // Rust 猜不准（读文章的滚动、表格的横竖滚、表单页的滚各不相同）。
+  // Rust 只负责"抓"和"拼"，那部分是现成的（capture.rs 的 estimate/stitch/save_png），
+  // 这个功能之所以长期悬着，就是缺"界面滚一屏 → Rust 抓一帧"这条往返。
+  async function longScreenshot() {
+    const btn = $("#btn-longshot");
+    // 找当前视图里真正在滚的那个元素：从里往外找第一个"内容比容器高"的
+    const view = document.querySelector('.view[data-active="true"]') || document.body;
+    let sc = null;
+    for (const el of view.querySelectorAll("*")) {
+      if (el.scrollHeight > el.clientHeight + 4 && el.clientHeight > 120) {
+        sc = el;
+        break;
+      }
+    }
+    if (!sc && view.scrollHeight > view.clientHeight + 4) sc = view;
+    if (!sc) {
+      toast("这一屏没有可滚动的内容，长截图没意义", "error");
+      return;
+    }
+
+    const rect = sc.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    // 抓屏用的是**虚拟桌面的物理像素**（capture.rs 那边设了 DPI aware），
+    // 所以要乘 dpr；窗口还有边框与标题栏，也要让掉。
+    const bx = (window.outerWidth - window.innerWidth) / 2;
+    const by = window.outerHeight - window.innerHeight;
+    const gx = Math.round((window.screenX + bx + rect.left) * dpr);
+    const gy = Math.round((window.screenY + by + rect.top) * dpr);
+    const gw = Math.round(rect.width * dpr);
+    const gh = Math.round(rect.height * dpr);
+
+    const step = Math.max(40, sc.clientHeight - 40);
+    const total = sc.scrollHeight;
+    const keep = sc.scrollTop;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "拍长图中…";
+    }
+    try {
+      await call("capture.scrollStart", {});
+      let frames = 0;
+      for (let y = 0; y < total && frames < 60; y += step) {
+        sc.scrollTop = y;
+        // 等**两帧**：滚动 → 样式/布局 → 重绘。只等一帧有概率抓到半截滚动中的画面。
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await call("capture.scrollFrame", { x: gx, y: gy, w: gw, h: gh });
+        frames += 1;
+      }
+      sc.scrollTop = keep;
+      const r = await call("capture.scrollFinish", { max_shift: gh });
+      const guessTip = r.guessed
+        ? "；有 " + r.guessed + " 处接缝是靠估的，可能不齐（滚动带惯性或懒加载时常见）"
+        : "";
+      toast("长图已存：" + r.path + "（" + r.frames + " 帧，高 " + r.height + "px）" + guessTip);
+    } catch (e) {
+      toast("长截图失败：" + ((e && e.message) || e), "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "长截图";
+      }
+    }
+  }
+
   // ============================================================
   // 截图
   // ============================================================
+  const $long = $("#btn-longshot");
+  if ($long) $long.addEventListener("click", longScreenshot);
+
   $("#btn-screenshot").addEventListener("click", async () => {
     const btn = $("#btn-screenshot");
     btn.disabled = true;

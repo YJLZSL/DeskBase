@@ -264,6 +264,13 @@ fn err(id: u64, message: impl Into<String>) -> String {
     serde_json::json!({ "id": id, "ok": false, "error": message.into() }).to_string()
 }
 
+/// 滚动长截图的帧缓冲。
+///
+/// 为什么用**静态变量**而不是塞进 AppState：它天然是"一轮操作内的临时态"，
+/// 没有任何别的地方需要看见它；塞进 State 只会让那个结构多一个谁都不用的字段。
+/// 用 Mutex 是因为 IPC 可能并发进来（界面连点两下）。
+static SCROLL_FRAMES: std::sync::Mutex<Vec<capture::Frame>> = std::sync::Mutex::new(Vec::new());
+
 fn main() -> wry::Result<()> {
     // ---------- 命令行模式（走在最前面，且不碰数据库）----------
     //
@@ -1637,6 +1644,121 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // ---------- 截长图（capture.rs）----------
         // 抓当前窗口所在显示器的一块区域存成 PNG。
         // 真正的滚动拼接需要驱动滚动条，那一步在 UI 侧做（Rust 不该去合成输入事件）。
+        // ---------- 滚动长截图（把已有算法接上界面）----------
+        //
+        // capture.rs 里 `estimate_scroll_offset` / `stitch` / `save_png` **早就写好了**，
+        // 一直缺的是"界面滚一屏 → Rust 抓一帧"这条往返。这三条命令就是那条往返：
+        //
+        //   scrollStart   开一轮（清空缓冲）
+        //   scrollFrame   抓一帧当前区域，推进缓冲（由界面每滚一屏调一次）
+        //   scrollFinish  估位移 → 拼接 → 存 PNG
+        //
+        // 为什么让**界面**驱动循环而不是 Rust 主动滚：滚动的实现方式取决于内容
+        // （读文章的滚动、表格的横竖滚、第三方页面的滚，各不相同），Rust 猜不准；
+        // 而界面自己知道该滚哪个元素、滚多少。Rust 只负责"抓"和"拼"。
+        "capture.scrollStart" => {
+            match SCROLL_FRAMES.lock() {
+                Ok(mut v) => {
+                    v.clear();
+                    ok(id, serde_json::json!({ "started": true }))
+                }
+                Err(_) => err(id, "截图缓冲被锁住了"),
+            }
+        }
+
+        "capture.scrollFrame" => {
+            let n = |k: &str| req.args.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+            let x = n("x") as i32;
+            let y = n("y") as i32;
+            let w = n("w") as u32;
+            let h = n("h") as u32;
+            if w == 0 || h == 0 {
+                return err(id, "抓取区域宽高不能是 0");
+            }
+            match capture::grab_frame(x, y, w, h) {
+                Ok(f) => match SCROLL_FRAMES.lock() {
+                    Ok(mut v) => {
+                        v.push(f);
+                        ok(id, serde_json::json!({ "count": v.len() }))
+                    }
+                    Err(_) => err(id, "截图缓冲被锁住了"),
+                },
+                Err(e) => err(id, e),
+            }
+        }
+
+        "capture.scrollFinish" => {
+            let out = req
+                .args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 不给路径就自动生成一个：截图目录 + 时间戳。
+            // 前端不该为"该存哪"操心 —— 那是 Rust 这边的事（而且它才知道数据目录）。
+            let out = if out.is_empty() {
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                state
+                    .data_dir
+                    .join("shots")
+                    .join(format!("长图-{ms}.png"))
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                out
+            };
+            // max_shift：一帧最多可能滚多少（取帧高，超过就是找错了）
+            let max_shift = req
+                .args
+                .get("max_shift")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let frames: Vec<capture::Frame> = match SCROLL_FRAMES.lock() {
+                Ok(mut v) => std::mem::take(&mut *v),
+                Err(_) => return err(id, "截图缓冲被锁住了"),
+            };
+            if frames.len() < 2 {
+                return err(id, "至少要有两帧才能拼（滚动截图没跑起来？）");
+            }
+            // 逐对估位移。估不出来就用"整帧高"兜底 ——
+            // **宁可多留内容也不要错位**，多留看得见，错位看不出来。
+            let fallback = if max_shift > 0 { max_shift } else { frames[0].h };
+            let mut offsets: Vec<u32> = vec![0];
+            let mut guessed = 0usize;
+            for i in 1..frames.len() {
+                match capture::estimate_scroll_offset(&frames[i - 1], &frames[i], fallback) {
+                    Some(o) => offsets.push(o),
+                    None => {
+                        guessed += 1;
+                        offsets.push(fallback);
+                    }
+                }
+            }
+            match capture::stitch(&frames, &offsets) {
+                Ok((img, total_h)) => {
+                    let p = std::path::PathBuf::from(&out);
+                    match capture::save_png(&img, &p) {
+                        Ok(()) => ok(
+                            id,
+                            serde_json::json!({
+                                "path": p.to_string_lossy(),
+                                "frames": frames.len(),
+                                "height": total_h,
+                                // 有几帧是靠兜底估的 —— 如实报出来，
+                                // 界面上要提醒"这张图可能在接缝处不准"
+                                "guessed": guessed,
+                            }),
+                        ),
+                        Err(e) => err(id, e),
+                    }
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
         "capture.screen" => {
             let dir = state.data_dir.join("exports");
             if let Err(e) = std::fs::create_dir_all(&dir) {

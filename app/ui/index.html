@@ -433,6 +433,13 @@
               <span>屏幕截图</span>
               <div class="link-row">
                 <button class="btn" id="btn-screenshot">截取当前屏幕</button>
+
+              <!-- 长截图：由界面滚一屏、Rust 抓一帧，全部滚完再拼接。
+                   文案里承诺过"截图工具里能拼接长图"，之前一直没接线，现在补上。 -->
+              <button class="btn btn-ghost db-mini" id="btn-longshot" type="button"
+                      title="把当前可滚动区域整页拍成一张长图（每滚一屏抓一帧再拼接）">
+                长截图
+              </button>
                 <button class="btn btn-ghost" id="btn-reveal-shot" hidden>打开所在文件夹</button>
               </div>
               <div class="hint" id="shot-hint">
