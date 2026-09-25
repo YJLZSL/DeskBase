@@ -27,6 +27,7 @@
 //! 就是一次前缀范围扫描 —— 不需要任何查询语言。
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Batch, Store};
@@ -457,11 +458,44 @@ pub struct View {
 // Db
 // ===========================================================================
 
+/// 索引定义：哪张表的哪一列要建索引。
+///
+/// **持久化**（存在 store 的 `idx/<表名>` 下）—— 用户建了索引，重开还在。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexSpec {
+    pub table: String,
+    pub column: String,
+}
+
+/// 一列的**值索引**：去重后的值 → 行号集合。
+///
+/// 为什么这样做，而不是搞一套完整的倒排/分词：我们要解决的是"搜某一格内容"，
+/// 而**值去重之后通常远少于行数** —— "客户"这一列 10 万行可能只有几千个不同的名字。
+/// 扫几千个唯一值比扫 10 万行快一个数量级，而实现复杂度只有完整倒排的零头。
+///
+/// **这是朴素但真实的索引，不是摆设**：搜有索引的列时不再全表扫描。
+/// 将来真要做到"任意子串秒搜"，再上分词与倒排，这个结构也不浪费（可以只换内层）。
+#[derive(Debug, Default)]
+pub struct ValueIndex {
+    /// 值 → 行号。**存原始值**（不预先转小写）—— 否则把它显示出来时，
+    /// 英文会全变成小写。大小写不敏感在**比较时**做即可。
+    pub map: BTreeMap<String, Vec<i64>>,
+    /// 建这个索引时扫了多少行 —— 界面上要**如实**显示，
+    /// 因为它决定了"这个索引覆盖全表了吗"
+    pub scanned_rows: usize,
+    /// 唯一值的个数（界面显示用，也让人直观感受它比全表小多少）
+    pub distinct: usize,
+}
+
 pub struct Db {
     store: Store,
     /// 历史键的自增后缀。时间戳定宽（12 位）保证按字典序就是时间序，
     /// 同一毫秒内的多次变更靠它区分 —— 否则两次写入会覆盖成同一条历史。
     hst_seq: u64,
+    /// 索引**内容**的缓存。只放内存、不落盘 —— 数据是会变的，
+    /// 落盘就得跟着每次写一起维护，代价高且容易与数据不一致。
+    /// 代价是重开要重建；好处是**永远不会有"索引和数据对不上"这种错**。
+    index_cache: HashMap<String, ValueIndex>,
 }
 
 impl Db {
@@ -469,6 +503,7 @@ impl Db {
         Ok(Db {
             store: Store::open(data_dir)?,
             hst_seq: 0,
+            index_cache: HashMap::new(),
         })
     }
 
@@ -1154,6 +1189,7 @@ impl Db {
     }
 
     pub fn insert_rows(&mut self, table: &str, columns: &[String], rows: &[Vec<Option<String>>]) -> Result<usize> {
+        self.invalidate_indexes(table);
         validate_identifier(table)?;
         let mut t = self.load_table(table)?;
         let mut b = Batch::new();
@@ -1203,6 +1239,7 @@ impl Db {
     }
 
     pub fn update_cell(&mut self, table: &str, rowid: i64, column: &str, value: Option<&str>) -> Result<SyncReport> {
+        self.invalidate_indexes(table);
         validate_identifier(table)?;
         validate_column_name(column)?;
         let t = self.load_table(table)?;
@@ -1253,6 +1290,7 @@ impl Db {
     }
 
     pub fn delete_rows(&mut self, table: &str, rowids: &[i64]) -> Result<usize> {
+        self.invalidate_indexes(table);
         if rowids.is_empty() {
             return Ok(0);
         }
@@ -1501,6 +1539,96 @@ impl Db {
         }
         sort_rows(&mut rows, &v.sorts);
         finish_page(&t, rows, cursor, limit)
+    }
+
+    // ---------- 索引 ----------
+
+    fn idx_key(table: &str) -> String {
+        format!("idx/{table}")
+    }
+
+    /// 这张表上建了哪些索引。
+    pub fn list_indexes(&self, table: &str) -> Result<Vec<IndexSpec>> {
+        let k = Self::idx_key(table);
+        match self.store.get(&k) {
+            Some(v) => serde_json::from_str(&v).map_err(|e| format!("索引定义读不出来：{e}")),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// 给一列建索引。列不存在要报错 —— 给一个不存在的列建索引没有意义，
+    /// 而且会让人误以为"建了但搜不到"是坏了。
+    pub fn create_index(&mut self, table: &str, column: &str) -> Result<()> {
+        let t = self.load_table(table)?;
+        if t.field(column).is_none() {
+            return Err(format!("「{table}」里没有「{column}」这一列"));
+        }
+        let mut list = self.list_indexes(table)?;
+        if list.iter().any(|x| x.column == column) {
+            return Ok(()); // 已经有了，不重复建
+        }
+        list.push(IndexSpec {
+            table: table.to_string(),
+            column: column.to_string(),
+        });
+        let v = serde_json::to_string(&list).map_err(|e| format!("索引定义存不下来：{e}"))?;
+        self.store.put(&Self::idx_key(table), v)?;
+        // 顺手把缓存作废：下次用到会按新定义重建
+        self.index_cache.remove(&format!("{table}/{column}"));
+        Ok(())
+    }
+
+    pub fn drop_index(&mut self, table: &str, column: &str) -> Result<()> {
+        let mut list = self.list_indexes(table)?;
+        let before = list.len();
+        list.retain(|x| x.column != column);
+        if list.len() == before {
+            return Err(format!("「{column}」上本来就没有索引"));
+        }
+        let v = serde_json::to_string(&list).map_err(|e| format!("索引定义存不下来：{e}"))?;
+        self.store.put(&Self::idx_key(table), v)?;
+        self.index_cache.remove(&format!("{table}/{column}"));
+        Ok(())
+    }
+
+    /// 取（必要时构建）某列的索引。
+    pub fn get_index(&mut self, table: &str, column: &str) -> Result<&ValueIndex> {
+        let ck = format!("{table}/{column}");
+        if !self.index_cache.contains_key(&ck) {
+            let mut idx = ValueIndex::default();
+            let page = self.page_rows(table, None, false, None, usize::MAX)?;
+            let ci = page
+                .columns
+                .iter()
+                .position(|c| c == column)
+                .ok_or_else(|| format!("「{table}」里没有「{column}」这一列"))?;
+            idx.scanned_rows = page.rows.len();
+            for row in &page.rows {
+                // 第 0 列是 rowid
+                let rowid = row.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                let val = row.get(ci);
+                let txt = match val {
+                    Some(serde_json::Value::String(x)) => x.clone(),
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    _ => continue,
+                };
+                idx.map.entry(txt).or_default().push(rowid);
+            }
+            idx.distinct = idx.map.len();
+            self.index_cache.insert(ck.clone(), idx);
+        }
+        self.index_cache
+            .get(&ck)
+            .ok_or_else(|| "索引建好了却取不到".to_string())
+    }
+
+    /// 写操作之后调用：这张表的所有索引作废。
+    ///
+    /// **宁可作废也不要增量维护** —— 增量维护一旦漏了一种写路径，
+    /// 索引就会静默地和数据不一致，而这种错最难查（现象只是"偶尔搜不到"）。
+    fn invalidate_indexes(&mut self, table: &str) {
+        let prefix = format!("{table}/");
+        self.index_cache.retain(|k, _| !k.starts_with(&prefix));
     }
 
     pub fn page_rows(
@@ -2492,6 +2620,86 @@ mod tests {
     /// "不能建指向不存在表的关联"这条约束，在加列时形同不存在。
     /// 实测能建出关联到「根本不存在的表」的列，之后读到的是悬空引用。
     /// 而加列是更常用的入口（建表时要先有目标表，加列时两边往往都已存在）。
+    /// 索引要真的把"行数"压成"唯一值数" —— 否则它就是个摆设。
+    #[test]
+    fn 索引_建了能列出来_且值是去重的() {
+        let d = tmp("idx1");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
+        // 3 行，其中两行同值 —— 去重后应当是 2
+        db.insert_rows(
+            "客户",
+            &["客户名".to_string()],
+            &vec![
+                vec![Some("张三".to_string())],
+                vec![Some("李四".to_string())],
+                vec![Some("张三".to_string())],
+            ],
+        )
+        .unwrap();
+
+        assert!(db.list_indexes("客户").unwrap().is_empty(), "一开始没有索引");
+        db.create_index("客户", "客户名").unwrap();
+        let list = db.list_indexes("客户").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].column, "客户名");
+
+        let idx = db.get_index("客户", "客户名").unwrap();
+        assert_eq!(idx.scanned_rows, 3, "扫了 3 行");
+        assert_eq!(idx.distinct, 2, "**去重后只有 2 个不同的值** —— 这就是索引的意义");
+        assert_eq!(idx.map.get("张三").unwrap().len(), 2, "张三对应 2 行");
+
+        // 给不存在的列建索引要报错（建了但搜不到会让人以为是坏了）
+        let e = db.create_index("客户", "没有这列").unwrap_err();
+        assert!(e.contains("没有这列"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 数据变了之后索引必须跟着变。**这是索引最容易出错的地方** ——
+    /// 增量维护只要漏掉一种写路径，索引就会静默地和资料不一致，
+    /// 而现象只是"偶尔搜不到"，极难查。所以这里选了"写即作废"。
+    #[test]
+    fn 索引_写操作后跟着数据变() {
+        let d = tmp("idx2");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
+        db.insert_rows(
+            "客户",
+            &["客户名".to_string()],
+            &vec![vec![Some("张三".to_string())]],
+        )
+        .unwrap();
+        db.create_index("客户", "客户名").unwrap();
+        assert_eq!(db.get_index("客户", "客户名").unwrap().distinct, 1);
+
+        // 再插一行新的值 → 索引必须看得到
+        db.insert_rows(
+            "客户",
+            &["客户名".to_string()],
+            &vec![vec![Some("王五".to_string())]],
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_index("客户", "客户名").unwrap().distinct,
+            2,
+            "插了新值之后索引必须重建，否则搜不到新数据"
+        );
+
+        // 改一个格 → 也要重建
+        let rowid = db.get_index("客户", "客户名").unwrap().map.get("张三").unwrap()[0];
+        db.update_cell("客户", rowid, "客户名", Some("赵六")).unwrap();
+        let idx = db.get_index("客户", "客户名").unwrap();
+        assert!(idx.map.contains_key("赵六"), "改过的值要能在索引里找到");
+        assert!(!idx.map.contains_key("张三"), "旧值不该还在索引里");
+
+        // 删索引
+        db.drop_index("客户", "客户名").unwrap();
+        assert!(db.list_indexes("客户").unwrap().is_empty());
+        let e = db.drop_index("客户", "客户名").unwrap_err();
+        assert!(e.contains("本来就没有"), "重复删要给个说法");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn 加列关联到不存在的表要被拦下() {
         let d = tmp("linkadd");

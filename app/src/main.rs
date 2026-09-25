@@ -1130,6 +1130,93 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         //
         // 「有几个库、多少条、占了多大、上次备份什么时候」—— 尤其最后一条：
         // 它直接对应「不丢数据」这条承诺，看不见的备份等于没有备份。
+        // ---------- 索引管理 ----------
+        //
+        // 为什么要有它：引擎里搜单元格内容是**全表扫描**（BTreeMap 是记录存储，
+        // 不是索引），所以只能"每表限扫 2000 行"顶着。建了索引之后，
+        // 扫的是**去重后的值** —— 通常比行数少一个数量级，而且不再限行。
+        "index.list" => {
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if table.is_empty() {
+                return err(id, "缺少参数 table");
+            }
+            match state.db.lock() {
+                Ok(d) => match d.list_indexes(table) {
+                    Ok(list) => {
+                        let cols: Vec<serde_json::Value> = list
+                            .iter()
+                            .map(|x| serde_json::json!({ "column": x.column }))
+                            .collect();
+                        ok(id, serde_json::json!({ "indexes": cols }))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "index.create" => {
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let column = req
+                .args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if table.is_empty() || column.is_empty() {
+                return err(id, "缺少参数 table / column");
+            }
+            match state.db.lock() {
+                Ok(mut d) => match d.create_index(table, column) {
+                    Ok(()) => {
+                        log_line(
+                            &state.data_dir,
+                            &format!("建索引：{table}.{column}"),
+                        );
+                        ok(id, serde_json::json!({ "ok": true }))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "index.drop" => {
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let column = req
+                .args
+                .get("column")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if table.is_empty() || column.is_empty() {
+                return err(id, "缺少参数 table / column");
+            }
+            match state.db.lock() {
+                Ok(mut d) => match d.drop_index(table, column) {
+                    Ok(()) => {
+                        log_line(
+                            &state.data_dir,
+                            &format!("删索引：{table}.{column}"),
+                        );
+                        ok(id, serde_json::json!({ "ok": true }))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "app.dashboard" => {
             let (tables, notes, rows) = match state.db.lock() {
                 Ok(mut d) => {
@@ -1249,14 +1336,49 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let mut hit_cells = Vec::new();
-            // 每张表最多扫这么多行。**定义在这里而不是 if 块内**：下面返回
+            // 没索引的表最多扫这么多行。**定义在这里而不是 if 块内**：下面返回
             // "扫了多少"时还要用到它。
             const SCAN_ROWS: usize = 2000;
             if deep {
                 match state.db.lock() {
-                    Ok(d) => {
+                    Ok(mut d) => {
                         if let Ok(ts) = d.list_tables() {
                             'outer: for t in &ts {
+                                // ① 有索引的列：扫**去重后的值**，不平行数，也不限行
+                                let idxs = d.list_indexes(&t.name).unwrap_or_default();
+                                for spec in idxs {
+                                    if hit_cells.len() >= limit {
+                                        break 'outer;
+                                    }
+                                    // 取索引后**把命中的值拷出来**再放开借用 ——
+                                    // 否则下面还要用 d，会撞上借用检查
+                                    let found: Vec<String> = {
+                                        let Ok(idx) = d.get_index(&t.name, &spec.column) else {
+                                            continue;
+                                        };
+                                        idx.map
+                                            .keys()
+                                            .filter(|v| v.to_lowercase().contains(&ql))
+                                            .take(limit)
+                                            .cloned()
+                                            .collect()
+                                    };
+                                    for val in found {
+                                        if hit_cells.len() >= limit {
+                                            break 'outer;
+                                        }
+                                        hit_cells.push(serde_json::json!({
+                                            "table": t.name,
+                                            "column": spec.column,
+                                            "value": val,
+                                            "via": "index",
+                                        }));
+                                    }
+                                }
+                                // ② 这表没索引：退回限扫（慢，但至少能搜到）
+                                if hit_cells.len() >= limit {
+                                    break 'outer;
+                                }
                                 let Ok(page) = d.page_rows(&t.name, None, false, None, SCAN_ROWS) else {
                                     continue;
                                 };
@@ -1281,8 +1403,8 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                                                 "table": t.name,
                                                 "column": col,
                                                 "value": txt,
+                                                "via": "scan",
                                             }));
-                                            // 一行只报一次，够了
                                             break;
                                         }
                                     }

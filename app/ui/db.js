@@ -2023,6 +2023,71 @@
       }
     });
 
+    // ---------- 索引 ----------
+    //
+    // 引擎里搜单元格内容是**全表扫描**（BTreeMap 是记录存储，不是索引），
+    // 所以只能"每表限扫 2000 行"顶着。建了索引之后扫的是**去重后的值**，
+    // 通常比行数少一个数量级。这一段就是把那个开关交给用户。
+    const idxWrap = el("div", { class: "db-schema-idx" });
+    idxWrap.append(el("div", { class: "t" }, "索引"));
+    const idxList = el("div", { class: "s" });
+    const idxErr = el("div", { class: "err" });
+    async function reloadIdx() {
+      idxErr.textContent = "";
+      try {
+        const r = await call("index.list", { table: tname });
+        idxList.textContent = "";
+        const list = (r && r.indexes) || [];
+        if (!list.length) {
+          idxList.textContent =
+            "还没有索引。建了之后，搜这一列就不用逐行扫了（扫的是去重后的值）。";
+        } else {
+          list.forEach((x) => {
+            const row = el("div", { class: "db-idx-row" });
+            row.append(el("span", null, x.column));
+            const del = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "删掉");
+            del.setAttribute("aria-label", "删掉 " + x.column + " 上的索引");
+            del.addEventListener("click", async () => {
+              try {
+                await call("index.drop", { table: tname, column: x.column });
+                await reloadIdx();
+              } catch (e) {
+                idxErr.textContent = errText(e);
+              }
+            });
+            row.append(del);
+            idxList.append(row);
+          });
+        }
+      } catch (e) {
+        idxErr.textContent = errText(e);
+      }
+    }
+    const idxSel = el("select", { class: "select", "aria-label": "要给哪一列建索引" });
+    // 这个作用域里没有现成的列清单，自己取一次
+    try {
+      const ti = await call("schema.getTable", { name: tname });
+      ((ti && ti.columns) || []).forEach((c) =>
+        idxSel.append(el("option", { value: c.name }, c.name))
+      );
+    } catch (_) {}
+    const btnIdx = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "建索引");
+    btnIdx.addEventListener("click", async () => {
+      if (!idxSel.value) {
+        idxErr.textContent = "先选一列";
+        return;
+      }
+      try {
+        await call("index.create", { table: tname, column: idxSel.value });
+        await reloadIdx();
+      } catch (e) {
+        idxErr.textContent = errText(e);
+      }
+    });
+    idxWrap.append(idxList, idxSel, btnIdx, idxErr);
+    dlg.append(idxWrap);
+    reloadIdx();
+
     btnComment.addEventListener("click", async () => {
       try {
         await call("schema.setTableComment", { table: tname, comment: commentInput.value });

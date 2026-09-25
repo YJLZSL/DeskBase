@@ -505,6 +505,41 @@
         }
         step("关联到不存在的表会被拦下", linkBlocked, linkWhy.slice(0, 60));
 
+        // ---------- 索引（v1.3.0）----------
+        // 引擎里搜单元格内容是全表扫描；索引让搜索扫"去重后的值"。
+        // 这里盖接线 + 异常路径；**索引是否真让搜索变快由 Rust 测试盖**
+        // （断言 distinct 明显小于 scanned_rows）。
+        try {
+          await ipc("index.create", { table: newName, column: "品名" });
+          const il = await ipc("index.list", { table: newName });
+          const has = ((il && il.indexes) || []).some((x) => x.column === "品名");
+          step("能给列建索引并且列得出来", has, has ? "品名" : "没列出来");
+
+          let dupOk = false;
+          try {
+            await ipc("index.create", { table: newName, column: "品名" });
+            dupOk = true;
+          } catch (_) {}
+          step("重复建同一个索引不报错（幂等）", dupOk);
+
+          let blocked2 = false;
+          let why2 = "";
+          try {
+            await ipc("index.create", { table: newName, column: "根本没这列" });
+          } catch (e) {
+            blocked2 = true;
+            why2 = String((e && e.message) || e);
+          }
+          step("给不存在的列建索引会被拦下", blocked2, why2.slice(0, 40));
+
+          await ipc("index.drop", { table: newName, column: "品名" });
+          const il2 = await ipc("index.list", { table: newName });
+          const gone = !((il2 && il2.indexes) || []).some((x) => x.column === "品名");
+          step("能删掉索引", gone);
+        } catch (e) {
+          step("索引 IPC 接线通", false, String(e));
+        }
+
         // ---------- 关联列的**界面入口**（后端通了 ≠ 界面露出来了）----------
         // 上面那段走的是编程入口，只能证明 IPC 通。关联功能以前的问题恰恰是
         // "引擎支持、界面没入口"，所以必须在**真对话框里**点一遍：

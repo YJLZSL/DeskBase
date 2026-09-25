@@ -1218,6 +1218,34 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   white-space: nowrap;
 }
 
+/* 索引区（表结构对话框里）*/
+.db-schema-idx {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md, 8px);
+  background: var(--card);
+}
+.db-schema-idx .t {
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.db-schema-idx .s {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+.db-idx-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  justify-content: space-between;
+}
+.db-idx-row > span {
+  color: var(--ink-1);
+}
+
 .settings-nav {
   position: sticky;
   top: 0;
