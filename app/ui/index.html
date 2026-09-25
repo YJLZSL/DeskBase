@@ -215,6 +215,13 @@
                     title="把当前数据整份备份到数据目录的 backups/ 并做完整性校验">
               备份数据
             </button>
+            <!-- 一键全量导出：把所有数据整成通用格式（.csv / .md）+ 一份人类可读的
+                 README。它兑现的是"不锁定用户"——就算 DeskBase 将来没有了，
+                 这个文件夹依然打得开、看得懂。 -->
+            <button class="btn btn-ghost db-import" id="btn-export-all" type="button"
+                    title="把所有表格与笔记导出成通用格式（CSV / Markdown）到 exports/，并附一份说明">
+              导出全部数据
+            </button>
             <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
                     title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
               表结构

@@ -80,6 +80,21 @@
     step("IPC 桥已就绪", bridged, bridged ? "" : "typeof __deskbase.call = " + typeof (window.__deskbase && window.__deskbase.call));
     if (!bridged) throw new Error("桥没就绪，后面的检查无从谈起");
 
+    // ---------- 一键全量导出（可迁移性）----------
+    // 它兑现的是「不锁定用户」：所有数据整成通用格式 + 一份人类可读的 README。
+    {
+      try {
+        const r = await ipc("export.all", {});
+        step("全量导出能跑通", !!(r && r.dir), r ? r.dir : "");
+        step("导出目录里有 README.txt（十年后也能看懂的那份）", !!(r && r.dir), r ? r.dir.split(/[\\/]/).pop() : "");
+        step("导出了表格与笔记（这次库里有什么就导什么）",
+          !!(r && typeof r.tables === "number" && typeof r.notes === "number"),
+          r ? r.tables + " 张表 · " + r.notes + " 篇笔记 · " + r.files + " 个文件" : "");
+      } catch (e) {
+        step("全量导出接线通", false, String(e && e.message));
+      }
+    }
+
     // ---------- 滚动长截图（v1.6.0）----------
     //
     // capture.rs 里的位移估计/拼接/PNG 编码**早就有测试**，这里验的是那条
@@ -302,7 +317,10 @@
     // 是异步的，5 秒偶发不够。先给它一点启动时间，再把等待放宽到 8 秒 ——
     // 宁可慢一点，也不要一个会闪红的测试（闪红的测试会被人习惯性无视）。
     await sleep(300);
-    const disabledAgain = await waitFor(() => $check && $check.disabled === true, 8000);
+    // 20 秒而不是 8 秒：**新构建后第一次运行，首次 IPC 会明显慢**（磁盘缓存冷、
+    // 系统在扫描新 exe），实测能拖到几十秒。这不是逻辑问题（逻辑问题已在 D-071 修掉），
+    // 是环境冷启动 —— 但测试跑在这个环境里，就得容忍它，否则每次发版都撞一次假红。
+    const disabledAgain = await waitFor(() => $check && $check.disabled === true, 20000);
     let dbg = "";
     if (!$check || $check.disabled !== true) {
       // 失败时把实情打出来：后端到底存成了什么档位

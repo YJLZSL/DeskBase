@@ -20,6 +20,7 @@ mod convert;
 mod csv_import;
 mod db;
 mod excel_import;
+mod export_all;
 mod recovery;
 mod import_pipeline;
 mod workspace;
@@ -2959,6 +2960,47 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 为什么是 HTML 而不是直接生成 PDF：真做 PDF 要引排版/字体嵌入的依赖，
         // 体积与复杂度都不划算；而**用户真正的目的**是"能打印、能发给别人看"，
         // 一个打印友好的 HTML 在浏览器里 Ctrl+P 就是 PDF —— 目的达到了，代价小得多。
+        // ---------- 一键全量导出（可迁移性）----------
+        //
+        // 它兑现的是「不锁定用户」这条承诺：把所有数据整成通用格式（.csv / .md）
+        // 放进一个目录，附带一份**人类可读**的 README.txt。
+        // 详见 `docs/05-office-toolbox.md` §13.3 与 `app/src/export_all.rs` 顶部。
+        "export.all" => {
+            let out_root = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&out_root) {
+                return err(id, format!("建导出目录失败：{e}"));
+            }
+            match state.db.lock() {
+                Ok(mut d) => match export_all::export_all(&mut d, &out_root) {
+                    Ok(r) => {
+                        log_line(
+                            &state.data_dir,
+                            &format!(
+                                "全量导出：{}（{} 张表 · {} 篇笔记 · {} 个文件 · {} 字节）",
+                                r.dir.display(),
+                                r.tables,
+                                r.notes,
+                                r.files,
+                                r.bytes
+                            ),
+                        );
+                        ok(
+                            id,
+                            serde_json::json!({
+                                "dir": r.dir.to_string_lossy(),
+                                "tables": r.tables,
+                                "notes": r.notes,
+                                "files": r.files,
+                                "bytes": r.bytes,
+                            }),
+                        )
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
         "note.exportHtml" => {
             let Some(nid) = req.args.get("id").and_then(|v| v.as_str()) else {
                 return err(id, "缺少参数 id");

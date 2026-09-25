@@ -1222,6 +1222,27 @@
   document.getElementById("btn-db-refresh").addEventListener("click", () => refreshTables());
   // 备份按钮：进「数据库」页就能点，不需要先打开某张表
   document.getElementById("btn-db-backup").addEventListener("click", () => { openBackupDialog(); });
+
+  // 一键全量导出。和「备份」不是一回事，分工要跟用户说清：
+  //   备份 → 给 DeskBase 自己恢复用，格式是它自己的；
+  //   导出 → 给**别的软件**用（Excel / 任何编辑器），格式是通用的。
+  document.getElementById("btn-export-all").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-export-all");
+    btn.disabled = true;
+    btn.textContent = "导出中…";
+    try {
+      const r = await call("export.all", {});
+      toast(
+        "已导出 " + r.tables + " 张表、「" + r.notes + "」篇笔记到：" + r.dir +
+          "（里面那份 README.txt 讲清了每个文件是什么）"
+      );
+    } catch (e) {
+      toast("导出失败：" + errText(e), "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "导出全部数据";
+    }
+  });
   // 表结构按钮：需要一个当前表，没有就由对话框自己提示
   document.getElementById("btn-db-schema").addEventListener("click", () => { openSchemaDialog(); });
   document.getElementById("btn-db-relations").addEventListener("click", () => { openRelationsDialog(); });

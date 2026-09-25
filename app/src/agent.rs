@@ -42,6 +42,7 @@ fn usage() -> &'static str {
   add-row    --table X --data '{...}'        加一行（JSON 对象）
   update-cell --table X --rowid N --column C --value V   改一个格
   delete-row --table X --rowid N   删一行
+  export-all [--out 目录]          一键全量导出（CSV + Markdown + README，可迁移）
 
 说明：
   · 数据目录默认与界面版相同，可用环境变量 DESKBASE_DATA_DIR 覆盖。
@@ -70,6 +71,7 @@ pub fn run(args: &[String]) -> i32 {
         "add-row" => cmd_add_row(&rest),
         "update-cell" => cmd_update_cell(&rest),
         "delete-row" => cmd_delete_row(&rest),
+        "export-all" => cmd_export_all(&rest),
         other => {
             eprintln!("不认识的子命令：{other}\n\n{}", usage());
             return 2;
@@ -345,4 +347,25 @@ fn cmd_delete_row(rest: &[String]) -> Result<String, String> {
     let mut d = open()?;
     let n = d.delete_rows(&table, &[rowid])?;
     Ok(format!("已删 {} 行", n))
+}
+
+// ---------- 全量导出 ----------
+
+/// 和界面上的「导出全部数据」是同一套逻辑（`export_all` 模块），
+/// 只是入口不同 —— AI 也该能一次把数据整成通用格式。
+fn cmd_export_all(rest: &[String]) -> Result<String, String> {
+    let out = opt(rest, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir().join("exports"));
+    std::fs::create_dir_all(&out).map_err(|e| format!("建目录失败：{e}"))?;
+    let mut d = open()?;
+    let r = crate::export_all::export_all(&mut d, &out)?;
+    Ok(format!(
+        "已导出到：{}\n{} 张表 · {} 篇笔记 · {} 个文件 · {} 字节\n（目录里有 README.txt，讲清了每个文件是什么）",
+        r.dir.display(),
+        r.tables,
+        r.notes,
+        r.files,
+        r.bytes
+    ))
 }
