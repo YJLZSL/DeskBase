@@ -66,6 +66,15 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- Markdown 渲染器（富文本预览与导出用）----------
+        // 零依赖、自己写 —— 引一个 marked/markdown-it 就是几十 KB，
+        // 还得为它做体积与供应链评估；我们只要"够写文档"的那部分语法。
+        // 自写最大的好处是**转义顺序由我们自己定**（先转义再套规则）。
+        "/markdown.js" => Asset {
+            bytes: include_bytes!("../ui/markdown.js"),
+            mime: JS,
+        },
+
         // ---------- 动效运行时（P1） ----------
         // motion.css 只声明变量（三条 linear() 弹簧曲线），motion.js 是它的运行时。
         // 两者必须**成对**登记：只挂 CSS 时 spring() 读不到曲线，只会退化成

@@ -80,6 +80,51 @@
     step("IPC 桥已就绪", bridged, bridged ? "" : "typeof __deskbase.call = " + typeof (window.__deskbase && window.__deskbase.call));
     if (!bridged) throw new Error("桥没就绪，后面的检查无从谈起");
 
+    // ---------- 富文本：Markdown 工具栏 + 预览 ----------
+    // 重点不是"按钮在不在"，而是**渲染器真的把 Markdown 变成了标签** ——
+    // 只断言"预览区有文字"是会被空壳骗过去的（原样吐文本也有文字）。
+    {
+      const noteBtn = document.querySelector('.nav-item[data-target="notes"]');
+      if (noteBtn) noteBtn.click();
+      await waitFor(() => {
+        const v = document.querySelector('.view[data-view="notes"]');
+        return !!(v && v.getAttribute("data-active") === "true");
+      }, 4000);
+
+      const bar = $("#note-mdbar");
+      step("笔记编辑区有 Markdown 工具栏", !!bar);
+      const ta = $("#note-body");
+      const pv = $("#note-preview");
+      const btn = $("#btn-note-preview");
+      step("有预览容器与切换按钮", !!(ta && pv && btn));
+      if (ta && pv && btn) {
+        ta.value = "## 小标题\n\n这是**粗体**和`代码`。\n\n- 条目一";
+        btn.click();
+        await waitFor(() => !pv.hidden && (pv.textContent || "").length > 0, 3000);
+        const hasH2 = !!pv.querySelector("h2");
+        const hasStrong = !!pv.querySelector("strong");
+        const hasCode = !!pv.querySelector("code");
+        const hasLi = !!pv.querySelector("li");
+        step(
+          "Markdown 真的被渲染成标签（h2 / strong / code / li）",
+          hasH2 && hasStrong && hasCode && hasLi,
+          "h2=" + hasH2 + " strong=" + hasStrong + " code=" + hasCode + " li=" + hasLi
+        );
+        // 渲染器必须转义 HTML —— 写一段脚本不能变成真的脚本
+        ta.value = "<img src=x onerror=alert(1)>";
+        btn.click();
+        await waitFor(() => pv.hidden === false, 2000);
+        btn.click();
+        await waitFor(() => pv.hidden === false, 2000);
+        const noImg = !pv.querySelector("img");
+        step("预览会转义 HTML（写 <img onerror> 不会真插进去）", noImg);
+
+        btn.click();
+        const back = await waitFor(() => !ta.hidden && pv.hidden, 3000);
+        step("能从预览切回编辑", back);
+      }
+    }
+
     // ---------- 工作台（首页）：全局搜索 + 状态 ----------
     // 功能矩阵把「全局搜索」标成 MVP（"缺了它，产品无法成立"），而此前 0 处实现。
     // 这里盖的是接线与"确实去搜了"，不断言一定搜得到（库里可能没东西）。

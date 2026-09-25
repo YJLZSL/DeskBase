@@ -806,6 +806,81 @@
     toast("已套用「" + t.name + "」");
   });
 
+  // ---------- 富文本：Markdown 工具栏 + 预览 ----------
+  //
+  // 工具栏做的是**改正文的文本**（在选区前后插 Markdown 记号），
+  // 而不是操作一个富文本控件 —— 正文始终是纯文本，存储格式没动。
+  // 这是刻意的：所见即所得要改存储格式，那是另一个量级的工程。
+  const MD_ACTIONS = {
+    bold: ["**", "**", "粗体"],
+    italic: ["*", "*", "斜体"],
+    h2: ["## ", "", "标题"],
+    ul: ["- ", "", ""],
+    quote: ["> ", "", ""],
+    code: ["```\n", "\n```", "代码"],
+    link: ["[", "](https://)", "链接文字"],
+  };
+
+  function applyMd(kind) {
+    const ta = $("#note-body");
+    if (!ta) return;
+    const a = MD_ACTIONS[kind];
+    if (!a) return;
+    const start = ta.selectionStart || 0;
+    const end = ta.selectionEnd || 0;
+    const sel = ta.value.slice(start, end) || a[2];
+    const next = ta.value.slice(0, start) + a[0] + sel + a[1] + ta.value.slice(end);
+    ta.value = next;
+    // 光标落到刚插入的内容里，方便接着打字
+    const pos = start + a[0].length + sel.length;
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    // 触发一次 input，让自动保存接上
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function wireNoteMarkdown() {
+    const bar = $("#note-mdbar");
+    if (bar) {
+      bar.querySelectorAll("[data-md]").forEach((b) => {
+        b.addEventListener("click", () => applyMd(b.getAttribute("data-md")));
+      });
+    }
+    const ta = $("#note-body");
+    const pv = $("#note-preview");
+    const btn = $("#btn-note-preview");
+    if (!ta || !pv || !btn) return;
+    let previewing = false;
+    btn.addEventListener("click", () => {
+      previewing = !previewing;
+      if (previewing) {
+        const M = window.DeskBaseMarkdown;
+        // 渲染器不在（脚本没挂上）就老实说，别让人对着空白以为坏了
+        pv.innerHTML = M && M.render
+          ? M.render(ta.value)
+          : "<p>（预览不可用：渲染器没加载）</p>";
+        pv.hidden = false;
+        ta.hidden = true;
+        btn.textContent = "编辑";
+        btn.setAttribute("aria-pressed", "true");
+      } else {
+        pv.hidden = true;
+        ta.hidden = false;
+        btn.textContent = "预览";
+        btn.setAttribute("aria-pressed", "false");
+        ta.focus();
+      }
+    });
+  }
+
+  // 导出时把**渲染结果**交给后端，导出的网页才是富文本的
+  function noteBodyHtml() {
+    const ta = $("#note-body");
+    const M = window.DeskBaseMarkdown;
+    if (!ta || !M || !M.render) return null;
+    return M.render(ta.value);
+  }
+
   // 导出网页（可打印成 PDF）。
   // 真生成 PDF 要引排版与字体嵌入的依赖，不划算；而用户要的是"能打印、能发给别人"，
   // 一个打印友好的 HTML 在浏览器里 Ctrl+P 就是 PDF —— 目的一样，代价小得多。
@@ -815,7 +890,12 @@
       return;
     }
     try {
-      const r = await call("note.exportHtml", { id: currentId });
+      const bodyHtml = noteBodyHtml();
+      const args = { id: currentId };
+      // 渲染成功就把 HTML 带过去，导出的网页才是富文本的；
+      // 渲染器不在时后端会退回纯文本 —— 宁可朴素也不能导出失败
+      if (bodyHtml) args.html = bodyHtml;
+      const r = await call("note.exportHtml", args);
       if (!r || r.cancelled) return;
       toast("已导出网页：" + r.path + "（浏览器打开后 Ctrl+P 可存成 PDF）");
     } catch (e) {
@@ -1724,18 +1804,32 @@
       }
 
       $mode.addEventListener("change", async () => {
+        let saved = true;
         try {
           await call("app.updateSettings", { mode: $mode.value, channel: $channel.value });
-          refreshAudit();
+        } catch (e) {
+          saved = false;
+          toast(e.message, "error");
+        } finally {
+          // 无论保存成功与否，**都把界面刷回后端的真实状态**。
+          //
+          // 为什么必须在 finally：以前 loadUpdateSettings() 写在 try 里，
+          // 前面任何一步抛错（refreshAudit 失败、甚至只是一次 IPC 超时）就会跳过它，
+          // 于是出现**"后端已经是 never 了，按钮却还点得动"**的错位 ——
+          // 烟测抓到过几次，我当时误判成"时序问题、放宽等待就好"，其实不是：
+          // 等待再久也等不到一个被跳过的调用。
           await loadUpdateSettings();
+          try {
+            refreshAudit();
+          } catch (_) {}
+        }
+        if (saved) {
           showResult(
             $mode.value === "never"
               ? "已关闭联网检查 —— 程序不会再发出任何请求。"
               : "已开启。点「检查更新」试试。",
             "ok"
           );
-        } catch (e) {
-          toast(e.message, "error");
         }
       });
 
@@ -1873,6 +1967,7 @@
     loadInstallState();
     buildSettingsNav();
     wireWorkbench();
+    wireNoteMarkdown();
     loadDashboard();
   }
 

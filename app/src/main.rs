@@ -33,6 +33,7 @@ mod updater;
 mod xlsx;
 mod installer;
 mod legacy;
+mod agent;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -277,6 +278,13 @@ fn main() -> wry::Result<()> {
     //       所以两个目录都必须显式传进来：新 exe 运行在暂存目录里，
     //       `current_exe()` 指向的是暂存目录，拿它当默认值会覆盖错地方。
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // ---- agent：给 AI / 脚本用的命令行接口 ----
+    // 走在 GUI 之前，且不依赖界面。详见 app/src/agent.rs 顶部的说明。
+    if args.first().map(|s| s.as_str()) == Some("agent") {
+        let code = agent::run(&args[1..]);
+        std::process::exit(code);
+    }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("deskbase {}", updater::current_version());
@@ -2813,7 +2821,19 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             h.push_str("footer{margin-top:2.5em;padding-top:.8em;border-top:1px solid #ddd;color:#888;font-size:.85em}\n");
             h.push_str("@media print{body{margin:0;max-width:none}footer{border-top:none}}\n");
             h.push_str("</style>\n</head>\n<body>\n");
-            h.push_str(&format!("<h1>{}</h1>\n<main>{}</main>\n", if t.is_empty() { "未命名" } else { &t }, c));
+            // 正文：前端渲染好就直接用（Markdown 已在前端转义过），
+            // 没有就退回纯文本 <pre> —— 宁可朴素，也不能因为预览用不了就导出失败。
+            let body = req
+                .args
+                .get("html")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("<pre>{}</pre>", c));
+            h.push_str(&format!(
+                "<h1>{}</h1>\n<main>{}</main>\n",
+                if t.is_empty() { "未命名" } else { &t },
+                body
+            ));
             // 页脚只署名，不写时间 —— 标准库里没有现成的日期格式化（不引 chrono），
             h.push_str("</body>\n</html>\n");
             match std::fs::write(&dst, h.as_bytes()) {

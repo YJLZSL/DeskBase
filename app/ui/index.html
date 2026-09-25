@@ -162,8 +162,27 @@
                   导出网页
                 </button>
               </div>
+              <!-- 富文本：Markdown 编辑 + 预览。
+                   为什么是 Markdown 而不是所见即所得：所见即所得要动存储格式
+                   （正文现在是纯文本），那是另一个量级的工程。Markdown 是
+                   事实标准，写起来快、导出/迁移都不会丢格式。 -->
+              <div class="note-mdbar" id="note-mdbar">
+                <button class="btn btn-ghost db-mini" type="button" data-md="bold" title="加粗">粗</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="italic" title="斜体">斜</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="h2" title="二级标题">H2</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="ul" title="无序列表">列表</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="quote" title="引用">引用</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="code" title="代码块">代码</button>
+                <button class="btn btn-ghost db-mini" type="button" data-md="link" title="链接">链接</button>
+                <span class="note-mdbar-sep"></span>
+                <button class="btn btn-ghost db-mini" id="btn-note-preview" type="button"
+                        title="在编辑与预览之间切换">
+                  预览
+                </button>
+              </div>
             </div>
-            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。" aria-label="笔记正文"></textarea>
+            <textarea class="body-input" id="note-body" placeholder="在这里写点什么…&#10;&#10;内容会自动保存。支持 Markdown：# 标题、**粗体**、- 列表、`代码`" aria-label="笔记正文"></textarea>
+              <div class="note-preview" id="note-preview" hidden></div>
           </div>
         </div>
       </section>
@@ -538,6 +557,7 @@
 <script src="motion.js"></script>
 <script src="components.js"></script>
 <script src="palette.js"></script>
+    <script src="markdown.js"></script>
 <script src="grid.js"></script>
 <!-- SQL 编辑器已于 2026-09-20 撤下（ADR-0020）。文件保留在 app/ui/legacy/sql.js，
      将来若要加"高级"入口可从那里恢复（存储层未动，恢复不需要动数据）。 -->
