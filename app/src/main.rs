@@ -1235,11 +1235,77 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 }
                 Err(_) => return err(id, "数据库锁失败"),
             }
+            // ---- 连单元格一起搜（可选，默认关）----
+            //
+            // 引擎里**没有数据索引**（BTreeMap 是记录存储，不是索引），所以这只能
+            // 是全表扫描。为了不让它把界面卡死，加三道闸：
+            //   ① 默认不扫 —— 用户勾了才扫
+            //   ② 每张表最多扫 SCAN_ROWS 行
+            //   ③ 总结果照样按 limit 截断
+            // 真要"又快又能搜内容"，正解是先把索引管理做出来（见调研文档）。
+            let deep = req
+                .args
+                .get("deep")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut hit_cells = Vec::new();
+            // 每张表最多扫这么多行。**定义在这里而不是 if 块内**：下面返回
+            // "扫了多少"时还要用到它。
+            const SCAN_ROWS: usize = 2000;
+            if deep {
+                match state.db.lock() {
+                    Ok(d) => {
+                        if let Ok(ts) = d.list_tables() {
+                            'outer: for t in &ts {
+                                let Ok(page) = d.page_rows(&t.name, None, false, None, SCAN_ROWS) else {
+                                    continue;
+                                };
+                                for row in &page.rows {
+                                    if hit_cells.len() >= limit {
+                                        break 'outer;
+                                    }
+                                    // 第 0 列是 rowid，从 1 开始才是数据
+                                    for (i, v) in row.iter().enumerate().skip(1) {
+                                        let txt = match v {
+                                            serde_json::Value::String(x) => x.clone(),
+                                            serde_json::Value::Number(n) => n.to_string(),
+                                            _ => continue,
+                                        };
+                                        if txt.to_lowercase().contains(&ql) {
+                                            let col = page
+                                                .columns
+                                                .get(i)
+                                                .cloned()
+                                                .unwrap_or_else(|| "?".to_string());
+                                            hit_cells.push(serde_json::json!({
+                                                "table": t.name,
+                                                "column": col,
+                                                "value": txt,
+                                            }));
+                                            // 一行只报一次，够了
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+
             hit_tables.truncate(limit);
             hit_notes.truncate(limit);
+            hit_cells.truncate(limit);
             ok(
                 id,
-                serde_json::json!({ "tables": hit_tables, "notes": hit_notes })
+                serde_json::json!({
+                    "tables": hit_tables,
+                    "notes": hit_notes,
+                    "cells": hit_cells,
+                    // 扫过的行数 —— 界面要如实说"扫了多少、有没有扫全"
+                    "scanned": if deep { Some(SCAN_ROWS) } else { None },
+                })
             )
         }
 

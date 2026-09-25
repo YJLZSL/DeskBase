@@ -1540,17 +1540,36 @@
     if (!kw) return;
     let r;
     try {
-      r = await call("app.search", { q: kw, limit: 20 });
+      const deepBox = $("#wb-deep");
+      r = await call("app.search", { q: kw, limit: 20, deep: !!(deepBox && deepBox.checked) });
     } catch (e) {
       box.appendChild(el("p", { class: "hint" }, "搜索失败：" + (e && e.message)));
       return;
     }
     const ts = (r && r.tables) || [];
     const ns = (r && r.notes) || [];
-    if (!ts.length && !ns.length) {
+    const cs = (r && r.cells) || [];
+    if (!ts.length && !ns.length && !cs.length) {
       box.appendChild(el("p", { class: "hint" }, "没找到「" + kw + "」"));
       return;
     }
+    // 单元格命中：说清是哪张表的哪一列、值是什么
+    cs.forEach((c) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "wb-hit";
+      const t = document.createElement("span");
+      t.className = "t";
+      t.textContent = c.table + " · " + c.column;
+      const sub = document.createElement("span");
+      sub.className = "s";
+      sub.textContent = c.value;
+      b.append(t, sub);
+      b.addEventListener("click", () => {
+        showView("database");
+      });
+      box.appendChild(b);
+    });
     ts.forEach((t) => {
       const b = document.createElement("button");
       b.type = "button";

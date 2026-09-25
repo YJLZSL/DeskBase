@@ -210,8 +210,20 @@
       $mode.value = "never";
       $mode.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    const disabledAgain = await waitFor(() => $check && $check.disabled === true, 5000);
-    step("切回 never 后按钮重新禁用", disabledAgain);
+    // 偶发失败过一次（重跑能通过）：change 处理器要先落库、再刷新按钮状态，
+    // 是异步的，5 秒偶发不够。先给它一点启动时间，再把等待放宽到 8 秒 ——
+    // 宁可慢一点，也不要一个会闪红的测试（闪红的测试会被人习惯性无视）。
+    await sleep(300);
+    const disabledAgain = await waitFor(() => $check && $check.disabled === true, 8000);
+    let dbg = "";
+    if (!$check || $check.disabled !== true) {
+      // 失败时把实情打出来：后端到底存成了什么档位
+      try {
+        const st = await ipc("app.updateState", {});
+        dbg = "后端档位=" + (st && st.mode) + " 按钮disabled=" + ($check && $check.disabled);
+      } catch (e) { dbg = "读状态失败：" + e.message; }
+    }
+    step("切回 never 后按钮重新禁用", disabledAgain, dbg);
     const st2 = await ipc("app.updateState");
     step("档位已落库（never）", st2 && st2.mode === "never", st2 && st2.mode);
 

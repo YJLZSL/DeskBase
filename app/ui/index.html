@@ -113,9 +113,14 @@
             <h3>搜索</h3>
             <input class="input" id="wb-search" type="search" autocomplete="off"
                    placeholder="搜表名或笔记…" aria-label="全局搜索" />
+            <label class="hint" style="display:flex;align-items:center;gap:6px;margin-top:6px">
+              <input type="checkbox" id="wb-deep" />
+              连表里的**内容**一起搜（每表最多扫 2000 行）
+            </label>
             <p class="hint">
-              现在搜的是**表名（含说明）与笔记的标题和开头**。刻意不扫表里每一行 ——
-              那是全表遍历，库一大界面就卡住；真要"找某一格内容"得先做索引。
+              不勾时只搜表名（含说明）与笔记的标题和开头 —— 快，且不碰数据。
+              勾上会**逐行扫**：引擎里还没有数据索引（BTreeMap 是记录存储，不是索引），
+              所以库大时会慢一点；这也是为什么每表只扫 2000 行。
             </p>
             <div id="wb-results" class="wb-results"></div>
           </div>
