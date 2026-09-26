@@ -1661,6 +1661,36 @@ impl Db {
         if t.fields.is_empty() {
             return Err(format!("表「{table}」没有任何列"));
         }
+        // ---------- 快路径：最常见的"给我第一页" ----------
+        //
+        // 没有筛选、没有游标、按 rowid 升序 —— 这就是"打开表格看到的那一屏"。
+        // 存储的 key 是 `rec/<表>/<20 位补零 rowid>`，**BTreeMap 的字典序就是
+        // rowid 升序**，所以这一页就是前 limit 条，没必要把整表读出来再切。
+        //
+        // 实测（10 万行）：全表路径 336ms，这里从"克隆 10 万个 String + 
+        // 反序列化 10 万行"降到"50 个 String + 50 行"。
+        let rowid_asc = match order_by {
+            None => true,
+            Some(c) => c == ROWID_COLUMN && !desc,
+        };
+        if filters.is_empty() && cursor.is_none() && rowid_asc {
+            let prefix = record_prefix(table);
+            let mut page_rows: Vec<(i64, BTreeMap<String, Json>)> = Vec::new();
+            // 取 **limit + 1** 行：finish_page 靠"多出来的那一行"判断 has_more。
+            // 只取 limit 行的话它会以为"正好取完"，于是 has_more=false ——
+            // 分页测试当场抓到过这个（还有 50 行没取却报 has_more=false）。
+            for (_, v) in self.store.scan_take(&prefix, limit + 1) {
+                if let Ok(rec) = serde_json::from_str::<BTreeMap<String, Json>>(&v) {
+                    let rid = rec
+                        .get(ROWID_COLUMN)
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    page_rows.push((rid, rec));
+                }
+            }
+            return finish_page(&t, page_rows, None, limit);
+        }
+
         let mut rows = self.all_rows(table);
         for (col, kw) in filters {
             if kw.is_empty() {
@@ -2456,6 +2486,90 @@ mod tests {
         assert!(validate_identifier("1表").is_err());
         assert!(validate_identifier("a-b").is_err());
         assert!(validate_column_name("rowid").is_err());
+    }
+
+    /// 性能基线：**打印真实数字，不做断言**。
+    ///
+    /// 用 `cargo test perf_baseline -- --ignored --nocapture` 跑。
+    ///
+    /// 为什么不进常规测试：它要插 10 万行（几十秒），进 CI 会让每次提交都变慢。
+    /// 但**必须能手动跑** —— 性能数字不能靠感觉，也不能靠回忆。
+    #[test]
+    #[ignore]
+    fn perf_baseline_page_and_search() {
+        let d = tmp("perf");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec(
+            "大表",
+            &[("编号", ColType::Text), ("名称", ColType::Text)],
+        ))
+        .unwrap();
+
+        let names = ["张三", "李四", "王五", "赵六", "钱七"];
+        let batch = 5000usize;
+
+        for target in [10_000usize, 100_000] {
+            // ---- 插入到 target 行 ----
+            let have = db.page_rows("大表", None, false, None, usize::MAX).unwrap().rows.len();
+            let t0 = std::time::Instant::now();
+            let mut i = have;
+            while i < target {
+                let mut cols_names: Vec<Vec<Option<String>>> = Vec::with_capacity(batch);
+                for k in 0..batch {
+                    if i + k >= target {
+                        break;
+                    }
+                    cols_names.push(vec![
+                        Some(format!("{:08}", i + k)),
+                        Some(names[(i + k) % names.len()].to_string()),
+                    ]);
+                }
+                db.insert_rows(
+                    "大表",
+                    &["编号".to_string(), "名称".to_string()],
+                    &cols_names,
+                )
+                .unwrap();
+                i += batch;
+            }
+            let ins = t0.elapsed();
+
+            // ---- 分页：首页 ----
+            let t1 = std::time::Instant::now();
+            let _ = db.page_rows("大表", None, false, None, 50).unwrap();
+            let page1 = t1.elapsed();
+
+            // ---- 分页：用游标翻到中间 ----
+            let mid = db
+                .page_rows("大表", None, false, None, (target / 2).max(50))
+                .unwrap();
+            let cursor = mid.next_cursor.clone();
+            let t2 = std::time::Instant::now();
+            let _ = db
+                .page_rows("大表", None, false, cursor.as_deref(), 50)
+                .unwrap();
+            let page_mid = t2.elapsed();
+
+            // ---- 搜索：关键词筛选一列 ----
+            let t3 = std::time::Instant::now();
+            let hit = db
+                .page_rows_filtered(
+                    "大表",
+                    None,
+                    false,
+                    None,
+                    50,
+                    &[("名称".to_string(), "张三".to_string())],
+                )
+                .unwrap();
+            let search = t3.elapsed();
+
+            println!(
+                "【性能基线】{:>7} 行 | 插入 {:>8.2?} | 首页 {:>8.2?} | 游标页 {:>8.2?} | 筛选(命中 {}) {:>8.2?}",
+                target, ins, page1, page_mid, hit.rows.len(), search
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

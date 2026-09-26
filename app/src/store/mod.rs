@@ -271,6 +271,23 @@ impl Store {
             .collect()
     }
 
+    /// 前缀扫描，但**只要前 n 条**。
+    ///
+    /// 为什么单独加这一个：`scan()` 会把**整表**克隆出来（每行一个 key 的 String
+    /// 加一个 value 的 String），而最常见的查询是"给我第一页"。
+    /// 10 万行的表上，为了显示 50 行去克隆 10 万个 String 是纯粹的浪费。
+    ///
+    /// ⚠️ 它返回的是 **BTreeMap 的升序**，不是任意排序后的结果 ——
+    /// 只在"顺序无关"或"已确认存储顺序正是所需顺序"时用它。
+    pub fn scan_take(&self, prefix: &str, n: usize) -> Vec<(String, String)> {
+        self.data
+            .range(prefix.to_string()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .take(n)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// 前缀计数（不拷贝值，比 `scan().len()` 省）。
     pub fn count(&self, prefix: &str) -> usize {
         self.data
