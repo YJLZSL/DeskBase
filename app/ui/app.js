@@ -1669,7 +1669,7 @@
       if (tables.length) {
         const good = document.createElement("p");
         good.textContent =
-          "已经能直接读出里面的内容（**只读**，不会改动这个文件）：共 " +
+          "已经能直接读出里面的内容（只读，不会改动这个文件）：共 " +
           tables.length +
           " 张表。";
         box.append(good);
@@ -1732,7 +1732,7 @@
         const note = document.createElement("p");
         note.className = "hint";
         note.textContent =
-          "点「导入到新版」会把整张表搬进新版，**旧文件一个字节都不会改**。" +
+          "点「导入到新版」会把整张表搬进新版，旧文件一个字节都不会改。" +
           "搬完在表格页就能看到；名字撞了会拦下来让你改名，不会覆盖你现在的表。";
         box.append(note);
       } else {
@@ -1833,7 +1833,7 @@
     ];
     // 备份这一条单独拎出来 —— 没备份过要明说，不能留空让人以为备份了
     const when = fmtWhen(d.last_backup_ms);
-    items.push(["上次备份", when || "**还没备份过**"]);
+    items.push(["上次备份", when || "还没备份过"]);
     box.innerHTML = "";
     items.forEach(([k, v]) => {
       const row = document.createElement("div");
