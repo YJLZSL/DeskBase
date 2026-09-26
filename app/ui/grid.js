@@ -603,12 +603,23 @@
       paintHeadState();
     }
 
+    /**
+     * 表头上那个类型角标显示什么。
+     *
+     * ⚠️ 这里以前是**正则抠英文前缀**就直接显示（`/^([a-zA-Z ]+)/`），
+     * 于是网格表头上出现了 `text`、`money` 这种**内部类型名** ——
+     * 而同一个应用的表结构对话框里写的是「文本」「金额」。
+     * 用户看到两套说法，其中一套还是英文的。**是视觉走查抓到的**
+     * （四套主题下都能看到 `text`）。
+     *
+     * 现在走 `window.DeskBaseColType.label`（`db.js` 里的唯一一份映射）。
+     * 拿不到那个桥时**返回空串而不是回退到英文名** ——
+     * 宁可这个角标不显示，也不把内部名露给用户。
+     */
     function shortType(type) {
-      const t = String(type == null ? "" : type);
-      if (!t) return "";
-      const m = /^([a-zA-Z ]+)/.exec(t);
-      const word = (m ? m[1] : t).trim();
-      return word.length > 8 ? word.slice(0, 8) : word;
+      const bridge = window.DeskBaseColType;
+      if (!bridge || typeof bridge.label !== "function") return "";
+      return bridge.label(type);
     }
 
     function buildRowEl(kindTag) {

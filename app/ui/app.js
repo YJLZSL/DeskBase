@@ -403,6 +403,18 @@
     // 换页后让列表重新做一次逐项进场
     if (noteOnly && !(opts && opts.keepList)) renderNoteList();
 
+    // ⚠️ 笔记列表在**切回笔记页时要重新拉一次**（与其他页对齐）。
+    //
+    // 原来 `refreshList()` 只在 boot 里调一次，之后是"新建 / 保存 / 删除时顺手刷"——
+    // 切页不刷。后果：`allNotes` 是内存缓存，**别处产生的笔记在切回笔记页时不会出现**
+    // （实测：造景脚本在 boot 之后写入 3 篇笔记，`note.list` 明明返回 3 条，
+    //  界面却一直写着「还没有笔记」，切页也不管用）。
+    //
+    // 数据库页从一开始就是"每次进入都刷"（`DeskBaseDb.onShow`），两页行为不一致 ——
+    // 这种不一致本身就该修：用户没法知道"哪一页需要重启才刷新"。
+    // 不 await（切页动画不该等 IPC），失败也不弹错（`refreshList` 自己会 toast）。
+    if (noteOnly) refreshList();
+
     // 数据库页是独立模块（db.js）：首次进入时它自己懒加载表列表
     if (window.DeskBaseDb && typeof window.DeskBaseDb.onShow === "function") {
       window.DeskBaseDb.onShow(name);

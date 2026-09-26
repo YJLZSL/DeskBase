@@ -202,7 +202,7 @@ DeskBase
 
 ### 现在能下载到什么
 
-**当前版本：v1.11.0**。便携版与安装版是**同一份产物**，见 [Releases](https://github.com/YJLZSL/DeskBase/releases)。
+**当前版本：v1.11.1**。便携版与安装版是**同一份产物**，见 [Releases](https://github.com/YJLZSL/DeskBase/releases)。
 
 | | 状态 |
 |---|---|

@@ -28,6 +28,41 @@
 
   if (window.DeskBaseDb) return;
 
+  // ============================================================
+  // 列类型的**唯一**中文名映射（对外暴露，供 grid.js / ui-chat.js 共用）
+  // ============================================================
+  //
+  // 为什么必须只有这一份：这里原本有一份 `fmtColType`（给表结构对话框用），
+  // 而 `grid.js` 的表头角标自己写了个 `shortType` —— 它用正则抠出**类型名的英文前缀**
+  // 就直接显示。于是网格表头上出现了 `text`、`money` 这种内部名，
+  // 而同一个应用的另一处写的是「文本」「金额」。**用户看到两套说法，
+  // 而且其中一套是英文的**（v1.11.1 的视觉走查抓到的）。
+  //
+  // 这个项目的界面纪律是「字段 / 记录」这类中文词，内部类型名不该出现在界面上。
+  // 两个地方各写一份 = 迟早只有一份是对的。
+  //
+  // 入参是**宽松的类型字符串**（`"text"` / `"Money"` / `{"Date":null}` / SQLite 的
+  // `"VARCHAR(20)"` 这类历史原文都能进来），所以按"包含什么"判，不要求精确相等。
+  function colTypeLabel(decl) {
+    const raw = decl == null ? "" : String(decl);
+    const t = raw.toUpperCase();
+    // 先认语义类型（金额 / 是-否 / 日期时间）—— `DATETIME` 必须排在 `DATE` 前面，
+    // 否则「日期时间」永远被「日期」吃掉。
+    if (t.includes("MONEY") || t.includes("BIGINT")) return "金额";
+    if (t.includes("DATETIME")) return "日期时间";
+    if (t.includes("DATE")) return "日期";
+    if (t.includes("BOOL")) return "是/否";
+    if (t.includes("JSON")) return "JSON";
+    if (t.includes("BLOB") || t.includes("BINARY")) return "二进制";
+    if (t.includes("INT")) return "整数";
+    if (t.includes("REAL") || t.includes("FLOA") || t.includes("DOUB") || t.includes("NUM")) return "小数";
+    if (!t) return "";
+    return "文本";
+  }
+
+  /** 给别的界面模块用（它们不该各写一份映射）。 */
+  window.DeskBaseColType = { label: colTypeLabel };
+
   // ---------- 小工具 ----------
   function el(tag, attrs, text) {
     const node = document.createElement(tag);
@@ -1937,17 +1972,11 @@
   // 所有暗礁（主键、NOT NULL 默认值、被索引引用）都在 Rust 层拦 ——
   // 界面只负责把操作送过去、把错误原样说给人听，不自己预判。
 
+  // 表结构对话框里的类型显示 —— 现在直接复用唯一那份映射（见文件顶部 colTypeLabel）。
+  // 保留这个薄封装是为了让调用点读起来仍然像"格式化一个列类型"，
+  // 而不是到处写 `window.DeskBaseColType.label`。
   function fmtColType(decl) {
-    // 声明类型是 SQLite 的宽松原文（可能为空），翻译成人能看懂的
-    const t = (decl || "").toUpperCase();
-    if (t.includes("MONEY") || t.includes("BIGINT")) return "金额";
-    if (t.includes("DATETIME")) return "日期时间";
-    if (t.includes("DATE")) return "日期";
-    if (t.includes("BOOL")) return "是/否";
-    if (t.includes("INT")) return "整数";
-    if (t.includes("REAL") || t.includes("FLOA") || t.includes("DOUB")) return "小数";
-    if (t.includes("BLOB")) return "二进制";
-    return "文本";
+    return colTypeLabel(decl);
   }
 
   function promptRenameTable(oldName) {

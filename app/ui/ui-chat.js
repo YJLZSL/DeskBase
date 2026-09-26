@@ -375,7 +375,18 @@
     }
 
     // 常驻大字：现在到底在用哪一种，以及数据会不会离开本机
+    // 这一句是**隐私声明的第一句**，措辞不能凑。
+    //
+    // ⚠️ 原来是 `"现在用的是" + label + tail`，三态拼出来是：
+    //   · 本机 → 现在用的是**本机模型** —— 数据不出本机      ✔ 通顺
+    //   · 云端 → 现在用的是**外部服务** —— 数据会离开本机    ✔ 通顺
+    //   · 关闭 → 现在用的是**没启用** —— 不会有任何内容发出去  ✘ **病句**
+    // 「用的是没启用」在中文里不成话，而它是用户打开面板看到的第一句 ——
+    // 一句读不通的隐私声明，会让人怀疑整个声明是不是随便写的。
+    // （这个只出现在四套主题的截图里，看代码很难发现：三个分支各自都"对"。）
     const label = mode === "local" ? "本机模型" : mode === "cloud" ? "外部服务" : "没启用";
+    // 关闭态单独成句；另两态共用"现在用的是……"的句式。
+    const head = mode === "off" ? "AI" : "现在用的是";
     const tail =
       mode === "local"
         ? " —— 数据不出本机"
@@ -383,7 +394,7 @@
           ? " —— 数据会离开本机"
           : " —— 不会有任何内容发出去";
     dom.privacyMain.replaceChildren(
-      document.createTextNode("现在用的是"),
+      document.createTextNode(head),
       el("strong", { class: mode === "local" ? "is-local" : mode === "cloud" ? "is-cloud" : "is-off" }, label),
       document.createTextNode(tail)
     );

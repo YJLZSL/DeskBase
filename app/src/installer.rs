@@ -12,10 +12,32 @@
 //! 那套实现只要几十行胶水，写出来的 `.lnk` 还天然带齐外壳要用的块（跳转列表、
 //! "以管理员身份运行"等）。体积代价实测约 +1.5 KB（见 `app/Cargo.toml` 的注释）。
 //!
+//! **快捷方式的图标为什么指安装目录里的 `DeskBase.ico`，而不是直接指 exe**：
+//! 这是实测逼出来的一条链（别凭直觉改回去）——
+//! 1. 用户反馈"安装后桌面快捷方式没有应用图标"。根因：建 `.lnk` 时没有
+//!    `SetIconLocation` —— `IShellLink` 不设图标位置时**不会**自动去取目标文件的图标，
+//!    于是显示成 Windows 的默认空白图标。
+//! 2. 最自然的修法是 `SetIconLocation(exe, 0)`。但**本项目的 exe 没有任何 PE 图标资源**：
+//!    本机用 `LoadLibraryExW + EnumResourceNamesW` 枚举 `app/target/release/deskbase.exe`，
+//!    `RT_ICON(3)` 与 `RT_GROUP_ICON(14)` **各 0 个**（同一探测器在 `notepad.exe` 上是 4 个、
+//!    `explorer.exe` 上是 21 个，证明探测器有效）。原因也不难查：`app/` 下没有 `build.rs`、
+//!    没有 `.rc`、`Cargo.toml` 里没有 `winres`/`embed-resource` —— 窗口与任务栏图标是
+//!    **运行时**用 `tao::window::Icon::from_rgba(icon-rgba-256.bin)` 设的（`main.rs:606`），
+//!    那只影响窗口，不进 PE 资源段。所以指 exe 仍然是空白图标。
+//! 3. 于是改成：把仓库里那份多尺寸 `app/ui/brand/icon.ico`（9 个尺寸，16→256，32bpp）
+//!    用 `include_bytes!` 编进 exe，**安装时写到安装目录**，两个 `.lnk` 的图标都指向它。
+//!    - 为什么指安装目录里那份：安装目录是持久的；`app/ui/brand`、便携目录随时会消失。
+//!    - 为什么用 `include_bytes!` 而不是运行时读相对路径：用户可能从 U 盘/临时目录点安装。
+//!    - 代价：exe +约 72 KB（现 4.9 MB，守卫阈值 10 MB）。
+//!    - 已知短板：Windows 会**缓存**快捷方式图标。同一次安装内不会出问题（安装会覆盖
+//!      这个 .ico），但"换了图标而安装目录没重新安装"时图标可能仍是旧的。
+//!    - **将来若给 exe 嵌了图标资源**（要 `build.rs` + `winres` 之类的构建期依赖），
+//!      整条链可以简化成"快捷方式直接指 exe"，这个 .ico 文件也就不用放了。
+//!
 //! **红线对齐**（CONTRIBUTING 第十节）：
 //! - **便携版零注册表**：只有用户主动点「安装到本机」才会写，便携运行一个字都不写
 //! - **安装版用户级安装**：全部落在 `HKCU` 与 `%LOCALAPPDATA%`，**不碰 HKLM、不要管理员**
-//! - **卸载残留 = 0**：删注册表项 + 删安装目录 + 删我们那两个快捷方式；
+//! - **卸载残留 = 0**：删注册表项 + 删安装目录（含图标文件）+ 删我们那两个快捷方式；
 //!   **用户的数据目录不动**（那是他的东西）
 //!
 //! 卸载的两个现实约束（如实写在界面上，不假装没有）：
@@ -38,6 +60,14 @@ const UNINSTALL_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Un
 const APP_NAME: &str = "DeskBase";
 /// 快捷方式文件名。名字固定，卸载时才能只删"我们自己那一个"。
 const LINK_FILE_NAME: &str = "DeskBase.lnk";
+/// 安装目录里的图标文件名。快捷方式的图标指向它（为什么不指 exe：见文件顶部第 2 条）。
+const ICON_FILE_NAME: &str = "DeskBase.ico";
+/// 编进 exe 的那份多尺寸图标（9 个尺寸，16→256，32bpp）。
+///
+/// 用 `include_bytes!` 而不是运行时读 `app/ui/brand/icon.ico` 的相对路径：
+/// 用户可能从 U 盘或临时目录点安装，那个目录随时会消失 —— 图标必须来自 exe 自己。
+/// 这份文件在 git 里（`app/ui/brand/icon.ico`），公开构建也能拿到，不会因缺文件编译失败。
+const APP_ICON_ICO: &[u8] = include_bytes!("../ui/brand/icon.ico");
 /// 快捷方式悬停时显示的说明
 const SHORTCUT_DESC: &str = "DeskBase 桌库";
 /// 写值时不指定 reserved —— 这个参数是给系统保留的，传 None 是正确用法
@@ -310,8 +340,8 @@ fn ensure_com() -> Result<(), String> {
     Err(format!("初始化 COM 失败（HRESULT 0x{:08X}）", hr.0 as u32))
 }
 
-/// 在 `link` 位置建一个指向 `target` 的 `.lnk`（工作目录设为 `work_dir`）。
-fn create_shortcut(link: &Path, target: &Path, work_dir: &Path) -> Result<(), String> {
+/// 在 `link` 位置建一个指向 `target` 的 `.lnk`（工作目录设为 `work_dir`，图标取自 `icon`）。
+fn create_shortcut(link: &Path, target: &Path, work_dir: &Path, icon: &Path) -> Result<(), String> {
     use windows::core::Interface;
     use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -328,6 +358,7 @@ fn create_shortcut(link: &Path, target: &Path, work_dir: &Path) -> Result<(), St
     let work_w = wide(&work_dir.to_string_lossy());
     let desc_w = wide(SHORTCUT_DESC);
     let link_w = wide(&link.to_string_lossy());
+    let icon_w = wide(&icon.to_string_lossy());
 
     unsafe {
         let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
@@ -338,6 +369,11 @@ fn create_shortcut(link: &Path, target: &Path, work_dir: &Path) -> Result<(), St
             .map_err(|e| format!("设置快捷方式工作目录失败：{e}"))?;
         sl.SetDescription(PCWSTR(desc_w.as_ptr()))
             .map_err(|e| format!("设置快捷方式说明失败：{e}"))?;
+        // 图标**必须显式设**：`IShellLink` 不设图标位置时不会自动去取目标文件的图标，
+        // 快捷方式就显示成 Windows 的默认空白图标 —— 用户报的正是这个。
+        // 最后一个参数 0 = "取该文件里的第 0 个图标"。为什么指 .ico 而不是指 exe：见文件顶部。
+        sl.SetIconLocation(PCWSTR(icon_w.as_ptr()), 0)
+            .map_err(|e| format!("设置快捷方式图标失败：{e}"))?;
         // .lnk 的落盘要靠 IPersistFile::Save —— IShellLink 自己不会写文件
         let pf: IPersistFile = sl.cast().map_err(|e| format!("取 IPersistFile 失败：{e}"))?;
         pf.Save(PCWSTR(link_w.as_ptr()), true)
@@ -423,7 +459,18 @@ pub fn install(version: &str, create_desktop_shortcut: bool) -> Result<InstallRe
     r?;
 
     // ---- 快捷方式 ----
-    // 先建开始菜单那份：它是"装完之后找得到"的底线。建不出来**算安装失败**，
+    // 先把图标文件放到安装目录（快捷方式要指向它）。写不出来**算安装失败** ——
+    // 这次修的正是"快捷方式没图标"，静默降级等于没修；错误里同样说清
+    // "程序文件与卸载入口已经就位"，免得用户以为白装了。
+    let icon = dir.join(ICON_FILE_NAME);
+    if let Err(e) = std::fs::write(&icon, APP_ICON_ICO) {
+        return Err(format!(
+            "程序文件与卸载入口已写入 {}，但写入快捷方式图标失败：{e}",
+            dir.to_string_lossy()
+        ));
+    }
+
+    // 再建开始菜单那份：它是"装完之后找得到"的底线。建不出来**算安装失败**，
     // 但错误里必须说清"程序文件与卸载入口已经就位" —— 否则用户以为白装了、
     // 又不敢乱删（其实这时候从"添加/删除程序"里能正常卸掉）。
     let sm_link = match start_menu_link_path() {
@@ -435,7 +482,7 @@ pub fn install(version: &str, create_desktop_shortcut: bool) -> Result<InstallRe
             ))
         }
     };
-    if let Err(e) = create_shortcut(&sm_link, &dst, &dir) {
+    if let Err(e) = create_shortcut(&sm_link, &dst, &dir, &icon) {
         return Err(format!(
             "程序文件与卸载入口已写入 {}，但开始菜单快捷方式创建失败：{e}",
             dir.to_string_lossy()
@@ -447,7 +494,7 @@ pub fn install(version: &str, create_desktop_shortcut: bool) -> Result<InstallRe
     let (desktop_link, desktop_error) = if create_desktop_shortcut {
         match desktop_link_path() {
             Err(e) => (None, Some(e)),
-            Ok(p) => match create_shortcut(&p, &dst, &dir) {
+            Ok(p) => match create_shortcut(&p, &dst, &dir, &icon) {
                 Ok(()) => (Some(p.to_string_lossy().to_string()), None),
                 Err(e) => (None, Some(e)),
             },
@@ -464,8 +511,8 @@ pub fn install(version: &str, create_desktop_shortcut: bool) -> Result<InstallRe
     })
 }
 
-/// 卸载。删注册表项 + 删安装目录里的文件 + 删我们那两个快捷方式；
-/// **数据目录一律不动**。
+/// 卸载。删注册表项 + 删安装目录里的文件（含我们放的 `DeskBase.ico`）+
+/// 删我们那两个快捷方式；**数据目录一律不动**。
 pub fn uninstall() -> Result<String, String> {
     let dir = install_dir();
 
@@ -492,6 +539,11 @@ pub fn uninstall() -> Result<String, String> {
 
     // 3) 删安装目录里的文件。正在运行的那个 exe 删不掉自己 ——
     //    用"重启后删除"标记它，而不是假装删掉了。
+    //
+    //    图标文件（DeskBase.ico，见 ICON_FILE_NAME）也是我们放进安装目录的，下面的
+    //    遍历本来就会删掉它；这里**再显式删一次**是为了不依赖那次遍历 ——
+    //    万一读不到目录（权限/句柄占用），遍历整段会被跳过，图标就会留下。
+    let _ = std::fs::remove_file(dir.join(ICON_FILE_NAME));
     let cur = std::env::current_exe().unwrap_or_default();
     let mut failed = 0usize;
     let mut delayed = false;
@@ -614,8 +666,9 @@ mod tests {
         assert_ne!(sm, dt, "开始菜单与桌面的快捷方式不能落在同一个路径");
     }
 
-    /// 测试用的"清场"守卫：无论断言在哪一步炸掉，都把测试自己建的快捷方式收掉。
-    /// （这条测试的纪律是**跑完不留东西**：不留注册表项、不留开始菜单/桌面图标。）
+    /// 测试用的"清场"守卫：无论断言在哪一步炸掉，都不把机器留在"装了一半"的状态。
+    /// （这条测试的纪律是**跑完不留东西**：不留注册表项、不留安装目录、不留图标、
+    /// 不留开始菜单/桌面那两个 .lnk。）
     struct LinkCleanup(Vec<PathBuf>);
 
     impl LinkCleanup {
@@ -631,17 +684,22 @@ mod tests {
 
     impl Drop for LinkCleanup {
         fn drop(&mut self) {
+            // 兜底卸一遍（正常路径上测试自己已经卸过了，这里是断言炸掉时的那道保险），
+            // 再补删两个 .lnk —— 卸载本身就会删它们，这一步防的是"注册表都没写成功"的早期失败
+            let _ = uninstall();
             for p in &self.0 {
                 let _ = std::fs::remove_file(p);
             }
         }
     }
 
-    /// 把 `.lnk` 读回来，看它到底指向谁。
-    ///
-    /// 为什么不能只断言"文件存在"：一个存在、但指向别处（或指向空）的快捷方式
-    /// 在桌面上看起来一模一样，双击才报错 —— 那正是这次要防的那种坑。
-    fn shortcut_target(link: &Path) -> Result<PathBuf, String> {
+    fn utf16_field(buf: &[u16]) -> String {
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..end])
+    }
+
+    /// 只读打开一个 `.lnk`，拿到 `IShellLinkW` —— 目标与图标都要从它读。
+    fn open_shortcut(link: &Path) -> Result<windows::Win32::UI::Shell::IShellLinkW, String> {
         use windows::core::Interface;
         use windows::Win32::System::Com::{
             CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM,
@@ -656,13 +714,38 @@ mod tests {
             // STGM(0) = STGM_READ：只读打开，改不到这个 .lnk
             pf.Load(PCWSTR(link_w.as_ptr()), STGM(0))
                 .map_err(|e| format!("读快捷方式失败：{e}"))?;
+            Ok(sl)
+        }
+    }
+
+    /// 读回 `.lnk` 的目标。
+    ///
+    /// 为什么不能只断言"文件存在"：一个存在、但指向别处（或指向空）的快捷方式
+    /// 在桌面上看起来一模一样，双击才报错 —— 那正是这次要防的那种坑。
+    fn shortcut_target(link: &Path) -> Result<PathBuf, String> {
+        let sl = open_shortcut(link)?;
+        unsafe {
             let mut buf = vec![0u16; 1024];
             let mut fd: windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW =
                 std::mem::zeroed();
             sl.GetPath(&mut buf, &mut fd, 0)
                 .map_err(|e| format!("取快捷方式目标失败：{e}"))?;
-            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-            Ok(PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+            Ok(PathBuf::from(utf16_field(&buf)))
+        }
+    }
+
+    /// 读回 `.lnk` 的图标位置（路径 + 索引）。
+    ///
+    /// "快捷方式显示成空白图标"这个 bug 靠肉眼看才发现的 —— 有了这条读回，
+    /// "有图标"这件事就有机器证据了：图标路径非空、且指向安装目录里那份 .ico。
+    fn shortcut_icon(link: &Path) -> Result<(PathBuf, i32), String> {
+        let sl = open_shortcut(link)?;
+        unsafe {
+            let mut buf = vec![0u16; 1024];
+            let mut index: i32 = -1;
+            sl.GetIconLocation(&mut buf, &mut index)
+                .map_err(|e| format!("取快捷方式图标位置失败：{e}"))?;
+            Ok((PathBuf::from(utf16_field(&buf)), index))
         }
     }
 
@@ -719,6 +802,39 @@ mod tests {
             installed_exe.to_string_lossy().to_lowercase(),
             "开始菜单快捷方式必须指向 {installed_exe:?}，实际指向 {got:?}"
         );
+
+        // ---- 图标（这次修的 bug：快捷方式显示成默认空白图标）----
+        // exe 里没有 PE 图标资源（实测，见文件顶部），所以图标靠安装目录里这份 .ico
+        let icon_file = Path::new(&after.dir).join(ICON_FILE_NAME);
+        assert!(
+            icon_file.exists(),
+            "安装目录里应当有快捷方式用的图标文件：{icon_file:?}"
+        );
+        // 写出去的必须就是编进 exe 的那份（不是被截断/写空）
+        assert_eq!(
+            std::fs::metadata(&icon_file).map(|m| m.len()).unwrap_or(0),
+            APP_ICON_ICO.len() as u64,
+            "图标文件大小应当与编进 exe 的那份一致（{} 字节）",
+            APP_ICON_ICO.len()
+        );
+        let (icon_at, icon_index) =
+            shortcut_icon(Path::new(&r1.start_menu_link)).expect("应当能读回快捷方式图标位置");
+        println!(
+            "开始菜单快捷方式图标：{}（索引 {}）",
+            icon_at.display(),
+            icon_index
+        );
+        assert!(
+            !icon_at.as_os_str().is_empty(),
+            "快捷方式的图标位置不能是空串 —— 空串就是 Windows 默认空白图标，正是用户报的那个 bug"
+        );
+        assert_eq!(
+            icon_at.to_string_lossy().to_lowercase(),
+            icon_file.to_string_lossy().to_lowercase(),
+            "图标必须指向安装目录里那份 {icon_file:?}，实际指向 {icon_at:?}"
+        );
+        assert_eq!(icon_index, 0, "图标索引应当是 0（= 该文件里的第 0 个图标）");
+
         assert!(
             r1.desktop_link.is_none() && r1.desktop_error.is_none(),
             "没勾桌面就不该动桌面，也不该报错（link={:?} err={:?}）",
@@ -733,6 +849,10 @@ mod tests {
             "卸载后开始菜单快捷方式应当被删掉：{}",
             r1.start_menu_link
         );
+        assert!(
+            !icon_file.exists(),
+            "卸载后图标文件也应当被删掉（它在我们自己的安装目录里）：{icon_file:?}"
+        );
 
         // ---------- 第 2 段：勾上桌面 ----------
         let r2 = install("0.0.0-test", true).expect("安装应当成功");
@@ -740,6 +860,16 @@ mod tests {
             Path::new(&r2.start_menu_link).exists(),
             "开始菜单快捷方式应当被真的建出来：{}",
             r2.start_menu_link
+        );
+        let icon_r2 = Path::new(&r2.dir).join(ICON_FILE_NAME);
+        assert!(icon_r2.exists(), "安装目录里应当有图标文件：{icon_r2:?}");
+        let (sm_icon, sm_idx) =
+            shortcut_icon(Path::new(&r2.start_menu_link)).expect("应当能读回图标位置");
+        println!("第 2 段 · 开始菜单图标：{}（索引 {}）", sm_icon.display(), sm_idx);
+        assert_eq!(
+            sm_icon.to_string_lossy().to_lowercase(),
+            icon_r2.to_string_lossy().to_lowercase(),
+            "开始菜单那条同样要有图标（用户只报了桌面，但两条是同一段代码建的）"
         );
         match (&r2.desktop_link, &r2.desktop_error) {
             (Some(p), None) => {
@@ -750,6 +880,15 @@ mod tests {
                     got.to_string_lossy().to_lowercase().ends_with("deskbase.exe"),
                     "桌面快捷方式必须指向 DeskBase.exe，实际指向 {got:?}"
                 );
+                let (dt_icon, dt_idx) =
+                    shortcut_icon(Path::new(p)).expect("应当能读回桌面快捷方式的图标位置");
+                println!("桌面快捷方式图标：{}（索引 {}）", dt_icon.display(), dt_idx);
+                assert_eq!(
+                    dt_icon.to_string_lossy().to_lowercase(),
+                    icon_r2.to_string_lossy().to_lowercase(),
+                    "桌面快捷方式的图标必须指向安装目录里那份 .ico"
+                );
+                assert_eq!(dt_idx, 0, "图标索引应当是 0");
             }
             // 按设计：桌面建失败不算安装失败，只要有原因说清楚就算如实
             (None, Some(e)) => println!("桌面快捷方式没建成（按设计不算安装失败）：{e}"),
@@ -764,6 +903,7 @@ mod tests {
             "卸载后开始菜单快捷方式应当被删掉：{}",
             r2.start_menu_link
         );
+        assert!(!icon_r2.exists(), "卸载后图标文件也应当被删掉：{icon_r2:?}");
         if let Some(p) = desktop_link_r2 {
             assert!(!Path::new(&p).exists(), "卸载后桌面快捷方式应当被删掉：{p}");
         }

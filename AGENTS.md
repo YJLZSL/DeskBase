@@ -102,13 +102,24 @@ DeskBase/
 | **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
 | **崩溃恢复端到端**（强杀→重启验尸→复检，三阶段） | `node tests/crash-recovery.cjs` |
 | **界面自动走查**（截图 + 文案导出 + 布局体检 + **无障碍体检**，出 HTML 报告） | `node tests/ui-walkthrough.cjs` |
+| **界面视觉验收**（**真实数据**造景 × 4 套主题 × 17 个状态 = 57 张截图 + 逐张清单） | `node tests/visual-acceptance.cjs` |
 | **真实输入测试**（走 CDP `Input` 域的**真鼠标 + 真键盘**） | `node tests/ui-input.cjs [exe]` |
 
 > 三套界面测试的分工别搞混：`ui-smoke` 用页面内 `element.click()`（验逻辑接线）；
 > `ui-walkthrough` 不点，切页面 + 截图（验观感与静态体检）；
 > **`ui-input` 才走真实输入** —— 带屏幕坐标、过命中测试、会移焦点，和真人操作等价。
 > 只有它能验"键盘能不能用""点击有没有被挡住"这类事。
+>
+> **`visual-acceptance` 是"人工交互验收"的可执行版本**：它把"没人看截图"变成
+> 一件**有清单、有产物**的事（真实数据造景 + 4 套主题 + 每张标注"该盯什么"，
+> 产出 `REVIEW.md` 供逐张勾结论）。判读仍然需要人（或会看图的 AI）——
+> 机器断言的边界是"元素在不在、值对不对"，验不了"这句话读起来顺不顺、
+> 这个按钮是不是放错了地方"。v1.9.1 那 7 处 Markdown 记号就是**看截图**发现的。
+> ⚠️ **它不能与 `ui-walkthrough` / `ui-smoke` 同时跑**：三者抢 CDP 端口 9222，
+> 而且都会 `taskkill deskbase.exe`（会把对方正在跑的应用一起杀掉）。**串行跑。**
+
 | 门禁五件套 | `check-motion` · `check-contrast` · `check-wiring` · `check-size` · **`check-docs`**（文档与实现是否一致）|
+| 附加扫描（比五道更专，也进 CI 前的自检） | `node scripts/check-css-vars.cjs`（引用了未定义的 CSS 变量）· `node scripts/check-tutorial.cjs`（教程引用的界面名是否存在、新功能是否忘了写进教程）|
 | 打包（zip + SHA-256 + SBOM） | `node scripts/package.cjs` |
 | 发布（打标签即发布） | `node scripts/publish-release.cjs vX.Y.Z [--dry-run] [--prerelease]` |
 | 发布说明 | `node scripts/gen-changelog.cjs [--to <ref>]` |
