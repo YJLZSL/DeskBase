@@ -163,6 +163,21 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- AI 对话面板（v1.10.0） ----------
+        // 自包含：DOM 在运行时创建并挂到 body，命令面板的命令由它自己注册，
+        // index.html 只负责加 <link> / <script>（与 help.js / db-onboard.js 同一种形态）。
+        //
+        // ⚠️ 两份必须**成对**登记：JS 与 CSS 分开服务，漏一份是静默 404 ——
+        // 面板会以"没有样式的一堆裸文字"出现，而控制台什么都不报。
+        "/ai-chat.css" => Asset {
+            bytes: include_bytes!("../ui/ai-chat.css"),
+            mime: CSS,
+        },
+        "/ui-chat.js" => Asset {
+            bytes: include_bytes!("../ui/ui-chat.js"),
+            mime: JS,
+        },
+
         // ---------- 字体（见 tools/fonts/ 的来源登记与校验脚本） ----------
         // 得意黑 Smiley Sans，SIL OFL 1.1，未修改再分发。
         // 许可原文随包分发：app/ui/fonts/OFL-smiley-sans.txt

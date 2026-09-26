@@ -279,6 +279,11 @@ impl Store {
     ///
     /// ⚠️ 它返回的是 **BTreeMap 的升序**，不是任意排序后的结果 ——
     /// 只在"顺序无关"或"已确认存储顺序正是所需顺序"时用它。
+    ///
+    /// 游标页改成 [`Self::scan_each`] 的窗口扫描后，暂时没有生产调用方了 ——
+    /// 但它是读接口的一部分（"取前 n 条"），**语义保持不变**地留着：模块顶部那个
+    /// `#![allow(dead_code)]` 正是为这类"刻意保留的接口"开的；删掉的话，
+    /// 下次要用又得把"为什么不克隆整表"重新论证一遍。
     pub fn scan_take(&self, prefix: &str, n: usize) -> Vec<(String, String)> {
         self.data
             .range(prefix.to_string()..)
@@ -286,6 +291,36 @@ impl Store {
             .take(n)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+
+    /// 前缀遍历（字典序），把 key/value **借给**回调 —— 不克隆整表，也不用先
+    /// 攒出一个 `Vec`。这是"边扫边处理"的通用形态。
+    ///
+    /// 为什么加这一个：`scan()` 会把整表的 key 与 value 各克隆一份（10 万行 =
+    /// 20 万个 String），而调用方通常拿到就立刻反序列化/判断，克隆纯属过路费。
+    /// 游标分页更进一步 —— 它只需要从某个键往后的一小段，连扫完都不必。
+    ///
+    /// - `from`：起始键（**含**）。传 `None` 从 `prefix` 开始；传的键若落在
+    ///   前缀范围之外（字典序在 `prefix` 之后），会一条都取不到 —— 这是范围
+    ///   扫描的应有语义，不要拿它当"从表头开始"用。
+    /// - 回调返回 `false` 立即停止（"够了就别再扫"）。
+    /// - 返回真正交给回调的条目数（含最后那条被拒收的），便于调用方自查。
+    pub fn scan_each<F>(&self, prefix: &str, from: Option<&str>, mut f: F) -> usize
+    where
+        F: FnMut(&str, &str) -> bool,
+    {
+        let start = from.unwrap_or(prefix);
+        let mut visited = 0usize;
+        for (k, v) in self.data.range(start.to_string()..) {
+            if !k.starts_with(prefix) {
+                break;
+            }
+            visited += 1;
+            if !f(k, v) {
+                break;
+            }
+        }
+        visited
     }
 
     /// 前缀计数（不拷贝值，比 `scan().len()` 省）。
@@ -753,6 +788,53 @@ mod tests {
         assert_eq!(rows[0].0, "rec/t1/r1");
         assert_eq!(rows[1].0, "rec/t1/r2");
         assert_eq!(s.count("rec/"), 3);
+    }
+
+    #[test]
+    fn scan_each_borrows_walks_in_order_and_stops_early() {
+        let d = tmp_dir("scaneach");
+        let mut s = Store::open(&d).unwrap();
+        for i in 0..10 {
+            s.put(format!("rec/t/{i:020}"), format!("v{i}")).unwrap();
+        }
+        s.put("tbl/t", "meta").unwrap();
+
+        // 不传 from：从前缀头开始，顺序 = 字典序
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let n = s.scan_each("rec/t/", None, |k, v| {
+            seen.push((k.to_string(), v.to_string()));
+            true
+        });
+        assert_eq!(n, 10);
+        assert_eq!(seen.len(), 10);
+        assert_eq!(seen[0].1, "v0");
+        assert_eq!(seen[9].1, "v9");
+
+        // 传 from：**含**起始键 —— 游标分页靠的就是这一步
+        let from = format!("rec/t/{:020}", 7);
+        let mut tail: Vec<String> = Vec::new();
+        let n = s.scan_each("rec/t/", Some(&from), |k, _| {
+            tail.push(k.to_string());
+            true
+        });
+        assert_eq!(n, 3, "从第 7 条（含）起只剩 7/8/9");
+        assert_eq!(tail.first().map(|x| x.as_str()), Some(from.as_str()));
+
+        // 回调返回 false：立刻停，后面的键一条都不碰
+        let mut visited: Vec<String> = Vec::new();
+        let n = s.scan_each("rec/t/", None, |k, _| {
+            visited.push(k.to_string());
+            visited.len() < 2
+        });
+        assert_eq!(n, 2, "拒收之后必须马上停");
+        assert_eq!(visited.len(), 2);
+
+        // 起始键落在这个前缀之外：不该越界扫到别的表
+        assert_eq!(s.scan_each("rec/t/", Some("tbl/t"), |_, _| true), 0);
+        // 起始键比前缀小：等价于从头开始
+        assert_eq!(s.scan_each("rec/t/", Some("rec/"), |_, _| true), 10);
+        // 前缀本身没有匹配：一条都不给
+        assert_eq!(s.scan_each("rec/zz/", None, |_, _| true), 0);
     }
 
     #[test]

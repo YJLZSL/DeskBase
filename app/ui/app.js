@@ -2366,15 +2366,29 @@
             base_url: $base.value.trim(),
             model: $model.value.trim(),
             api_key: $key.value,
-          provider: $pv.value,
+            // ⚠️ 这里曾经多出一行重复的 `provider: $pv.value,`（缩进都不对），
+            // 是以前某次编辑留下的残渣。JSON 里同名字段后者覆盖前者，**行为上无害**，
+            // 但它会让人以为两个 provider 有不同的来源 —— 删掉，别留给下一个读代码的人猜。
           },
         });
-        toast($en.checked ? "AI 已开启（每次调用前还会再问你一次）" : "AI 设置已保存（当前关闭）");
+        // ⚠️ 必须走 `DeskBaseUI.toast`，**不能直接写 `toast(...)`**。
+        //
+        // 这个 IIFE（`wireAiCard`）在主 IIFE 闭合（本文件第 2246 行的 `})();`）**之后**，
+        // 所以主 IIFE 内部那个 `toast` 在这里**根本不在作用域里** ——
+        // 直接写 `toast(...)` 会抛 ReferenceError，而它就发生在 try 块的最后一行：
+        // **设置其实已经保存成功了，用户却只看到一句"保存失败"**，
+        // 于是他会反复点、怀疑自己的 Key。这类"功能成功但提示失败"的 bug 最难被举报清楚。
+        //
+        // （是 mapper 读码时发现的，烟测在此之前从不点 #ai-save，所以机器一直没覆盖到。）
+        DeskBaseUI.toast(
+          $en.checked ? "AI 已开启（每次调用前还会再问你一次）" : "AI 设置已保存（当前关闭）"
+        );
       } catch (e) {
-        toast("保存失败：" + (e && e.message ? e.message : e), "error");
+        DeskBaseUI.toast("保存失败：" + (e && e.message ? e.message : e), { kind: "error" });
       }
     });
-
+    // 保存按钮的文案要说清"点了会不会立刻联网"—— 用户对这个开关的预期是"点了就开始传数据"，
+    // 而实际是"保存配置 + 每次调用还会再问一次"。这条说明就压在按钮下面。
     load();
   })();
 

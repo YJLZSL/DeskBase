@@ -1,0 +1,531 @@
+/* ============================================================
+   DeskBase · AI 对话面板（ai-chat.css）
+   ============================================================
+   配套 app/ui/ui-chat.js。面板 DOM 由 JS 运行时创建，这里只描述外观。
+
+   ## 三条硬纪律（违反会被门禁拦下）
+
+   1. **只用语义 token**：颜色一律 var(--card) / var(--ink) / var(--warning) …
+      不写死任何色值（11 个主题自动适配）。
+   2. **时长全走 var(--dur-*)**：不写死毫秒，这样「关 / 精简 / 丰富」三档
+      与系统「减少动效」自动跟着走（theme.css 里把 --dur-* 压到 1ms 即等于关）。
+   3. **不动布局属性**：只过渡 transform / opacity / visibility / 颜色类
+      （scripts/check-motion.cjs 会扫全部声明）。
+
+   ## 配色是算过的，不是挑的
+
+   本文件用到的「文字 / 底色」组合都在 11 个主题里跑过 WCAG 比值
+   （正文 ≥ 4.5、提示文字 ≥ 3.0、状态色作正文 ≥ 4.5）。有一条要记下来：
+   --warning 落在 --paper-2 上时，indigo 4.35、brutal 4.18 —— **不达标**。
+   所以「数据会离开本机」「已发出 N 行数据」这两句警示文字一律放在
+   --card 上，--paper-2 只用来承载 ink / ink-2 / ink-3（这三组都 ≥ 4.5 / 3.0）。
+   徽标上的状态图标是按 WCAG 1.4.11「非文字指示物」≥ 3.0 选的色。
+   ============================================================ */
+
+/* ============================================================
+   一、面板外壳
+   ============================================================ */
+
+#ai-chat {
+  /* 局部时长与位移：派生自 token，档位一变这里跟着变（不写死毫秒） */
+  --aichat-enter: var(--dur-normal);
+  --aichat-exit: calc(var(--dur-normal) * 0.7);
+  --aichat-shift: calc(var(--mo-slide) * 3);
+
+  position: fixed;
+  inset-block: 0;
+  inset-inline-end: 0;
+  /* 55：压过页面内容与网格（≤ 30），但低于 toast(90)、命令面板(60)、
+     对话框(100)。面板里的提示必须能被用户看到，不能被自己盖住。 */
+  z-index: 55;
+  box-sizing: border-box;
+  width: min(420px, 100vw);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--card);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  border-inline-start: var(--line-w) solid var(--line-strong);
+  box-shadow: var(--shadow-2);
+
+  /* 收起态：移出视口 + 不可见。
+     visibility 不只是"看不见"：它同时把整块面板从 Tab 序列里摘掉 ——
+     否则会留下一块"看不见却能被 Tab 聚焦"的区域，键盘用户的焦点会掉进黑洞。 */
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(var(--aichat-shift));
+  /* 出比入快（0.7×）：关闭是用户已经做完决定之后的动作，再拖只会显得卡。
+     visibility 的 0s + 延迟 = 等淡出走完再真正隐藏（经典写法，无需 allow-discrete）。 */
+  transition: transform var(--aichat-enter) var(--ease-spring-smooth),
+    opacity var(--aichat-enter) var(--ease-standard),
+    visibility 0s linear var(--aichat-exit);
+}
+
+#ai-chat[data-open="true"] {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: none;
+  /* 打开时 visibility 不延迟：晚一帧出现会让人以为点了没反应 */
+  transition: transform var(--aichat-enter) var(--ease-spring-smooth),
+    opacity var(--aichat-enter) var(--ease-standard),
+    visibility 0s linear;
+}
+
+/* ============================================================
+   二、标题栏
+   ============================================================ */
+
+#ai-chat .aichat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+}
+
+#ai-chat .aichat-title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--fs-group);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* 模式徽标：一个按模式着色的图标 + 两个字。
+   **"数据出不出本机"必须一眼看见**，不能让人读完整句才反应过来；
+   图标着色走非文字标准（≥3.0），文字留在 ink-2（在 --paper-2 上 4.5:1）。
+   万一 index.html 的 sprite 以后改了名，图标空着也不影响理解 ——
+   旁边那两个字就是结论本身。 */
+#ai-chat .aichat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin-inline-start: auto;
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+#ai-chat .aichat-badge-ico {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-3);
+}
+
+#ai-chat .aichat-badge[data-kind="local"] .aichat-badge-ico {
+  color: var(--success);
+}
+
+#ai-chat .aichat-badge[data-kind="cloud"] .aichat-badge-ico {
+  color: var(--warning);
+}
+
+#ai-chat .aichat-badge-ico .ico {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+#ai-chat .aichat-close {
+  flex: 0 0 auto;
+}
+
+/* ============================================================
+   三、隐私条（常驻，不折叠，也没有关闭按钮）
+   ============================================================ */
+
+#ai-chat .aichat-privacy {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--card);
+}
+
+#ai-chat .aichat-privacy-main {
+  margin: 0;
+  font-size: var(--fs-sub);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+#ai-chat .aichat-privacy-main .is-local {
+  color: var(--success);
+}
+
+#ai-chat .aichat-privacy-main .is-cloud {
+  color: var(--warning);
+}
+
+#ai-chat .aichat-privacy-main .is-off {
+  color: var(--ink-2);
+}
+
+#ai-chat .aichat-privacy-rows {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-sub);
+  color: var(--ink-2);
+}
+
+/* 发出过数据行就必须扎眼：这是"这次真的离开本机了"的唯一常驻证据 */
+#ai-chat .aichat-privacy-rows[data-alert="1"] {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+#ai-chat .aichat-privacy-sub {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+/* ============================================================
+   四、授权区（只有外部服务时才出现）
+   ============================================================ */
+
+#ai-chat .aichat-auth {
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+}
+
+#ai-chat .aichat-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+#ai-chat .aichat-check input {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+#ai-chat .aichat-ctx {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-aux);
+  line-height: 1.6;
+  color: var(--ink-3);
+  word-break: break-word;
+}
+
+/* ============================================================
+   五、消息区
+   ============================================================ */
+
+#ai-chat .aichat-msgs {
+  flex: 1 1 auto;
+  min-height: 0; /* 不写这条，flex 子项不会收缩，消息区就滚不起来 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--card);
+}
+
+#ai-chat .aichat-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+}
+
+#ai-chat .aichat-msg[data-role="user"] {
+  align-items: flex-end;
+}
+
+#ai-chat .aichat-msg[data-role="assistant"],
+#ai-chat .aichat-msg[data-role="notice"],
+#ai-chat .aichat-msg[data-role="empty"] {
+  align-items: flex-start;
+}
+
+#ai-chat .aichat-bubble {
+  max-width: 92%;
+  box-sizing: border-box;
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-body);
+  /* 模型回复里的换行必须保住，否则一段代码/列表会被压成一行 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+#ai-chat .aichat-msg[data-role="user"] .aichat-bubble {
+  background: var(--paper-2);
+}
+
+/* 系统提示（失败、超时、空回复）：虚线框，与"谁说的一句话"区分开 */
+#ai-chat .aichat-msg[data-role="notice"] .aichat-bubble {
+  border-style: dashed;
+  color: var(--ink-2);
+}
+
+#ai-chat .aichat-msg[data-role="empty"] .aichat-bubble {
+  max-width: 100%;
+  border-style: dashed;
+  color: var(--ink-3);
+}
+
+#ai-chat .aichat-time {
+  margin-top: 2px;
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+
+#ai-chat .aichat-retry {
+  display: block;
+  margin-top: var(--sp-2);
+}
+
+/* ============================================================
+   六、输入区与底部动作
+   ============================================================ */
+
+#ai-chat .aichat-input {
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  border-top: var(--line-w) solid var(--line);
+  background: var(--card);
+}
+
+#ai-chat .aichat-ta {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: calc(var(--row-h) * 2.2);
+  max-height: 30vh;
+  resize: vertical;
+  padding: var(--sp-2) var(--sp-3);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-body);
+}
+
+#ai-chat .aichat-ta:disabled {
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+#ai-chat .aichat-input-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+#ai-chat .aichat-hint {
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+
+#ai-chat .aichat-send {
+  margin-inline-start: auto;
+}
+
+/* 未启用时的说明块（ADR-0017 第 6 条：不放点了没反应的按钮） */
+#ai-chat .aichat-disabled {
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border: var(--line-w) dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--paper-2);
+}
+
+#ai-chat .aichat-disabled-text {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sub);
+  color: var(--ink-2);
+}
+
+#ai-chat .aichat-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+}
+
+/* ============================================================
+   七、对话框里的内容（预览 / 发送记录）
+
+   注意：这一段**不能**写在 #ai-chat 作用域里 —— 它们渲染在
+   DeskBaseUI.confirm/modal 的面板内部（.dbui-panel，背景 var(--card)），
+   不在本面板的 DOM 子树里。所以用 .aichat-* 前缀单独命名，避免撞车。
+   ============================================================ */
+
+.aichat-preview,
+.aichat-records {
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-body);
+}
+
+.aichat-preview-lead {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--card);
+  color: var(--ink);
+  font-size: var(--fs-sub);
+  font-weight: 600;
+  line-height: var(--lh-body);
+}
+
+/* 含数据行：用危险色（在 --card 上 4.5:1 达标）。这一句是用户点"确认"前
+   最后看到的东西，不该是可以被扫过去的灰字。 */
+.aichat-preview-lead[data-kind="danger"] {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
+
+.aichat-preview-lead[data-kind="ok"] {
+  border-left-color: var(--success);
+  color: var(--success);
+}
+
+.aichat-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sub);
+}
+
+.aichat-kv dt {
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.aichat-kv dd {
+  margin: 0;
+  color: var(--ink);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.aichat-preview-warn {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--warning);
+  background: var(--card);
+  color: var(--warning);
+  font-size: var(--fs-sub);
+  line-height: var(--lh-body);
+}
+
+.aichat-details {
+  margin: 0 0 var(--sp-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.aichat-details > summary {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--ink-2);
+  font-size: var(--fs-aux);
+  cursor: pointer;
+}
+
+.aichat-pre {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  max-height: 40vh;
+  overflow: auto;
+  border-top: var(--line-w) solid var(--line);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-family: var(--font-code);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.aichat-records-lead {
+  margin: 0 0 var(--sp-3);
+  color: var(--ink-2);
+}
+
+.aichat-notice {
+  margin: 0 0 var(--sp-3);
+  color: var(--ink-3);
+}
+
+.aichat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-aux);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.aichat-table th,
+.aichat-table td {
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--line-w) solid var(--line);
+}
+
+.aichat-table thead th {
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.aichat-table tbody td {
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.aichat-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.aichat-table tbody tr {
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.aichat-table tbody tr:hover {
+  background: var(--paper-2);
+}
+
+.aichat-note {
+  color: var(--ink-3);
+}
+
+/* ============================================================
+   八、窄窗口：占满宽度（仍然是抽屉，不改成弹窗 —— 位置感不要变）
+   ============================================================ */
+
+@media (max-width: 559px) {
+  #ai-chat {
+    width: 100vw;
+    border-inline-start: none;
+  }
+}

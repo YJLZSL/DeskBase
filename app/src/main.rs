@@ -193,6 +193,28 @@ fn browser_args(_log_path: Option<&std::path::Path>) -> String {
     String::new()
 }
 
+/// Excel 的工作表名规则（比文件名更严）：
+///   · 不能超过 **31 个字符**；
+///   · 不能含 `: \ / ? * [ ]`；
+///   · 不能以单引号开头/结尾；
+///   · 不能为空。
+///
+/// 为什么必须单独处理：不处理的话 `xlsx::write` 会写出一个 Excel 打不开的文件 ——
+/// 而用户看到的是"导出成功了，文件却是坏的"，比直接报错难查得多。
+fn sanitize_sheet_name(name: &str) -> String {
+    let t: String = name
+        .chars()
+        .map(|c| if ":\\/?*[]".contains(c) { '_' } else { c })
+        .collect();
+    let t = t.trim().trim_matches('\'').trim().to_string();
+    let t: String = t.chars().take(31).collect();
+    if t.is_empty() {
+        "表格".to_string()
+    } else {
+        t
+    }
+}
+
 /// 主线程心跳计数：**只要主线程还在处理任何事（IPC 回调、事件循环的一圈），
 /// 这个数就往上走。**
 ///
@@ -285,6 +307,120 @@ static SCROLL_FRAMES: std::sync::Mutex<Vec<capture::Frame>> = std::sync::Mutex::
 /// 那是很重的越界：你不知道焦点在哪、用户正在做什么。
 /// 截外部应用不需要跨那条线 —— 让用户自己滚，我们只负责连续抓帧与拼接。
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// ===========================================================================
+// AI 对话的异步任务簿（v1.10.0）
+// ===========================================================================
+//
+// **为什么对话要异步**：一次模型推理要十几秒到一分钟。如果像
+// `ai.listModels` 那样在 IPC 处理器里同步等，WebView 的消息线程会被占住，
+// 界面在这段时间里**不刷新** —— 用户看到的是"点了没反应"，
+// 而它其实正在认真地等模型。截图录制那边已经证明过这条路是能走通的
+// （`capture.recordStart` 起线程、`recordStop` 取结果），这里沿用它。
+//
+// 没有中途取消：WinHTTP 的同步调用没法从外部中断。所以宁可把**上限写清**
+// （[`ai::AI_CHAT_TIMEOUT_MS`]，60 秒）——超时由传输层自己报错，
+// 界面拿到一个人话原因，比一个永远转不完的圈强。
+//
+// 为什么进程内一个全局而不是放进 `AppState`：`dispatch_sync` 只拿得到
+// `&AppState`（不可变），而任务簿要写。这与 `SCROLL_FRAMES` / `RECORDING`
+// 是同一个理由，做法保持一致。
+#[derive(Clone)]
+enum ChatTask {
+    /// 线程已起，模型还没回。**必须真的插进任务簿**（否则前端第一次轮询
+    /// 会拿到"任务不存在"，而这发生在请求刚发出去的 0.5 秒内 ——
+    /// 用户会以为程序坏了）。
+    Running,
+    Done(String),
+    Failed(String),
+}
+
+/// 一个任务在簿子里的全部状态。
+///
+/// 为什么把用户的问句也存进来：**对话历史在结果落定时才写入**（见
+/// `app.aiChatPoll`）。这样历史里只会出现**完整的一问一答** ——
+/// 失败的、超时的、用户中途关掉界面的，都不会在历史里留半截。
+/// 而"落定"这件事只在轮询时被观察到，所以问句得先随任务存下来。
+struct ChatTaskRec {
+    id: String,
+    state: ChatTask,
+    /// 用户这次问的原文（写历史用）
+    input: String,
+    /// 助手回复是否已经写进历史 —— 防重复写（前端可能多轮一次）
+    logged: bool,
+    at: std::time::Instant,
+}
+
+static CHAT_TASKS: Mutex<Vec<ChatTaskRec>> = Mutex::new(Vec::new());
+
+/// 任务簿里最多留几个。留着是为了让"前端先问到结果、又轮询一次"不会扑空；
+/// 不无限留是为了不把已经结束的对话文本一直攒在内存里。
+const CHAT_TASK_KEEP: usize = 8;
+
+/// 结果保留多久。超过就清掉 —— 清掉后前端会看到"任务不存在"，
+/// 那比拿到一个几分钟前的旧回答更不容易误导人。
+const CHAT_TASK_TTL_MS: u128 = 10 * 60 * 1000;
+
+fn chat_task_push(id: String, input: String) {
+    let Ok(mut v) = CHAT_TASKS.lock() else { return };
+    let now = std::time::Instant::now();
+    // 顺手清陈旧的：顺手做比再起一个清理线程便宜得多
+    v.retain(|r| now.duration_since(r.at).as_millis() < CHAT_TASK_TTL_MS);
+    v.push(ChatTaskRec {
+        id,
+        state: ChatTask::Running,
+        input,
+        logged: false,
+        at: now,
+    });
+    while v.len() > CHAT_TASK_KEEP {
+        v.remove(0);
+    }
+}
+
+/// 线程干完活：把结果写回任务簿（只在任务还在时写 —— TTL 清掉就算了）。
+fn chat_task_finish(id: &str, state: ChatTask) {
+    let Ok(mut v) = CHAT_TASKS.lock() else { return };
+    if let Some(r) = v.iter_mut().rev().find(|r| r.id == id) {
+        r.state = state;
+    }
+}
+
+fn chat_task_state(id: &str) -> Option<(ChatTask, u128)> {
+    let v = CHAT_TASKS.lock().ok()?;
+    v.iter()
+        .rev()
+        .find(|r| r.id == id)
+        .map(|r| (r.state.clone(), r.at.elapsed().as_millis()))
+}
+
+/// 结果落定时把一问一答写进本机历史，**并保证只写一次**。
+/// 返回 true 表示这次调用真的写了（调用方据此决定要不要写日志）。
+fn chat_task_mark_logged(id: &str) -> Option<String> {
+    let mut v = CHAT_TASKS.lock().ok()?;
+    let r = v.iter_mut().rev().find(|r| r.id == id)?;
+    if r.logged {
+        return None;
+    }
+    r.logged = true;
+    Some(r.input.clone())
+}
+
+/// 任务 id：时间戳 + 一个自增号。
+///
+/// 为什么不引入 uuid 之类的依赖：这个 id 只在**本进程内**用来对上一次请求，
+/// 又不是安全凭据。为了它加一个依赖要过体积门禁与 DECISIONS_LOG，不值得。
+fn chat_task_id() -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "chat-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        N.fetch_add(1, Ordering::SeqCst)
+    )
+}
 
 fn serve_shot(
     dir: &std::path::Path,
@@ -895,6 +1031,103 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                         serde_json::json!({
                             "path": path.to_string_lossy(),
                             "count": notes.len(),
+                        }),
+                    )
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // ---------- 单表导出为 Excel（v1.10.0 补的一个"接不住"） ----------
+        //
+        // 为什么值得单开一条命令，而不是让用户走"导出全部数据"：
+        // 那个出口导的是**全库 CSV**（`export_all.rs`），产物是给别的软件吃的中间格式；
+        // 而用户真正每天会做的动作是"**把当前这张表给别人 / 打出来**"。
+        // 在此之前，做这件事要先导出全库、再去目录里翻出那一个 CSV、再拿 Excel 打开 ——
+        // 而 `grid.js` 里那个写着"导出"的分节**是空的**（只有注释，没有实现）。
+        //
+        // 与既有的笔记导出（`xlsx.exportNotes`）保持同一套策略，不另立一套：
+        //   · 只写 `<数据目录>/exports/` 下的**新文件**，绝不覆盖任何已有文件；
+        //   · 文件名由 Rust 拼（前端传不了路径）→ 渲染层拿不到"写任意文件"的能力。
+        "export.table" => {
+            let name = req
+                .args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.trim().is_empty() {
+                return err(id, "没指定要导出哪张表");
+            }
+            // 一次锁里把数据取完（取完就放锁）—— 导出大表可能要几秒，
+            // 但**不能**握着数据库锁去写文件：那期间界面所有操作都会卡住。
+            let (headers, rows) = match state.db.lock() {
+                Ok(d) => {
+                    let page = match d.page_rows(&name, None, false, None, usize::MAX) {
+                        Ok(p) => p,
+                        Err(e) => return err(id, e),
+                    };
+                    // 跳过第 0 列（rowid）：它是内部行号，导出去对用户没有意义
+                    let headers: Vec<String> =
+                        page.columns.iter().skip(1).cloned().collect();
+                    let rows: Vec<Vec<String>> = page
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .skip(1)
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    serde_json::Value::Null => String::new(),
+                                    other => other.to_string(),
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    (headers, rows)
+                }
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            if headers.is_empty() {
+                return err(id, format!("「{name}」没有任何列，导不出东西"));
+            }
+
+            let stamp = time::OffsetDateTime::now_utc()
+                .format(&time::macros::format_description!(
+                    "[year][month][day]-[hour][minute][second]"
+                ))
+                .unwrap_or_else(|_| "export".into());
+            let dir = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err(id, format!("创建导出目录失败：{e}"));
+            }
+            // 表名进文件名前要过一遍 safe_name：用户可以把表名起成 `..\..\x`，
+            // 直接拼进路径就等于给了一条"写到任意位置"的路。
+            let path = dir.join(format!("{}-{}.xlsx", crate::export_all::safe_name(&name), stamp));
+            if path.exists() {
+                return err(id, "同名文件已存在，不覆盖（等一秒再试）");
+            }
+
+            // Excel 的工作表名不能超过 31 字符、也不能含 : \ / ? * [ ]
+            let sheet_name = sanitize_sheet_name(&name);
+            let count = rows.len();
+            let sheet = xlsx::Sheet {
+                name: sheet_name,
+                headers,
+                rows,
+            };
+            match xlsx::write(&path, &[sheet]) {
+                Ok(()) => {
+                    log_line(
+                        &state.data_dir,
+                        &format!("导出表格为 Excel：{name}（{count} 行）"),
+                    );
+                    ok(
+                        id,
+                        serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "count": count,
+                            "name": name,
                         }),
                     )
                 }
@@ -2568,6 +2801,306 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                 },
                 Err(_) => err(id, "数据库锁失败"),
             }
+        }
+
+        // ===================================================================
+        // AI 对话（v1.10.0）
+        // ===================================================================
+        //
+        // 形状与前面的 AI 配置命令一致，但多了两处刻意的设计（见 ai.rs 文件头）：
+        //   · prepare 与 send 分开，send **原样照发** prepare 给用户看过的那段文本；
+        //   · 外部服务的"要不要发数据行"由前端显式传 include_data，后端不替用户默认打开。
+        //
+        // 记录：本版**只做对话与建议**，不落库、不改表、不执行任何 AI 给的东西
+        //（ADR-0017 第 3 条：AI 给的东西不许自动执行）。
+
+        // 算出"这次要发什么"给用户看。**不发任何网络请求。**
+        "app.aiChatPrepare" => {
+            let input = req
+                .args
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let include_data = req
+                .args
+                .get("include_data")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // 历史用现成的 JSON 结构反序列化：前端传什么形状由契约钉死（snake_case），
+            // 反序列化失败就当作"没有历史"，而不是报错 —— 对话的第一句本来就没有历史。
+            let history: Vec<ai::ChatMessage> = req
+                .args
+                .get("messages")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            // 列结构：前端给的是 [{name, type}]。
+            // 注意字段名是 `type`（契约里写死）——它同时也是发给模型的字段名，
+            // 两边必须一致，否则"预览里看到的"与"实际发的"就不一样了。
+            let columns: Vec<ai::ChatColumn> = req
+                .args
+                .get("columns")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            match state.db.lock() {
+                Ok(d) => match ai::chat_plan(&d, &history, &input, &table, &columns, include_data) {
+                    Ok(p) => ok(id, serde_json::to_value(p).unwrap_or_else(|_| serde_json::json!({}))),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // 真发出去。**立刻返回 task_id**，前端轮询取结果（见 ChatTask 的注释：
+        // 同步等会把 WebView 消息线程占住十几秒，界面看起来像"点了没反应"）。
+        "app.aiChatSend" => {
+            let payload = req
+                .args
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let provider = req
+                .args
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let table = req
+                .args
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let model = req
+                .args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let data_rows = req
+                .args
+                .get("data_rows")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let include_data = req
+                .args
+                .get("include_data")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // 用户的问句：轮询落定时要写进本机对话历史（见 ChatTaskRec 的注释）
+            let input = req
+                .args
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if payload.trim().is_empty() {
+                return err(id, "请求体是空的 —— 先点「发送」让它算一遍要发什么");
+            }
+            if payload.len() > ai::AI_CHAT_MAX_BYTES * 4 {
+                // payload 比响应上限还大一个量级 ⇒ 一定是哪里错了（正常对话到不了）。
+                // 拦在这里而不是硬发出去：真发出去会白等一分钟再失败。
+                return err(id, "请求体异常大，已拦下（正常对话不会有这么大）");
+            }
+
+            // 设置在这里再读一次（不是从 args 里信前端）：**端点是后端决定的** ——
+            // 前端只传"要发什么"，不该也不能决定"发去哪"。
+            let (endpoint, key) = match state.db.lock() {
+                Ok(d) => {
+                    let s = ai::load(&d);
+                    if !s.enabled {
+                        return err(id, "AI 已经关掉了 —— 设置页打开后再试");
+                    }
+                    (ai::chat_url(&s.base_url), s.api_key.clone())
+                }
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+
+            let task_id = chat_task_id();
+            let tid = task_id.clone();
+            let data_dir = state.data_dir.clone();
+            // 任务簿先记下"在跑"，再起线程 —— 反过来的话，前端第一次轮询
+            // （0.5 秒后）可能撞上"任务不存在"这个本该表示异常的状态。
+            chat_task_push(task_id.clone(), input);
+            // 审计写在这里（而不是等线程结束）不合适：结果还没出来。
+            // 但"发起了"这件事本身也要留痕 —— 所以线程里成功/失败各写一条。
+            std::thread::spawn(move || {
+                let headers = ai::chat_headers(&key);
+                let r = updater::http::post(
+                    &endpoint,
+                    &headers,
+                    payload.as_bytes(),
+                    ai::AI_CHAT_TIMEOUT_MS,
+                    ai::AI_CHAT_MAX_BYTES,
+                    // 非幂等 + 按次计费：失败也不换路重发，宁可报错也不重复扣费
+                    // （详见 updater::http::post 的注释）
+                    false,
+                );
+                let (state_val, audit) = match r {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) => match ai::parse_chat_response(&text) {
+                            Ok(answer) => (
+                                ChatTask::Done(answer),
+                                ("ok".to_string(), String::new()),
+                            ),
+                            Err(e) => {
+                                let note = ai::audit_note_for_error(&text);
+                                (ChatTask::Failed(e), ("failed".to_string(), note))
+                            }
+                        },
+                        Err(_) => (
+                            ChatTask::Failed("响应不是合法的 UTF-8".to_string()),
+                            ("failed".to_string(), "响应不是 UTF-8".to_string()),
+                        ),
+                    },
+                    Err(e) => (
+                        ChatTask::Failed(e.clone()),
+                        // 传输层的错误文案是本地拼的（连不上 / 超时），不含用户数据；
+                        // 但仍然截一下，保持"审计里只有短说明"这条纪律。
+                        ("failed".to_string(), ai::truncate_for_audit(&e)),
+                    ),
+                };
+                if let Err(e) = ai::audit_append(
+                    &data_dir,
+                    &ai::AuditEntry {
+                        at_ms: ai::now_ms(),
+                        action: "chat".to_string(),
+                        provider,
+                        table,
+                        column: model,
+                        // 行数就是"实际发出去的数据行数"：只发结构时它是 0，
+                        // 这正是隐私面板上"本次会话发出过多少行"的数据来源。
+                        rows: if include_data { data_rows } else { 0 },
+                        result: audit.0,
+                        note: audit.1,
+                    },
+                ) {
+                    log_line(&data_dir, &format!("AI 审计写入失败：{e}"));
+                }
+                chat_task_finish(&tid, state_val);
+            });
+            ok(id, serde_json::json!({ "task_id": task_id }))
+        }
+
+        // 取异步对话的结果。前端每 ~500ms 问一次。
+        "app.aiChatPoll" => {
+            let tid = req
+                .args
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let found = chat_task_state(&tid);
+            match found {
+                Some((ChatTask::Running, elapsed)) => ok(
+                    id,
+                    serde_json::json!({ "done": false, "elapsed_ms": elapsed as u64 }),
+                ),
+                Some((ChatTask::Done(text), _)) => {
+                    // 成功落定 ⇒ 写本机历史（只写一次）。
+                    // 写失败**不能**让用户看不到回答 —— 回答已经拿到了，
+                    // 历史写不上只是"下次打开看不到这轮"，降级处理并记日志。
+                    if let Some(q) = chat_task_mark_logged(&tid) {
+                        if let Ok(mut d) = state.db.lock() {
+                            if let Err(e) = ai::chat_append(&mut d, &q, &text) {
+                                log_line(&state.data_dir, &format!("对话记录写入失败：{e}"));
+                            }
+                        }
+                    }
+                    ok(id, serde_json::json!({ "done": true, "ok": true, "text": text }))
+                }
+                Some((ChatTask::Failed(msg), _)) => ok(
+                    id,
+                    serde_json::json!({ "done": true, "ok": false, "error": msg }),
+                ),
+                // 两条真实成因：任务 id 传错，或者结果已经超过 TTL 被清掉了。
+                // 都给同一句人话 —— 用户能做的动作是同一个（重新问一次）。
+                None => err(id, "这次请求的结果已经取不到了（可能等太久或已被清掉），请重新问一次"),
+            }
+        }
+
+        // 本机对话历史（ADR-0017 第 2 条：本地存储、一键清除）
+        "app.aiChatHistory" => match state.db.lock() {
+            Ok(d) => {
+                let n = req.args.get("n").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+                let items = ai::chat_history(&d, n.min(500));
+                ok(id, serde_json::json!({ "items": items }))
+            }
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        "app.aiChatClear" => match state.db.lock() {
+            Ok(mut d) => match ai::chat_clear(&mut d) {
+                Ok(n) => {
+                    log_line(&state.data_dir, &format!("清空 AI 对话记录：{n} 条"));
+                    ok(id, serde_json::json!({ "cleared": n }))
+                }
+                Err(e) => err(id, e),
+            },
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        // 隐私面板的数据源（ADR-0017 第 5 条：没有这个面板就不许上线 AI 功能）。
+        //
+        // 哪些数字是**算出来的**、哪些是**读出来的**，说清楚：
+        //   · session_calls / session_sent_rows 来自审计日志的聚合 —— 也就是
+        //     "程序自己记下来的事实"，而不是界面自己数的（界面数不了：刷新就丢）；
+        //   · last_result 是最近一条审计的结果。
+        "app.aiPrivacyPanel" => {
+            let n = req.args.get("n").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let items = ai::audit_tail(&state.data_dir, n.min(200));
+            let (mut calls, mut sent_rows) = (0usize, 0usize);
+            for it in items.iter() {
+                if it.action == "chat" {
+                    calls += 1;
+                    sent_rows += it.rows;
+                }
+            }
+            let last_result = items
+                .last()
+                .map(|x| x.result.clone())
+                .unwrap_or_default();
+            let (enabled, provider, model, local) = match state.db.lock() {
+                Ok(d) => {
+                    let s = ai::load(&d);
+                    let local = ai::provider_is_local(&s.provider, &s.base_url);
+                    (s.enabled, s.provider.clone(), s.model.clone(), local)
+                }
+                Err(_) => (false, String::new(), String::new(), false),
+            };
+            // 端点类型只给三种字符串，**不回 base_url 原文** ——
+            // base_url 可能带查询串里的密钥（与审计那条同一个理由）。
+            let endpoint_kind = if !enabled {
+                "off"
+            } else if local {
+                "local"
+            } else {
+                "cloud"
+            };
+            ok(
+                id,
+                serde_json::json!({
+                    "enabled": enabled,
+                    "provider": provider,
+                    "provider_label": ai::provider_label(&provider),
+                    "model": model,
+                    "local": local,
+                    "endpoint_kind": endpoint_kind,
+                    "session_calls": calls,
+                    "session_sent_rows": sent_rows,
+                    "last_result": last_result,
+                    "items": items,
+                }),
+            )
         }
 
         "app.backupCreate" => match state.db.lock() {
@@ -4475,5 +5008,105 @@ mod acceptance {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// 单表导出（v1.10.0）里两个**纯函数**的测试。
+///
+/// 为什么单独一个模块而不是塞进 `acceptance`：这两个函数不需要 `AppState`、
+/// 不需要临时数据目录、不碰磁盘 —— 它们的全部风险都在"字符串怎么变形"上。
+/// 而这类变形的 bug 有个共同点：**不报错**。所以必须逐条钉住边界。
+#[cfg(test)]
+mod export_table_tests {
+    use super::*;
+
+    /// 表名会变成文件名的一段。用户可以把表名起得很任意（含 `..\` 这种），
+    /// 直接拼进路径就等于给了一条"写到任意位置"的路。
+    #[test]
+    fn safe_name_strips_path_separators_and_never_escapes() {
+        // 刻意用 Windows 与 POSIX 两套分隔符都试
+        for evil in [
+            r"..\..\Windows\System32\evil",
+            "../../etc/passwd",
+            r"a/b\c",
+            "con:aux",
+        ] {
+            let s = export_all::safe_name(evil);
+            assert!(
+                !s.contains('/') && !s.contains('\\'),
+                "「{evil}」消毒后仍含路径分隔符：{s}"
+            );
+            assert!(
+                !std::path::Path::new(&s).is_absolute(),
+                "「{evil}」消毒后成了绝对路径：{s}"
+            );
+            // 再叠一层保险：拼出来的路径必须仍在导出目录下
+            let dir = std::path::Path::new(r"E:\data\exports");
+            let joined = dir.join(&s);
+            assert!(
+                joined.starts_with(dir),
+                "「{evil}」拼接后跑出导出目录：{}",
+                joined.display()
+            );
+        }
+        // 空 / 只有点号的名字要有兜底，不能拼出一个空文件名
+        assert_eq!(export_all::safe_name("   "), "未命名");
+        assert_eq!(export_all::safe_name("..."), "未命名");
+        // 超长要截断（Windows 260 的经典坑）
+        let long = "表".repeat(200);
+        assert!(export_all::safe_name(&long).chars().count() <= 60);
+    }
+
+    /// Excel 的工作表名比文件名更严。不处理的结果不是报错，而是
+    /// **写出一个 Excel 打不开的文件** —— 用户看到"导出成功、文件却是坏的"。
+    #[test]
+    fn sheet_name_meets_excel_rules() {
+        let s = sanitize_sheet_name("2026/09 台账:明细[甲]");
+        assert!(!s.contains('/'), "工作表名不能含 /：{s}");
+        assert!(!s.contains(':'), "工作表名不能含 :：{s}");
+        assert!(!s.contains('[') && !s.contains(']'), "工作表名不能含方括号：{s}");
+        // 31 字符是 Excel 的硬限制
+        let long = sanitize_sheet_name(&"长".repeat(80));
+        assert_eq!(long.chars().count(), 31, "必须截到 31 字符");
+        // 首尾单引号是 Excel 的保留形状
+        assert!(!sanitize_sheet_name("'表'").starts_with('\''));
+        // 空名字要有兜底
+        assert_eq!(sanitize_sheet_name("   "), "表格");
+        // 全是非法字符时，逐个换下划线：输入 `[]:*?/\` 是 **7** 个字符，就该得到 7 个下划线。
+        //
+        // ⚠️ 这里我第一版写的是 8 个 —— 手数错了。**错的是测试里的期望值，不是实现**，
+        // 而那种失败看起来像"实现坏了"。所以这条的数字不是随手写的：
+        // 用 `local-docs/tools/probe-sheet-name.cjs` 把真实输出打出来对着抄的。
+        // 教训：断言里的"字面量个数"必须让程序算一遍，不能靠眼看。
+        assert_eq!(sanitize_sheet_name("[]:*?/\\"), "_______");
+        // 正常中文表名要原样保留（不要为了消毒把中文也洗掉）
+        assert_eq!(sanitize_sheet_name("客户台账"), "客户台账");
+    }
+
+    /// 导出走的是"只写新文件"策略（与既有笔记导出同一套）：
+    /// 目标已存在时必须拒绝，绝不能覆盖用户已有的文件。
+    #[test]
+    fn xlsx_write_refuses_to_overwrite_existing_file() {
+        let d = std::env::temp_dir().join(format!("dkb_exp_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("台账.xlsx");
+        let sheet = || {
+            vec![xlsx::Sheet {
+                name: "台账".into(),
+                headers: vec!["名称".into(), "数量".into()],
+                rows: vec![vec!["甲".into(), "3".into()]],
+            }]
+        };
+        assert!(xlsx::write(&p, &sheet()).is_ok(), "第一次应当写得成功");
+        let before = std::fs::read(&p).unwrap();
+        let second = xlsx::write(&p, &sheet());
+        assert!(second.is_err(), "已存在的文件必须拒绝覆盖");
+        assert!(
+            second.unwrap_err().contains("不覆盖"),
+            "报错要说清是「不覆盖」，否则用户会以为程序坏了"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), before, "拒绝之后原文件必须一字未动");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

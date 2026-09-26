@@ -1313,18 +1313,22 @@ impl Db {
 
     fn all_rows(&self, table: &str) -> Vec<(i64, BTreeMap<String, Json>)> {
         let prefix = record_prefix(table);
-        self.store
-            .scan(&prefix)
-            .into_iter()
-            .filter_map(|(_, v)| {
-                let rec: BTreeMap<String, Json> = serde_json::from_str(&v).ok()?;
+        // 用 scan_each（**借用**遍历）而不是 scan：scan 会把整表的 key 与 value
+        // 各克隆一份，而这里拿到就立刻反序列化掉了 —— 10 万行表上那是 20 万个
+        // String 的纯过路费。with_capacity 用 count（同样不克隆）拿准确容量，
+        // 免得 10 万次 push 一路扩容。
+        let mut out = Vec::with_capacity(self.store.count(&prefix));
+        self.store.scan_each(&prefix, None, |_, v| {
+            if let Ok(rec) = serde_json::from_str::<BTreeMap<String, Json>>(v) {
                 let rid = rec
                     .get(ROWID_COLUMN)
                     .and_then(|x| x.as_i64())
                     .unwrap_or(0);
-                Some((rid, rec))
-            })
-            .collect()
+                out.push((rid, rec));
+            }
+            true
+        });
+        out
     }
 
     /// 一条记录里 via 字段是否指向 want 这个 rowid。
@@ -1661,51 +1665,105 @@ impl Db {
         if t.fields.is_empty() {
             return Err(format!("表「{table}」没有任何列"));
         }
-        // ---------- 快路径：最常见的"给我第一页" ----------
+        // ---------- 快路径：按 rowid 升序的连续页（首页 **和** 游标页） ----------
         //
-        // 没有筛选、没有游标、按 rowid 升序 —— 这就是"打开表格看到的那一屏"。
         // 存储的 key 是 `rec/<表>/<20 位补零 rowid>`，**BTreeMap 的字典序就是
-        // rowid 升序**，所以这一页就是前 limit 条，没必要把整表读出来再切。
+        // rowid 升序**，所以"一页"只是这个范围里的连续一段：
+        //   - 没有游标 → 从表头开始的 limit+1 条；
+        //   - 有游标 → 用 key 一次 range 定位到游标那一行（含），再取 limit+1 条。
+        // 两种都不需要把整表读出来再切。
         //
-        // 实测（10 万行）：全表路径 336ms，这里从"克隆 10 万个 String + 
-        // 反序列化 10 万行"降到"50 个 String + 50 行"。
+        // 实测（10 万行）：改动前游标页要 386ms（整表克隆 + 反序列化 10 万行），
+        // 首页 0.28ms —— 两者本该一样快，差别只在"有没有游标"。现在都是
+        // "50 个 String + 50 行反序列化"。
         let rowid_asc = match order_by {
             None => true,
             Some(c) => c == ROWID_COLUMN && !desc,
         };
-        if filters.is_empty() && cursor.is_none() && rowid_asc {
+        if filters.is_empty() && rowid_asc {
+            // 起点：游标必须能**真的定位到那一行** —— key 存在、JSON 读得出来、
+            // 且行里的 `_rowid` 就是游标说的那个数。改动前是按行里的 `_rowid`
+            // 找游标的，三者缺一都会"匹配不上 → 从表头重来"（前端传脏游标、
+            // 或那一行刚好被删掉时就是这个行为）。这里逐条对齐，只多花一次
+            // BTreeMap 查找 + 一行反序列化，不必读整表。
+            let from = match cursor.and_then(canonical_rowid) {
+                Some(rid) => {
+                    let k = record_key(table, rid);
+                    let hit = self
+                        .store
+                        .get(&k)
+                        .and_then(|v| serde_json::from_str::<BTreeMap<String, Json>>(v).ok())
+                        .and_then(|rec| rec.get(ROWID_COLUMN).and_then(|x| x.as_i64()))
+                        == Some(rid);
+                    if hit {
+                        Some(k)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
             let prefix = record_prefix(table);
-            let mut page_rows: Vec<(i64, BTreeMap<String, Json>)> = Vec::new();
+            let mut page_rows: Vec<(i64, BTreeMap<String, Json>)> = Vec::with_capacity(limit + 1);
             // 取 **limit + 1** 行：finish_page 靠"多出来的那一行"判断 has_more。
             // 只取 limit 行的话它会以为"正好取完"，于是 has_more=false ——
             // 分页测试当场抓到过这个（还有 50 行没取却报 has_more=false）。
-            for (_, v) in self.store.scan_take(&prefix, limit + 1) {
-                if let Ok(rec) = serde_json::from_str::<BTreeMap<String, Json>>(&v) {
+            //
+            // 这里数的是**成功反序列化的行**：某行 JSON 坏掉时不该白占一个名额。
+            // 改动前首页走 scan_take（按原始条目截断），坏行会白白吃掉一格；
+            // 现在两条路径统一按"能读出来的行"数，与整表路径的行为一致。
+            self.store.scan_each(&prefix, from.as_deref(), |_, v| {
+                if let Ok(rec) = serde_json::from_str::<BTreeMap<String, Json>>(v) {
                     let rid = rec
                         .get(ROWID_COLUMN)
                         .and_then(|x| x.as_i64())
                         .unwrap_or(0);
                     page_rows.push((rid, rec));
                 }
-            }
+                page_rows.len() < limit + 1
+            });
             return finish_page(&t, page_rows, None, limit);
         }
 
-        let mut rows = self.all_rows(table);
+        // ---------- 其余情况：仍要看全部行，但只反序列化一次 ----------
+        //
+        // 改动前是 `all_rows()`（整表克隆 key+value → 逐行反序列化 → 攒出 10 万行
+        // 的向量）→ 逐列 retain → 排序。这里换成"按 key 升序边扫边反序列化、
+        // 命中才留下"：少一次整表克隆、少一个装满未命中行的中间向量，结果不变
+        // （输入仍是 rowid 升序，且 sort_rows 的次序是全序、与"先筛后排"无关）。
+        //
+        // **不引入行缓存**：写路径的失效风险大于这点收益（`invalidate_indexes`
+        // 的注释里那条教训 —— 宁可作废也不要增量维护）。
+        let mut needles: Vec<(&str, String)> = Vec::new();
         for (col, kw) in filters {
             if kw.is_empty() {
-                continue;
+                continue; // 空关键词 = 不筛 —— 连列名都不校验（保持改动前的顺序）
             }
             if t.field(col).is_none() {
                 return Err(format!("表「{table}」没有列「{col}」，没法按它筛选"));
             }
-            let needle = kw.to_lowercase();
-            rows.retain(|(_, rec)| {
-                rec.get(col)
-                    .map(|v| value_text(v).to_lowercase().contains(&needle))
-                    .unwrap_or(false)
-            });
+            needles.push((col.as_str(), kw.to_lowercase()));
         }
+        let prefix = record_prefix(table);
+        let mut rows: Vec<(i64, BTreeMap<String, Json>)> = Vec::new();
+        self.store.scan_each(&prefix, None, |_, v| {
+            if let Ok(rec) = serde_json::from_str::<BTreeMap<String, Json>>(v) {
+                // 判据与改动前逐字一致：包含、忽略大小写、多列 AND
+                let hit = needles.iter().all(|(col, needle)| {
+                    rec.get(*col)
+                        .map(|v| value_text(v).to_lowercase().contains(needle))
+                        .unwrap_or(false)
+                });
+                if hit {
+                    let rid = rec
+                        .get(ROWID_COLUMN)
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    rows.push((rid, rec));
+                }
+            }
+            true
+        });
         let sorts = match order_by {
             Some(c) if t.field(c).is_some() => vec![Sort { field: c.to_string(), desc }],
             _ => vec![Sort { field: ROWID_COLUMN.to_string(), desc }],
@@ -1740,6 +1798,23 @@ fn trim_for_preview(v: &str) -> String {
 
 fn record_key(table: &str, rowid: i64) -> String {
     format!("rec/{table}/{:020}", rowid)
+}
+
+/// 把游标字符串解析成 rowid，**只在它是规范行号时才认**。
+///
+/// 为什么要卡这一条：分页游标是 `finish_page` 用 `rid.to_string()` 生成的，
+/// 而改动前的定位方式是拿游标和 `format!("{rid}")` 逐字符比 —— 于是
+/// `"007"` / `"+1"` / `" 1"` 这类"能 parse 成 1 但不是规范写法"的游标
+/// 一律匹配不上，行为是"从表头重新开始"。
+/// 窗口化后如果直接 `parse`，这些脏游标会突然变得有效 —— 那是可观察的
+/// 行为变化，不是优化。所以这里显式保持旧语义：认不出规范形式就等于没游标。
+fn canonical_rowid(cursor: &str) -> Option<i64> {
+    let n: i64 = cursor.parse().ok()?;
+    if n.to_string() == cursor {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 fn is_empty_value(v: &Json) -> bool {
@@ -2429,6 +2504,291 @@ mod tests {
             .page_rows_filtered("t", None, false, None, 10, &[("名字".to_string(), "张".to_string())])
             .unwrap();
         assert_eq!(p.rows.len(), 2);
+    }
+
+    // ---------- 分页/筛选的等价性（"只取窗口"不许改变结果）----------
+    //
+    // 性能优化最容易悄悄改坏的就是分页：少取一行、游标错位、has_more 反了，
+    // 界面看起来都"还能用"。所以这里把**改动前的算法**原样复刻成参考实现
+    // （整表读出来 → 逐列 retain → 排序 → finish_page 按游标切片），
+    // 与被测的 page_rows_filtered 逐页对拍：行集合、顺序、has_more、
+    // next_cursor 四项全比。这是唯一能证明"窗口化是等价的"的东西。
+
+    /// 一页的可比较指纹：行号序列 + 是否还有下一页 + 下一页游标。
+    type PageSig = (Vec<i64>, bool, Option<String>);
+
+    fn page_rids(p: &Page) -> Vec<i64> {
+        p.rows.iter().map(|r| r[0].as_i64().unwrap()).collect()
+    }
+
+    /// 参考实现（改动前的整表路径）：无筛选。
+    fn legacy_page_walk(
+        d: &Db,
+        table: &str,
+        order_by: Option<&str>,
+        desc: bool,
+        limit: usize,
+    ) -> Vec<PageSig> {
+        legacy_filtered_walk(d, table, &[], order_by, desc, limit)
+    }
+
+    /// 参考实现（改动前的整表路径）：先全表 retain 再排序切片，游标按行号定位。
+    fn legacy_filtered_walk(
+        d: &Db,
+        table: &str,
+        filters: &[(String, String)],
+        order_by: Option<&str>,
+        desc: bool,
+        limit: usize,
+    ) -> Vec<PageSig> {
+        let t = d.load_table(table).unwrap();
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..500 {
+            let mut rows = d.all_rows(table);
+            for (col, kw) in filters {
+                if kw.is_empty() {
+                    continue;
+                }
+                let needle = kw.to_lowercase();
+                rows.retain(|(_, rec)| {
+                    rec.get(col)
+                        .map(|v| value_text(v).to_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                });
+            }
+            let sorts = match order_by {
+                Some(c) if t.field(c).is_some() => vec![Sort { field: c.to_string(), desc }],
+                _ => vec![Sort { field: ROWID_COLUMN.to_string(), desc }],
+            };
+            sort_rows(&mut rows, &sorts);
+            let p = finish_page(&t, rows, cursor.as_deref(), limit).unwrap();
+            out.push((page_rids(&p), p.has_more, p.next_cursor.clone()));
+            match p.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// 被测实现：`page_rows_filtered` 逐页翻到底。
+    fn new_walk(
+        d: &Db,
+        table: &str,
+        filters: &[(String, String)],
+        order_by: Option<&str>,
+        desc: bool,
+        limit: usize,
+    ) -> Vec<PageSig> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..500 {
+            let p = d
+                .page_rows_filtered(table, order_by, desc, cursor.as_deref(), limit, filters)
+                .unwrap();
+            out.push((page_rids(&p), p.has_more, p.next_cursor.clone()));
+            match p.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cursor_page_walk_matches_legacy_full_scan() {
+        let d = tmp("cursor-equiv");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec(
+            "t",
+            &[("名字", ColType::Text), ("序号", ColType::Integer)],
+        ))
+        .unwrap();
+        let cols = vec!["名字".to_string(), "序号".to_string()];
+        let rows: Vec<Vec<Option<String>>> = (0..40)
+            .map(|i| vec![Some(format!("第{i}个")), Some(i.to_string())])
+            .collect();
+        db.insert_rows("t", &cols, &rows).unwrap();
+
+        // 挖 4 个洞：游标分页最怕"游标指着的那一行没了"
+        let all: Vec<i64> = db.all_rows("t").iter().map(|(r, _)| *r).collect();
+        assert_eq!(
+            db.delete_rows("t", &[all[3], all[4], all[17], all[38]]).unwrap(),
+            4
+        );
+        let alive = 36usize;
+
+        for (order_by, desc) in [
+            (None, false),
+            (Some(ROWID_COLUMN), false),
+            (Some(ROWID_COLUMN), true), // 倒序仍走整表路径，顺带钉住
+            (Some("序号"), false),
+            (Some("序号"), true),
+        ] {
+            for limit in [1usize, 7, 9, 12, 36, 99] {
+                assert_eq!(
+                    new_walk(&db, "t", &[], order_by, desc, limit),
+                    legacy_page_walk(&db, "t", order_by, desc, limit),
+                    "order_by={order_by:?} desc={desc} limit={limit}：逐页结果必须与整表路径一致"
+                );
+            }
+        }
+
+        // 逐页必须一行不漏、不重、严格递增
+        let walk = new_walk(&db, "t", &[], None, false, 7);
+        assert_eq!(walk.len(), 6, "36 行、每页 7 行 = 6 页");
+        assert!(!walk.last().unwrap().1, "最后一页不该说还有下一页");
+        let flat: Vec<i64> = walk.iter().flat_map(|(r, _, _)| r.clone()).collect();
+        assert_eq!(flat.len(), alive, "逐页取下来必须正好是全部 36 行");
+        let mut uniq = flat.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), alive, "不能有重复行");
+        assert!(flat.windows(2).all(|w| w[0] < w[1]), "必须严格按 rowid 升序");
+        for pair in walk.windows(2) {
+            assert_eq!(
+                pair[0].2.as_deref().and_then(|c| c.parse::<i64>().ok()),
+                pair[1].0.first().copied(),
+                "next_cursor 必须正好是下一页的第一行"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_page_boundaries_and_dirty_cursor() {
+        let d = tmp("cursor-edge");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec("t", &[("名字", ColType::Text)])).unwrap();
+
+        // 空表：不带游标、带真游标、带脏游标，都不许出错或谎报"还有下一页"
+        for cursor in [None, Some("1"), Some("abc")] {
+            let p = db.page_rows("t", None, false, cursor, 10).unwrap();
+            assert_eq!(p.rows.len(), 0, "空表 cursor={cursor:?}");
+            assert!(!p.has_more, "空表 cursor={cursor:?}");
+            assert_eq!(p.next_cursor, None, "空表 cursor={cursor:?}");
+        }
+
+        let cols = vec!["名字".to_string()];
+        let rows: Vec<Vec<Option<String>>> = (0..5)
+            .map(|i| vec![Some(format!("第{i}个"))])
+            .collect();
+        db.insert_rows("t", &cols, &rows).unwrap();
+        let all: Vec<i64> = db.all_rows("t").iter().map(|(r, _)| *r).collect();
+        let last = *all.last().unwrap();
+
+        // 游标语义是"下一页的第一行"（它本身**还没**被返回过），所以指着最后一行时
+        // 它自己会再被返回一次，然后就没有下一页了 —— 改动前就是这个行为，
+        // 实测过：这里是 1 行，不是 0 行（我一开始就写反了，被这条测试当场抓住）。
+        let p = db
+            .page_rows("t", None, false, Some(&last.to_string()), 10)
+            .unwrap();
+        assert_eq!(page_rids(&p), vec![last]);
+        assert!(!p.has_more);
+        assert_eq!(p.next_cursor, None);
+
+        // 脏游标：改动前的判定是"和 format!("{rid}") 逐字符比"，匹配不上就从表头重来。
+        // "007" / "+1" / " 1" 能 parse 成 1 却不是规范写法 —— 它们也**不能**突然生效。
+        let head = legacy_page_walk(&db, "t", None, false, 3);
+        assert_eq!(head.len(), 2, "5 行、每页 3 行 = 2 页");
+        for dirty in ["999999", "abc", "007", "+1", " 1", "", "-1"] {
+            let p = db.page_rows("t", None, false, Some(dirty), 3).unwrap();
+            assert_eq!(
+                (page_rids(&p), p.has_more, p.next_cursor.clone()),
+                head[0],
+                "脏游标 {dirty:?} 应该等价于「从头开始」"
+            );
+        }
+
+        // 每页 1 行：游标链必须能把 5 行逐行走完
+        assert_eq!(
+            new_walk(&db, "t", &[], None, false, 1),
+            legacy_page_walk(&db, "t", None, false, 1)
+        );
+    }
+
+    #[test]
+    fn filtered_paging_matches_legacy_full_scan() {
+        let d = tmp("filter-equiv");
+        let mut db = Db::open(&d).unwrap();
+        db.create_table(&spec(
+            "t",
+            &[
+                ("名字", ColType::Text),
+                ("城市", ColType::Text),
+                ("备注", ColType::Text),
+            ],
+        ))
+        .unwrap();
+        let cols = vec!["名字".to_string(), "城市".to_string(), "备注".to_string()];
+        let names = ["张三", "李四", "张小三", "王五"];
+        let cities = ["北京", "上海", "北京", "广州"];
+        let rows: Vec<Vec<Option<String>>> = (0..30)
+            .map(|i| {
+                vec![
+                    Some(names[i % 4].to_string()),
+                    Some(cities[i % 4].to_string()),
+                    Some(format!("ABC-{i}")),
+                ]
+            })
+            .collect();
+        db.insert_rows("t", &cols, &rows).unwrap();
+
+        let cases: Vec<(Vec<(String, String)>, Option<&str>, bool, usize)> = vec![
+            (vec![("名字".into(), "张".into())], None, false, 7),
+            (vec![("名字".into(), "张".into())], None, false, 3),
+            (vec![("名字".into(), "张".into())], Some("城市"), true, 4),
+            (
+                vec![
+                    ("名字".into(), "张".into()),
+                    ("城市".into(), "北京".into()),
+                ],
+                None,
+                false,
+                5,
+            ),
+            // 大小写不敏感（"ABC-i" 用小写关键词搜得到）
+            (vec![("备注".into(), "abc".into())], Some(ROWID_COLUMN), false, 9),
+            // 空关键词 = 不筛；连"列名不存在"都不该报错（改动前就是这个顺序）
+            (vec![("名字".into(), "".into())], None, false, 8),
+            (vec![("根本没有的列".into(), "".into())], None, false, 8),
+        ];
+        for (filters, order_by, desc, limit) in cases {
+            let new = new_walk(&db, "t", &filters, order_by, desc, limit);
+            let old = legacy_filtered_walk(&db, "t", &filters, order_by, desc, limit);
+            assert_eq!(
+                new, old,
+                "filters={filters:?} order_by={order_by:?} desc={desc} limit={limit}"
+            );
+        }
+
+        // 命中行数：30 行里"张三"8 行（i%4==0）+ "张小三"7 行（i%4==2，i≤29）= 15
+        let hit = new_walk(&db, "t", &[("名字".into(), "张".into())], None, false, 7);
+        let flat: Vec<i64> = hit.iter().flat_map(|(r, _, _)| r.clone()).collect();
+        assert_eq!(flat.len(), 15, "「张」开头的名字应该命中 15 行");
+
+        // 非空关键词 + 列名不存在必须报错；空关键词不该把行全筛掉
+        assert!(db
+            .page_rows_filtered(
+                "t",
+                None,
+                false,
+                None,
+                10,
+                &[("根本没有的列".to_string(), "x".to_string())]
+            )
+            .is_err());
+        let all_page = db
+            .page_rows_filtered(
+                "t",
+                None,
+                false,
+                None,
+                10,
+                &[("名字".to_string(), String::new())],
+            )
+            .unwrap();
+        assert_eq!(all_page.rows.len(), 10);
     }
 
     #[test]

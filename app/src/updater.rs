@@ -408,7 +408,8 @@ pub mod http {
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
         WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption,
         WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY,
+        WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
+        WINHTTP_OPTION_REDIRECT_POLICY,
         WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS, WINHTTP_QUERY_FLAG_NUMBER,
         WINHTTP_QUERY_STATUS_CODE,
     };
@@ -457,6 +458,14 @@ pub mod http {
             12029 => "连不上服务器（连接被拒或超时）".to_string(),
             12030 => "连接被重置或中断".to_string(),
             12037 => "证书过期或无效".to_string(),
+            // 12152 = ERROR_WINHTTP_INVALID_SERVER_RESPONSE。
+            //
+            // 为什么值得单列一条：AI 对话走本机模型时，**最常见的失败就是它** ——
+            // 用户没启动 Ollama / LM Studio，或者模型还在加载。而端口上什么都没有时，
+            // WinHTTP 报的不是"连不上"（12029）而是这一条。落回默认文案的话，
+            // 用户看到的是"Win32 错误码 12152"，他没法从这串数字想到"我模型没开"。
+            12152 => "服务器返回了无法识别的应答（本机模型常见：模型服务没启动，或还在加载中）"
+                .to_string(),
             12175 => "安全通道错误：证书校验没通过（可能是网络中间人，或系统时间不对）"
                 .to_string(),
             other => format!("Win32 错误码 {other}"),
@@ -547,30 +556,226 @@ pub mod http {
         Settled(String),
     }
 
-    /// 发一个 HTTPS GET（**走一条指定的路**），边收边交给 `on_chunk`，不在内存里攒整份。
+    /// host 是不是"就在本机"。
+    ///
+    /// **只认这几种写法**，多认一种就等于给公网开一道门。大小写不敏感
+    /// （`LocalHost` 与 `localhost` 在 DNS 上是同一个名字）。
+    ///
+    /// ⚠️ 已知的、可接受的边界：`localhost` 的解析交给系统（hosts 文件理论上
+    /// 可以被指向别处）。能改本机 hosts 的已经拿到了本机管理权 —— 那不是
+    /// 这个闸门要拦的东西；闸门要拦的是"用户在设置里填了一个公网地址、
+    /// 明文把自己的数据发出去"。
+    pub(super) fn is_loopback_host(host: &str) -> bool {
+        let h = host
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_ascii_lowercase();
+        // `::1` 的完整写法是 `0:0:0:0:0:0:0:1`，是同一个地址，一并认下
+        h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "0:0:0:0:0:0:0:1"
+    }
+
+    /// 判定这个地址允不允许访问，并解析出 `(要不要 TLS, host, port, path)`。
+    ///
+    /// **为什么明文只给回环开**（这是隐私取舍，不是便利取舍）：
+    /// DeskBase 的 AI 默认走本机推理（ADR-0007 / ADR-0017「默认本地」），
+    /// 本机服务商的默认地址就是 `http://127.0.0.1:11434/v1`（Ollama）与
+    /// `http://127.0.0.1:1234/v1`（LM Studio）—— 明文 HTTP + 非 443 端口。
+    /// 只认 https 会让"本机跑模型"这条默认路径直接报一句"只允许 https 地址"，
+    /// 而用户会以为是模型没启动 —— 一个极其费时间的误判。
+    ///
+    /// 但**不是顺手放宽**：到回环地址的明文流量不会离开这台机器，与"数据不出本机"
+    /// 的承诺不冲突；放开任意主机（含内网 `192.168.x.x`，明文一样离开这台机器）的
+    /// http，等于允许用户把自己的数据明文发到网上。所以这里只有一条口子：
+    /// **回环 + http**。外部服务继续一律 https。
+    ///
+    /// 抽成纯函数是为了可测：它是唯一闸门，而闸门错了不会有任何报错 ——
+    /// 只会安静地放行（或安静地拒绝，让人查半天）。
+    pub(super) fn url_allowed(url: &str) -> Result<(bool, String, u16, String), String> {
+        // 空白与 CR/LF 一律拒：它们要么把请求行拆坏，要么能拼出"请求行注入"。
+        // 判定用的字符串与真正交给 WinHTTP 的字符串必须是同一个 ——
+        // 两处不一致正是这类闸门最典型的失效方式。
+        if url.chars().any(|c| c.is_control() || c == ' ') {
+            return Err(format!("地址里不能有空白或控制字符：{url}"));
+        }
+
+        let (tls, rest) = match url.split_once("://") {
+            Some(("https", r)) => (true, r),
+            Some(("http", r)) => (false, r),
+            Some((scheme, _)) => {
+                return Err(format!(
+                    "不支持的地址协议 {scheme}://（只支持 https；本机地址可以用 http）：{url}"
+                ));
+            }
+            None => {
+                return Err(format!("地址要以 https:// 开头（本机地址可以用 http://）：{url}"));
+            }
+        };
+
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            // 没有路径就是根目录 —— 与改动前一致
+            None => (rest, "/"),
+        };
+
+        // 用户名/密码形式的地址（`https://user:pass@host/`）不支持：
+        // 不显式拒绝的话 `user:pass@host` 会被整个当主机名，最后报一句
+        // 与事实无关的"连不上"。
+        if authority.contains('@') {
+            return Err(format!("地址里不支持用户名/密码：{url}"));
+        }
+
+        // 端口解析。`[::1]:11434` 的冒号属于 IPv6 地址，不能当端口分隔符 ——
+        // 所以带方括号的单独走一条路；不带方括号又出现多个冒号的，整体按
+        // （不带端口的）IPv6 处理，这也是 RFC 3986 要求方括号的原因。
+        let (host, port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+            let (h, tail) = after_bracket
+                .split_once(']')
+                .ok_or_else(|| format!("IPv6 地址缺少右方括号：{url}"))?;
+            let p = match tail.strip_prefix(':') {
+                Some(v) => parse_port(v, url)?,
+                None if tail.is_empty() => default_port(tls),
+                None => return Err(format!("地址的端口写法不对：{url}")),
+            };
+            (h.to_string(), p)
+        } else if authority.matches(':').count() > 1 {
+            // `::1` 这种不带方括号的写法：整个 authority 就是主机名，没有端口
+            // （带端口的 IPv6 必须写成 `[::1]:11434`）
+            (authority.to_string(), default_port(tls))
+        } else if let Some((h, v)) = authority.rsplit_once(':') {
+            (h.to_string(), parse_port(v, url)?)
+        } else {
+            (authority.to_string(), default_port(tls))
+        };
+
+        // 规范化成"真正会交给 WinHttpConnect 的那个字符串"：
+        // 判定与使用必须是同一个值（否则 `" localhost"` 这类写法会被判成回环、
+        // 却把带空格的字符串交给 WinHTTP）。
+        let host = host.trim().to_string();
+
+        if host.is_empty() {
+            return Err(format!("地址里没有主机名：{url}"));
+        }
+
+        if !tls && !is_loopback_host(&host) {
+            // 不带方括号又带端口的 IPv6（`http://::1:11434/v1`）会被整体当成
+            // 主机名，于是落进这一条 —— 它真正的错是写法。不说清的话，用户看到的
+            // 是一句与事实无关的隐私提示，只能自己猜。
+            let hint = if host.matches(':').count() > 1 {
+                "（IPv6 地址要写成 [::1] 这样带方括号的形式）"
+            } else {
+                ""
+            };
+            return Err(format!(
+                "出于隐私考虑，只允许 https 地址（本机地址除外）{hint}：{url}"
+            ));
+        }
+
+        Ok((tls, host, port, path.to_string()))
+    }
+
+    /// https 默认 443、http 默认 80 —— 与浏览器一致，用户不必手写端口。
+    fn default_port(tls: bool) -> u16 {
+        if tls {
+            443
+        } else {
+            80
+        }
+    }
+
+    /// 端口必须是 1..=65535 的十进制数。0 会被 `WinHttpConnect` 拒掉，
+    /// 但那时报的是一句 Win32 错误码，不如在这里说清楚是地址写错了。
+    fn parse_port(v: &str, url: &str) -> Result<u16, String> {
+        match v.parse::<u16>() {
+            Ok(p) if p > 0 => Ok(p),
+            _ => Err(format!("端口号不合法（应当是 1-65535）：{url}")),
+        }
+    }
+
+    /// 非 200 时给用户的一句话解释。
+    ///
+    /// 为什么把措辞也抽成纯函数：措辞错了的代价是**把排查方向整个带偏**
+    /// （参见 `explain()` 里 12029 被错标成 TLS 的那条教训）。
+    /// `is_post == false` 的三句**一个字都不能变** —— 它们是对着 GitHub 的 API
+    /// 写的，用户与既有测试都在读；POST 走的是 AI 端点，另给一套更贴切的
+    /// （401/403 在那边几乎总是"API Key 不对"，而 401 在 GET 路径上
+    /// 保持原来的"非预期状态码"，不改变既有行为）。
+    pub(super) fn status_head(status: u32, is_post: bool) -> &'static str {
+        match status {
+            401 if is_post => "401 —— 没通过身份验证（API Key 缺失或不对）",
+            403 if is_post => "403 —— 端点拒绝了这次请求（多半是 API Key 不对或没有权限）",
+            404 if is_post => "404 —— 端点不存在（检查 base_url 有没有写错）",
+            429 if is_post => "429 —— 请求太频繁（也可能是额度用完了）",
+            403 => "403 —— GitHub 的 API 拒绝了这个请求",
+            404 => "404 —— 仓库 / 发布 / 资产不存在（也可能是还没有任何发布）",
+            429 => "429 —— 请求太频繁",
+            _ => "非预期状态码",
+        }
+    }
+
+    /// 请求方法：**只有真的要带请求体时才用 POST**。
+    ///
+    /// 为什么零长度的 `Some(&[])` 也归 GET：长度 0 的 POST 在 HTTP 层与 GET
+    /// 没有实际区别，却要多声明两个头。需要发"空 JSON"的调用方显式传 `b"{}"`。
+    pub(super) fn request_method(body: Option<&[u8]>) -> &'static str {
+        match body {
+            Some(b) if !b.is_empty() => "POST",
+            _ => "GET",
+        }
+    }
+
+    /// 拼发给 `WinHttpSendRequest` 的请求头（**不带结尾 NUL**，见 `wide_len`）。
+    ///
+    /// `extra` 是调用方给的头（`Accept` / `Authorization` 等，每行以 CRLF 收尾）；
+    /// `User-Agent` 统一由这里加 —— GitHub 的 API 不带 UA 直接 403，
+    /// 让每个调用方各记一遍这种事迟早会漏一个。
+    ///
+    /// **为什么抽成纯函数**：头拼错了不会报任何错，只会换来一个看不懂的 4xx/5xx，
+    /// 所以它必须能被离线钉住（见 `tests_net` 里的 POST 那组测试）。
+    ///
+    /// 调用方**不要自己带 Content-Type** —— 这里在带请求体时会统一加一行，
+    /// 重复的 Content-Type 是非法头，有的服务器会直接 400。
+    pub(super) fn request_headers(extra: &str, body: Option<&[u8]>) -> String {
+        let mut h = String::with_capacity(extra.len() + 96);
+        h.push_str("User-Agent: DeskBase\r\n");
+        h.push_str(extra);
+        if let Some(b) = body.filter(|b| !b.is_empty()) {
+            // 调用方漏了 CRLF 时补一个：否则 Content-Type 会粘到上一行的值里，
+            // 变成非法头。只在"有请求体"这条新路径上补，GET 的字节一个都不动。
+            if !h.ends_with("\r\n") {
+                h.push_str("\r\n");
+            }
+            // Content-Length 必须是**字节数**（中文按 UTF-8 多字节算），
+            // 并且与下面 `WinHttpSendRequest` 报的 dwTotalLength 是同一个数字。
+            h.push_str("Content-Type: application/json\r\n");
+            h.push_str(&format!("Content-Length: {}\r\n", b.len()));
+        }
+        h
+    }
+
+    /// 发一个 HTTPS 请求（**走一条指定的路**），边收边交给 `on_chunk`，不在内存里攒整份。
     ///
     /// 为什么是流式：清单只有几十 KB，但**安装包会变大**（现在 3.2 MB，将来可能几十 MB）。
     /// 攒在内存里跑得通不代表应该这么写 —— 内存目标是写死的（≤400 MB）。
     ///
+    /// `extra_headers` 是调用方给的头（`Accept` / `Authorization`，每行 CRLF 收尾），
+    /// `User-Agent` 由 `request_headers` 统一补；`body` 为 `None` 或空 = GET，
+    /// 非空 = POST。**GET 的请求方法、头、参数必须与加 POST 之前逐字节一致** ——
+    /// 检查更新、下载安装包、`ai::list_models` 全走这条路。
+    ///
     /// `on_chunk` 返回 Err 就直接中止（用于"写文件失败"这类不该继续的情况）。
     fn stream_once(
         url: &str,
-        accept: &str,
+        extra_headers: &str,
+        body: Option<&[u8]>,
         timeout_ms: i32,
         max_bytes: usize,
         access_type: u32,
         on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<(), Fail> {
-        let rest = url
-            .strip_prefix("https://")
-            .ok_or_else(|| Fail::Settled(format!("更新器只允许访问 https 地址：{url}")))?;
-        let (host, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
-        };
-        if host.is_empty() {
-            return Err(Fail::Settled(format!("地址里没有主机名：{url}")));
-        }
+        // 协议 / 回环 / 端口 / 路径的判定全部交给纯函数 —— 它是"能不能发出去"
+        // 的唯一闸门，必须能被离线测试钉死（见 tests_net 的 url_allowed 那组）。
+        // 判定失败属于本地问题（地址非法 / 明文要发去公网），换路不会改变结果。
+        let (tls, host, port, path) = url_allowed(url).map_err(Fail::Settled)?;
 
         unsafe {
             let agent = wide("DeskBase");
@@ -590,11 +795,13 @@ pub mod http {
             // 四个超时都要设：只设一个等于没设 —— 卡在 DNS 或 TLS 握手同样会挂住
             let _ = WinHttpSetTimeouts(session.0, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
-            let host_w = wide(host);
+            let host_w = wide(&host);
+            // 端口用解析出来的真实值：本机模型普遍不是 443（Ollama 11434、
+            // LM Studio 1234），写死 443 会让"本机跑模型"直接连不上。
             let connect = Handle(WinHttpConnect(
                 session.0,
                 PCWSTR(host_w.as_ptr()),
-                443u16,
+                port,
                 0,
             ));
             if connect.0.is_null() {
@@ -604,8 +811,17 @@ pub mod http {
                 )));
             }
 
-            let verb = wide("GET");
-            let obj = wide(path);
+            // 方法：没有请求体就是 GET（既有三个调用方），有非空体才是 POST。
+            let verb = wide(request_method(body));
+            let obj = wide(&path);
+            // 明文（只有回环地址能走到这里）**不能带 SECURE 标志**：
+            // 带了 WinHTTP 会拿 TLS 去连一个明文端口，报一句"安全通道错误"，
+            // 把"地址写错了"伪装成"证书有问题" —— 又是一个会带偏排查方向的假象。
+            let flags = if tls {
+                WINHTTP_FLAG_SECURE
+            } else {
+                WINHTTP_OPEN_REQUEST_FLAGS(0)
+            };
             let req = Handle(WinHttpOpenRequest(
                 connect.0,
                 PCWSTR(verb.as_ptr()),
@@ -613,7 +829,7 @@ pub mod http {
                 PCWSTR(std::ptr::null()),
                 PCWSTR(std::ptr::null()),
                 std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
+                flags,
             ));
             if req.0.is_null() {
                 return Err(Fail::Settled(format!(
@@ -633,9 +849,25 @@ pub mod http {
 
             // GitHub 的 API 要求带 User-Agent，不带会被 403。
             // 用 wide_len（不带 NUL）—— 见它自己的注释，这里与 PCWSTR 的规则相反。
-            let headers = wide_len(&format!("User-Agent: DeskBase\r\nAccept: {accept}\r\n"));
-            WinHttpSendRequest(req.0, Some(&headers), None, 0, 0, 0)
-                .map_err(|e| Fail::Transport(format!("发送请求失败：{}", hr_explain(&e))))?;
+            let header_text = request_headers(extra_headers, body);
+            let headers = wide_len(&header_text);
+            // 有请求体时把缓冲区的指针与长度一起交给 WinHTTP —— 一次发完，
+            // 不拆成 SendRequest + WriteData。
+            // dwOptionalLength 与 dwTotalLength 都必须是 body 的**字节数**，
+            // 否则服务器会按错误的长度等待或截断（表现为"请求发出去就没回音"）。
+            // 无请求体时保持原来的 `None, 0, 0, 0` —— GET 的参数一个都不动。
+            let sent = match body.filter(|b| !b.is_empty()) {
+                Some(b) => WinHttpSendRequest(
+                    req.0,
+                    Some(&headers),
+                    Some(b.as_ptr() as *const c_void),
+                    b.len() as u32,
+                    b.len() as u32,
+                    0,
+                ),
+                None => WinHttpSendRequest(req.0, Some(&headers), None, 0, 0, 0),
+            };
+            sent.map_err(|e| Fail::Transport(format!("发送请求失败：{}", hr_explain(&e))))?;
             WinHttpReceiveResponse(req.0, std::ptr::null_mut())
                 .map_err(|e| Fail::Transport(format!("接收响应失败：{}", hr_explain(&e))))?;
 
@@ -687,12 +919,7 @@ pub mod http {
             if status != 200 {
                 let snippet: String =
                     String::from_utf8_lossy(&err_snippet).chars().take(200).collect();
-                let head = match status {
-                    403 => "403 —— GitHub 的 API 拒绝了这个请求",
-                    404 => "404 —— 仓库 / 发布 / 资产不存在（也可能是还没有任何发布）",
-                    429 => "429 —— 请求太频繁",
-                    _ => "非预期状态码",
-                };
+                let head = status_head(status, request_method(body) == "POST");
                 let msg = format!("服务器返回 HTTP {status}（{head}）：{snippet}");
                 // 403 / 429 换一条出口 IP 可能就变了（匿名限额按 IP 算）—— 值得换路再试；
                 // 其余状态码是服务器的明确表态，换路没有意义。
@@ -711,10 +938,13 @@ pub mod http {
     /// 两条接入方式依次尝试；每次尝试各自一个缓冲区 ——
     /// 上一次的半截数据绝不能带进下一次（那会拼出"JSON 解析失败"的假象）。
     pub fn get(url: &str, accept: &str, timeout_ms: i32, max_bytes: usize) -> Result<Vec<u8>, String> {
+        // 这里拼出来的头必须与加 POST 之前逐字节一致（`Accept: {accept}\r\n`），
+        // `User-Agent` 由 stream_once 里的 request_headers 统一补。
+        let extra = format!("Accept: {accept}\r\n");
         let mut problems: Vec<String> = Vec::new();
         for (i, (ty, label, is_direct)) in routes().iter().enumerate() {
             let mut out: Vec<u8> = Vec::new();
-            let r = stream_once(url, accept, timeout_ms, max_bytes, *ty, &mut |c| {
+            let r = stream_once(url, &extra, None, timeout_ms, max_bytes, *ty, &mut |c| {
                 out.extend_from_slice(c);
                 Ok(())
             });
@@ -727,6 +957,113 @@ pub mod http {
                 Err(Fail::Transport(e)) | Err(Fail::RetryHttp(e)) => {
                     problems.push(format!("{label}：{e}"));
                 }
+            }
+        }
+        Err(routes_failed(&problems))
+    }
+
+    /// 一次尝试失败之后该做什么。
+    ///
+    /// **抽成纯函数是为了可测**：真发网络请求才能走到这个决定，而
+    /// "非幂等不重发"这条策略恰恰最不该靠联网测试去证明 ——
+    /// 它错了的代价是用户被重复扣费，而那种损失他自己看不见。
+    pub(super) enum Step {
+        /// 换下一条路再试（幂等请求：取清单 / 下安装包 / 列模型）
+        Next(String),
+        /// 不换了，把这条路的原因直接报给用户（非幂等 + 计费的请求）
+        Stop(String),
+    }
+
+    /// 不换路时的交代。
+    ///
+    /// **"可能已经发出去了"这句必须在**：非幂等 + 按次计费的接口（聊天补全）
+    /// 一旦重发，用户会被重复扣费 —— 那是他自己发现不了的损失；
+    /// 但也不能让他以为"什么都没发生"就直接再问一遍，所以话要说全：
+    /// 可能已经发出去了、只是没拿到回应，请他先确认。
+    ///
+    /// `answered` 区分两种失败：服务器已经应答（403/429 —— 请求确实到达了，
+    /// 一般不会被计费）与完全没拿到应答（连不上 / 超时 / 断流）。后者才是
+    /// "可能已经发出去了"最要紧的场景，不能和前者混成一句话。
+    fn no_retry_failed(label: &str, reason: &str, answered: bool) -> String {
+        let tail = if answered {
+            "这次请求**可能已经发出去了**（服务器已经应答，一般不会被计费）；\
+             为免重复发送，这里不会换另一条路重发。"
+        } else {
+            "这次请求**可能已经发出去了**，只是没拿到回应；\
+             为免重复计费，这里不会换另一条路重发 —— \
+             请先确认上一次有没有真的发出去，再决定要不要重问。"
+        };
+        format!("{label}这条路没走通 —— {reason}。{tail}")
+    }
+
+    /// 失败分类 → 下一步。`retry_other_route=false` 时**只走第一条路** ——
+    /// 调用方靠 `Step::Stop` 立刻返回，第二条路根本不会被尝试。
+    pub(super) fn after_failure(
+        retry_other_route: bool,
+        answered: bool,
+        label: &str,
+        reason: &str,
+    ) -> Step {
+        if retry_other_route {
+            Step::Next(format!("{label}：{reason}"))
+        } else {
+            Step::Stop(no_retry_failed(label, reason, answered))
+        }
+    }
+
+    /// 发一个 HTTPS **POST（JSON 请求体）**，收进内存。
+    ///
+    /// 给 AI 对话用（`ai.rs` 只管拼头与解析，传输与代理回退复用这里，不新增依赖）。
+    /// `extra_headers` 由调用方拼好（`Accept`、`Authorization: Bearer ...`，
+    /// 每行以 CRLF 收尾）；**不要自己带 Content-Type / Content-Length** ——
+    /// 这两个由 `request_headers` 按 body 的字节数统一加。
+    ///
+    /// 两条接入方式依次尝试、每次尝试各自一个缓冲区 —— 与 `get` 同样的道理：
+    /// 上一次的半截响应绝不能带进下一次（那会拼出"JSON 解析失败"的假象）。
+    ///
+    /// # `retry_other_route` 怎么选（这是钱的问题，不是风格问题）
+    ///
+    /// * `true` —— **幂等**请求可以换路重试：列模型、将来任何"再发一次结果一样"的接口。
+    /// * `false` —— **非幂等 / 按次计费**的请求（发一条对话消息）：只走第一条路，
+    ///   失败就如实报错，不换路重发。
+    ///
+    /// 为什么宁可失败也不重发：`Fail::Transport` 里包含"请求已经到达服务器、
+    /// 只是响应断了"这一种 —— 这时换条路重发，用户会被**计两次费**，
+    /// 而他只会看到一次回答。**失败是看得见的，重复扣费看不见。**
+    /// 所以 AI 对话那条链路必须传 `false`（调用点在 `main.rs`）。
+    pub fn post(
+        url: &str,
+        extra_headers: &str,
+        body: &[u8],
+        timeout_ms: i32,
+        max_bytes: usize,
+        retry_other_route: bool,
+    ) -> Result<Vec<u8>, String> {
+        let mut problems: Vec<String> = Vec::new();
+        for (i, (ty, label, is_direct)) in routes().iter().enumerate() {
+            let mut out: Vec<u8> = Vec::new();
+            let r = stream_once(url, extra_headers, Some(body), timeout_ms, max_bytes, *ty, &mut |c| {
+                out.extend_from_slice(c);
+                Ok(())
+            });
+            match r {
+                Ok(()) => {
+                    note_fallback(i, &problems, label, *is_direct);
+                    return Ok(out);
+                }
+                // 服务器已给出明确应答（400/404 等）：换路不会改变结果。
+                // 这是**加这个开关之前就有的**行为，不在本次改动范围内。
+                Err(Fail::Settled(e)) => return Err(e),
+                // answered=false：连不上 / 超时 / 断流（响应没拿到）
+                Err(Fail::Transport(e)) => match after_failure(retry_other_route, false, label, &e) {
+                    Step::Stop(msg) => return Err(msg),
+                    Step::Next(p) => problems.push(p),
+                },
+                // answered=true：403 / 429（服务器明确应答过）
+                Err(Fail::RetryHttp(e)) => match after_failure(retry_other_route, true, label, &e) {
+                    Step::Stop(msg) => return Err(msg),
+                    Step::Next(p) => problems.push(p),
+                },
             }
         }
         Err(routes_failed(&problems))
@@ -745,6 +1082,8 @@ pub mod http {
         dest: &std::path::Path,
     ) -> Result<u64, String> {
         use std::io::Write;
+        // 与 get 同样：这里的头必须与加 POST 之前逐字节一致。
+        let extra = format!("Accept: {accept}\r\n");
         let mut problems: Vec<String> = Vec::new();
         for (i, (ty, label, is_direct)) in routes().iter().enumerate() {
             let mut f = match std::fs::File::create(dest) {
@@ -752,7 +1091,7 @@ pub mod http {
                 Err(e) => return Err(format!("建不了临时文件 {}：{e}", dest.display())),
             };
             let mut written: u64 = 0;
-            let r = stream_once(url, accept, timeout_ms, max_bytes, *ty, &mut |c| {
+            let r = stream_once(url, &extra, None, timeout_ms, max_bytes, *ty, &mut |c| {
                 f.write_all(c).map_err(|e| format!("写文件失败：{e}"))?;
                 written += c.len() as u64;
                 Ok(())
@@ -800,6 +1139,18 @@ mod http {
     pub fn get(
         _url: &str,
         _accept: &str,
+        _timeout_ms: i32,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        Err("更新器的网络传输目前只实现了 Windows（项目也只做 Windows）".into())
+    }
+
+    /// 与 Windows 版同名的 POST stub —— **必须存在**，否则非 Windows 编译不过
+    /// （`ai.rs` 的对话路径是按平台无关写的，只是这条腿在别的系统上直接给 Err）。
+    pub fn post(
+        _url: &str,
+        _extra_headers: &str,
+        _body: &[u8],
         _timeout_ms: i32,
         _max_bytes: usize,
     ) -> Result<Vec<u8>, String> {
@@ -2080,6 +2431,16 @@ mod tests_net {
             "12007 是 NAME_NOT_RESOLVED：{}",
             http::explain(12007)
         );
+        // 12152 是 AI 对话走本机模型时最常见的失败（模型服务没起）。
+        // 翻译里必须给出**可操作的方向**，而不是只把数字换个说法 ——
+        // 用户看不懂"服务器返回无法识别的应答"，但他看得懂"模型可能没启动"。
+        let e = http::explain(12152);
+        assert!(
+            e.contains("模型"),
+            "12152 应当指向本机模型的常见原因，而不是一句泛泛的应答异常：{e}"
+        );
+        // 未知码仍要回落到"Win32 错误码 N"，不能装作认识（错译比不译更坏）
+        assert_eq!(http::explain(99999), "Win32 错误码 99999");
     }
 
     /// 兜底顺序：默认"系统代理 → 直连"；兜底过一次后翻成"直连 → 系统代理"。
@@ -2094,6 +2455,460 @@ mod tests_net {
         assert_eq!(flipped[1].1, "系统代理");
         // 两条路必须是**不同的接入方式**，否则"兜底"等于同一件事做两遍
         assert_ne!(def[0].0, def[1].0);
+    }
+
+    // ---------- POST 传输层（纯函数，全程不联网） ----------
+
+    /// 从拼好的头里取出 Content-Length —— **独立于拼装实现**地核对它。
+    /// 复用被测代码自己算出来的数字去断言，等于没测。
+    #[cfg(target_os = "windows")]
+    fn content_length(headers: &str) -> Option<usize> {
+        headers
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|v| v.trim().parse().ok())
+    }
+
+    /// 请求方法由"有没有请求体"决定：没有就 GET，有非空体才 POST。
+    ///
+    /// 为什么零长度的 `Some(&[])` 也当 GET：长度 0 的 POST 在 HTTP 层
+    /// 与 GET 没有实际区别，却要多声明两个头；调用方（AI 对话）发的
+    /// 永远是非空 JSON，真要发"空 JSON"得显式传 `b"{}"`。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn request_method_picks_post_only_for_nonempty_body() {
+        assert_eq!(http::request_method(None), "GET", "没有请求体就是 GET");
+        assert_eq!(http::request_method(Some(b"")), "GET", "空 body 不该变成 POST");
+        assert_eq!(http::request_method(Some(b"{}")), "POST");
+        assert_eq!(http::request_method(Some(br#"{"a":1}"#)), "POST");
+    }
+
+    /// **既有 GET 的字节不许变** —— 三个调用方（清单 / 下载 / list_models）
+    /// 都走这一行头；给 POST 让路时最容易在这里手滑。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn request_headers_keep_get_bytes_identical() {
+        assert_eq!(
+            http::request_headers("Accept: application/vnd.github+json\r\n", None),
+            "User-Agent: DeskBase\r\nAccept: application/vnd.github+json\r\n"
+        );
+    }
+
+    /// POST 必须带 Content-Type，且 Content-Length 与 body 的**字节数**一致
+    /// （中文按 UTF-8 多字节算 —— 按字符数算是经典的 off-by-N）。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn request_headers_post_length_matches_body_bytes() {
+        let extra = "Accept: application/json\r\nAuthorization: Bearer sk-test\r\n";
+        for body in [
+            &b"{}"[..],
+            &b"{\"model\":\"gpt-4o-mini\"}"[..],
+            "{\"q\":\"你好，世界\"}".as_bytes(),
+        ] {
+            let h = http::request_headers(extra, Some(body));
+            assert!(
+                h.contains("Content-Type: application/json\r\n"),
+                "缺 Content-Type：{h}"
+            );
+            assert!(
+                h.contains("Authorization: Bearer sk-test\r\n"),
+                "调用方给的头不许被吃掉：{h}"
+            );
+            assert_eq!(
+                content_length(&h),
+                Some(body.len()),
+                "Content-Length 必须等于 body 的字节数：{h}"
+            );
+        }
+    }
+
+    /// 调用方给的头没以 CRLF 收尾时，**不能把 Content-Type 粘到上一行的值里** ——
+    /// 粘上去就是一个非法头，服务器只会回一个看不出原因的 400。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn request_headers_repair_missing_final_crlf() {
+        let h = http::request_headers("Accept: application/json", Some(b"{}"));
+        assert!(h.contains("\r\nContent-Type: application/json\r\n"), "{h}");
+        assert!(!h.contains("application/jsonContent-Type"), "{h}");
+        assert_eq!(content_length(&h), Some(2), "{h}");
+    }
+
+    /// 非 200 的措辞：**GET 那三句一个字都不许变**（用户与既有测试都在读它），
+    /// POST 走 AI 端点时不能把"GitHub 的 API 拒绝了"当成线索甩给用户。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn status_head_keeps_get_wording_and_retargets_post() {
+        assert_eq!(http::status_head(403, false), "403 —— GitHub 的 API 拒绝了这个请求");
+        assert_eq!(
+            http::status_head(404, false),
+            "404 —— 仓库 / 发布 / 资产不存在（也可能是还没有任何发布）"
+        );
+        assert_eq!(http::status_head(429, false), "429 —— 请求太频繁");
+        // 401 在 GET 路径上没有专属文案（保持加 POST 之前的样子），POST 上必须有
+        assert_eq!(http::status_head(401, false), "非预期状态码");
+        assert!(http::status_head(401, true).contains("身份验证"), "{}", http::status_head(401, true));
+        assert!(http::status_head(403, true).contains("API Key"), "{}", http::status_head(403, true));
+        // 认不出来的状态码两边都是同一句
+        assert_eq!(http::status_head(500, true), "非预期状态码");
+        assert_eq!(http::status_head(500, false), "非预期状态码");
+    }
+
+    // ---------- 地址闸门（纯函数，全程不联网） ----------
+
+    /// https 的既有行为一个字节都不许变：默认 443、要 TLS、路径原样。
+    /// 三个既有调用方（清单 / 下载 / list_models）全走这条。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn url_allowed_https_defaults_to_443_and_tls() {
+        assert_eq!(
+            http::url_allowed("https://api.github.com/repos/YJLZSL/DeskBase/releases?per_page=20")
+                .unwrap(),
+            (
+                true,
+                "api.github.com".to_string(),
+                443,
+                "/repos/YJLZSL/DeskBase/releases?per_page=20".to_string()
+            )
+        );
+        // 地址里没有路径 = 根目录（与改动前一致）
+        assert_eq!(
+            http::url_allowed("https://example.com").unwrap(),
+            (true, "example.com".to_string(), 443, "/".to_string())
+        );
+    }
+
+    /// 本机模型这条路：http + 回环 + 自带端口，必须放行且端口要对。
+    /// Ollama 是 11434、LM Studio 是 1234 —— 写死 443 就等于本机模型不可用。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn url_allowed_loopback_http_keeps_port() {
+        assert_eq!(
+            http::url_allowed("http://127.0.0.1:11434/v1/chat/completions").unwrap(),
+            (false, "127.0.0.1".to_string(), 11434, "/v1/chat/completions".to_string())
+        );
+        assert_eq!(
+            http::url_allowed("http://localhost:1234/v1").unwrap(),
+            (false, "localhost".to_string(), 1234, "/v1".to_string())
+        );
+        // http 不写端口 = 80，https 不写端口 = 443
+        assert_eq!(
+            http::url_allowed("http://127.0.0.1/v1/models").unwrap(),
+            (false, "127.0.0.1".to_string(), 80, "/v1/models".to_string())
+        );
+        // 主机名大小写不敏感：`LocalHost` 与 `localhost` 是同一个名字
+        assert_eq!(
+            http::url_allowed("http://LocalHost:11434/v1").unwrap(),
+            (false, "LocalHost".to_string(), 11434, "/v1".to_string())
+        );
+    }
+
+    /// `[::1]:11434` 的冒号属于 IPv6 地址，不能被当成端口分隔符。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn url_allowed_ipv6_loopback_parses_host_and_port() {
+        assert_eq!(
+            http::url_allowed("http://[::1]:11434/v1/models").unwrap(),
+            (false, "::1".to_string(), 11434, "/v1/models".to_string())
+        );
+        assert_eq!(
+            http::url_allowed("https://[::1]/x").unwrap(),
+            (true, "::1".to_string(), 443, "/x".to_string())
+        );
+        // 不带方括号的 `::1` 也认识，但只能配默认端口（这是 RFC 3986 的写法要求）
+        assert_eq!(
+            http::url_allowed("http://::1/v1").unwrap(),
+            (false, "::1".to_string(), 80, "/v1".to_string())
+        );
+    }
+
+    /// **明文不许发去公网**（含内网地址）—— 这条闸门是 R1/R2 的地基，
+    /// 放宽它等于允许用户把自己的数据明文发出去。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn url_allowed_rejects_plaintext_beyond_loopback() {
+        for bad in [
+            "http://api.github.com/x",
+            "http://example.com:8080/v1",
+            // 内网也别想：明文一样离开这台机器（只是没离开这个网段）
+            "http://192.168.1.10:11434/v1",
+            "ftp://127.0.0.1/x",
+            "file:///c:/x",
+            // 没有协议头的写法
+            "api.github.com/x",
+            // 空主机名
+            "https://",
+            "http://",
+            // 端口不是数字 / 是 0 / 缺右方括号
+            "http://127.0.0.1:abc/v1",
+            "http://127.0.0.1:0/v1",
+            "http://[::1:11434/v1",
+            // 用户名密码形式不支持（会被整个当主机名，报一句与事实无关的"连不上"）
+            "https://user:pass@api.github.com/x",
+            // 空白 / 控制字符会拆坏请求行（判定用的串必须与交给 WinHTTP 的串一致）
+            "https://api.github.com/x y",
+            "https://api.github.com/x\r\nX-Evil: 1",
+        ] {
+            let e = http::url_allowed(bad).unwrap_err();
+            assert!(!e.is_empty(), "{bad} 必须被拒");
+        }
+        // 拒绝的理由要能看懂：公网明文要说隐私，不是"网络故障"
+        let e = http::url_allowed("http://example.com/v1").unwrap_err();
+        assert!(e.contains("隐私") && e.contains("https"), "{e}");
+        // 不带方括号又带端口的 IPv6：真正的错是写法，得说清楚，别只给一句隐私提示
+        let e = http::url_allowed("http://::1:11434/v1").unwrap_err();
+        assert!(e.contains("方括号"), "{e}");
+    }
+
+    /// 只有 https 能进网络栈 —— POST 与 GET 守同一条底线。
+    ///
+    /// 这条测试**不联网**：非 https（且非回环）在进网络栈之前就被拒了。
+    /// ⚠️ 它是"给回环开明文"那次改动的保险：`api.example.com` 不是回环，
+    /// 必须仍然被拒。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn post_only_https_allowed() {
+        let err = http::post(
+            "http://api.example.com/v1/chat/completions",
+            "Accept: application/json\r\n",
+            b"{}",
+            1000,
+            1024,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("https"), "{err}");
+        // 本机地址则相反：必须能过闸门（否则本机模型这条路根本走不到网络栈）
+        assert!(http::url_allowed("http://127.0.0.1:11434/v1").is_ok());
+    }
+
+    // ---------- 真的发一次（只走回环，仍然不碰外网） ----------
+
+    /// 从服务器看到的原始请求里取 Content-Length。
+    #[cfg(target_os = "windows")]
+    fn seen_content_length(raw: &str) -> Option<usize> {
+        raw.split("\r\n")
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|v| v.trim().parse().ok())
+    }
+
+    /// 等服务器把你发出去的请求记下来（最多 20 秒）。
+    #[cfg(target_os = "windows")]
+    fn wait_for_capture(
+        seen: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            if let Some(s) = seen.lock().unwrap().clone() {
+                return s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("20 秒内没有收到任何请求 —— 请求根本没发出去（或被代理吞了）");
+    }
+
+    /// 极简回环服务器：收一条完整 HTTP 请求（按 header + Content-Length 判定收齐，
+    /// 500ms 静默兜底），把**原始请求**交回给测试，然后回一个 200 JSON。
+    ///
+    /// 为什么要真的开一个 socket：WinHTTP 的参数（verb / Content-Length / 端口 /
+    /// 明文标志）传错了**不会有任何编译错误**，只有让对面真的收到才算验过。
+    /// 只绑 127.0.0.1 的系统分配端口：不碰外网、不依赖 DNS、不占固定端口 ——
+    /// 所以它不会变成"有时红有时绿"的测试。
+    #[cfg(target_os = "windows")]
+    fn loopback_server(
+        response_body: &'static str,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑不上回环端口");
+        let port = listener.local_addr().map(|a| a.port()).expect("取不到端口");
+        let seen: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        let seen_in_thread = seen.clone();
+        let handle = std::thread::spawn(move || {
+            // 只服务一条连接：能到这个 listener 的只有"直连"那条路
+            // （系统代理会连到代理自己的地址，不会连到这里）。
+            let Ok((mut s, _)) = listener.accept() else { return };
+            s.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+            let mut raw: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 8192];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break,  // 对端关了
+                    Err(_) => break, // 静默 500ms ⇒ 请求发完了（本地回环够用）
+                    Ok(n) => {
+                        raw.extend_from_slice(&buf[..n]);
+                        // 收齐了才停：headers 结束 + Content-Length 指定的字节数
+                        let text = String::from_utf8_lossy(&raw).to_string();
+                        if let Some(i) = text.find("\r\n\r\n") {
+                            let need = seen_content_length(&text[..i]).unwrap_or(0);
+                            if raw.len() >= i + 4 + need {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            *seen_in_thread.lock().unwrap() =
+                Some(String::from_utf8_lossy(&raw).to_string());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.flush();
+        });
+        (port, seen, handle)
+    }
+
+    /// POST 真的发出一趟：verb、路径、Content-Length、body 字节、明文回环与端口。
+    /// 这是"本机模型能用"的最小可信证据（`http://127.0.0.1:11434` 那类地址）。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn post_over_loopback_sends_verb_length_and_body() {
+        let payload = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}";
+        let (port, seen, srv) = loopback_server("{\"ok\":true}");
+        let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        let got = http::post(
+            &url,
+            "Accept: application/json\r\n",
+            payload.as_bytes(),
+            3000,
+            64 * 1024,
+            // 幂等语义的传输自检：这里要的是"把请求发出去"，换路无所谓
+            true,
+        )
+        .expect("回环 POST 应当成功");
+        assert_eq!(got, b"{\"ok\":true}".to_vec(), "响应体应当原样收到");
+        let raw = wait_for_capture(&seen);
+        let head = raw.split("\r\n\r\n").next().unwrap_or("").to_string();
+        assert!(
+            head.starts_with("POST /v1/chat/completions HTTP/1.1"),
+            "请求行不对：{head}"
+        );
+        assert_eq!(
+            seen_content_length(&head),
+            Some(payload.len()),
+            "Content-Length 必须等于 body 的字节数：{head}"
+        );
+        assert!(head.contains("Content-Type: application/json"), "{head}");
+        assert!(head.contains("Accept: application/json"), "{head}");
+        assert!(raw.ends_with(payload), "body 必须原样发出去：{raw}");
+        // 把线上真实收到的东西打出来 —— 出问题时这是第一手证据
+        println!("[实测] 回环服务器收到的 POST：\n{raw}");
+        srv.join().ok();
+    }
+
+    /// GET 在线上仍然是 GET、头仍然是那一份、且**没有请求体** ——
+    /// 检查更新 / 下载 / list_models 三个既有调用方靠这几条。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn get_over_loopback_stays_plain_get() {
+        let (port, seen, srv) = loopback_server("{\"ok\":1}");
+        let url = format!("http://127.0.0.1:{port}/v1/models");
+        let got = http::get(&url, ACCEPT_JSON, 3000, 64 * 1024).expect("回环 GET 应当成功");
+        assert_eq!(got, b"{\"ok\":1}".to_vec());
+        let raw = wait_for_capture(&seen);
+        let head = raw.split("\r\n\r\n").next().unwrap_or("").to_string();
+        assert!(head.starts_with("GET /v1/models HTTP/1.1"), "请求行不对：{head}");
+        assert!(head.contains("User-Agent: DeskBase\r\n"), "{head}");
+        assert!(head.contains(&format!("Accept: {ACCEPT_JSON}\r\n")), "{head}");
+        // 没有请求体 ⇒ headers 之后不该再有任何字节
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.is_empty(), "GET 不该带请求体：{body}");
+        println!("[实测] 回环服务器收到的 GET：\n{raw}");
+        srv.join().ok();
+    }
+
+    /// 策略本身（纯函数）：非幂等请求**不许换路**，且必须把"可能已经发出去了"
+    /// 说给用户听；幂等请求照旧换下一条路。
+    ///
+    /// 这条测试不依赖任何网络环境，所以在任何机器上都是同一个结论 ——
+    /// 这正是把"要不要重发"这个决定抽成纯函数的意义。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn non_idempotent_failure_stops_and_warns_about_duplicate_send() {
+        let (label, reason) = ("系统代理", "连不上 api.example.com：连不上服务器");
+        // 没拿到应答：最要紧的那种 —— 请求可能已经到达服务器并被计费
+        match http::after_failure(false, false, label, reason) {
+            http::Step::Stop(m) => {
+                assert!(m.contains("可能已经发出去了"), "{m}");
+                assert!(m.contains("不会换另一条路重发"), "{m}");
+                assert!(m.contains(label) && m.contains(reason), "{m}");
+            }
+            http::Step::Next(_) => panic!("非幂等请求不许换路重发 —— 那会重复计费"),
+        }
+        // 服务器已应答（403 / 429）：请求确实到了服务器，同样不重发
+        match http::after_failure(false, true, label, reason) {
+            http::Step::Stop(m) => assert!(m.contains("可能已经发出去了"), "{m}"),
+            http::Step::Next(_) => panic!("非幂等请求不许换路重发"),
+        }
+        // 幂等请求：照旧把这条路的原因收集起来，换下一条路
+        for answered in [false, true] {
+            match http::after_failure(true, answered, label, reason) {
+                http::Step::Next(p) => assert_eq!(p, format!("{label}：{reason}")),
+                http::Step::Stop(_) => panic!("幂等请求应当换路再试（answered={answered}）"),
+            }
+        }
+    }
+
+    /// 不换路的 POST：**真的只试一条路**，报出来的是"可能已经发出去了"。
+    ///
+    /// 让第一路必然失败的方式：回环端口**接了立刻关** —— 客户端拿到"连接被重置"，
+    /// 不用等一个超时（测试跑得快，才不会被人嫌弃着跳过）。
+    /// 只 accept 一次：万一换路了，第二次连接会被拒（listener 随线程结束关闭），
+    /// 断言照样成立。本机 `ProxyEnable=0`、CI 也没有系统代理，
+    /// 所以第一条路不会被代理接走。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn post_without_retry_tries_one_route_only() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑不上回环端口");
+        let port = listener.local_addr().map(|a| a.port()).expect("取不到端口");
+        let srv = std::thread::spawn(move || {
+            if let Ok((s, _)) = listener.accept() {
+                drop(s); // 立刻关：制造"请求可能已经发出去了、响应没拿到"
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        let err = http::post(&url, "Accept: application/json\r\n", b"{}", 2000, 64 * 1024, false)
+            .expect_err("被重置的连接不可能成功");
+        // 这句话是给用户看的 —— 把它原样打出来，别只在断言里见过它
+        println!("[实测] 不换路的报错原文：\n{err}");
+        // 无论如何都不许出现"两条路都试过"的文案 —— 出现就是换路了
+        assert!(!err.contains("都试过了"), "retry=false 不许走第二条路：{err}");
+        if err.contains("服务器返回 HTTP") {
+            // 第一条路被一个会应答的代理接走 ⇒ 服务器明确应答（Settled），
+            // 按设计本来就不换路。（本机 ProxyEnable=0，正常走不到这个分支。）
+        } else {
+            assert!(err.contains("可能已经发出去了"), "{err}");
+            assert!(err.contains("不会换另一条路重发"), "{err}");
+            // 只报了第一条路：两个标签不会同时出现
+            assert!(err.contains("系统代理") ^ err.contains("直连"), "只应报第一条路：{err}");
+        }
+        srv.join().ok();
+    }
+
+    /// 不换路的 POST 在第一条路能走通时，行为与原来完全一样。
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn post_without_retry_succeeds_on_first_route() {
+        let (port, seen, srv) = loopback_server("{\"ok\":2}");
+        let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        let got = http::post(
+            &url,
+            "Accept: application/json\r\n",
+            b"{\"a\":1}",
+            3000,
+            64 * 1024,
+            false,
+        )
+        .expect("第一条路能走通时就该成功");
+        assert_eq!(got, b"{\"ok\":2}".to_vec());
+        let raw = wait_for_capture(&seen);
+        assert!(raw.starts_with("POST /v1/chat/completions"), "{raw}");
+        srv.join().ok();
     }
 }
 

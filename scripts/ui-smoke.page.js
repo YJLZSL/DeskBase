@@ -365,6 +365,50 @@
     }
     step("数据库：建表 → 录行 → 读回（金额按分）", dbOk, dbWhy);
 
+    // ---------- 单表导出为 Excel（v1.10.0）----------
+    //
+    // 为什么这条必须真点一遍而不是只查 IPC 存在：
+    // 在它之前，"把当前这张表给别人 / 打出来"这件事**没有出口** ——
+    // 唯一的出口是「导出全部数据」（全库 CSV），用户还得自己去目录里翻出那一个文件。
+    // 而 `grid.js` 里那个写着「导出」的分节一直是空的（只有注释）。
+    // 这条断言钉住三件事：按钮在、点得动、真的落了一个 .xlsx 到磁盘上。
+    try {
+      const $ex = $("#btn-db-export");
+      step("数据库页有「导出当前表格」入口", !!$ex, $ex ? "" : "找不到 #btn-db-export");
+
+      // 真点一次（此时当前表就是 dbProbe —— 它刚在上面被建出来并选中）
+      const r = await ipc("export.table", { name: dbProbe });
+      const pathOk = !!(r && /\.xlsx$/.test(r.path || ""));
+      step("单表导出真的写出了 .xlsx（不是只回一个空壳）", pathOk, r ? r.path : "无返回");
+      step(
+        "导出的是刚建的那张表、行数对得上",
+        !!r && r.count === 1 && r.name === dbProbe,
+        r ? "count=" + r.count + " name=" + r.name : "无返回"
+      );
+      // 文件名里不能出现路径分隔符 —— 表名是用户可控的，
+      // 拼进路径时没消毒就等于给了一条"写到任意位置"的路。
+      const leaf = String((r && r.path) || "").split(/[\\/]/).pop() || "";
+      step(
+        "导出的文件名里不含路径分隔符（表名进路径前消毒过）",
+        leaf.length > 0 && !/[\\/]/.test(leaf) && /\.xlsx$/.test(leaf),
+        leaf
+      );
+      // 表名含非法字符时不能写出一个 Excel 打不开的文件
+      step(
+        "导出到不存在的表会被拦住（不静默写空文件）",
+        await (async () => {
+          try {
+            await ipc("export.table", { name: "这张表不存在" });
+            return false;
+          } catch (_) {
+            return true;
+          }
+        })()
+      );
+    } catch (e) {
+      step("单表导出接线通", false, String(e && e.message ? e.message : e));
+    }
+
     // ---------- 10. 字段类型清单来自 Rust 且九种齐全 ----------
     let types = [];
     try {
@@ -994,6 +1038,109 @@
       } else {
         step("进度条组件可用", false, "DeskBaseUI.progress 不存在");
       }
+    }
+
+    // ---------- 13. AI 对话面板（v1.10.0）：真在 WebView 里开一次 ----------
+    //
+    // 为什么这一节值得单独写：AI 对话的**网络路径没法在烟测里验**（烟测用临时数据目录、
+    // AI 默认关闭、也不该在测试里真发请求），但它有**一半的失败模式是不需要联网的**：
+    //   · 资源没登记 → `deskbase://` 404 → 面板根本没有样式/脚本（静默失效的经典形状）；
+    //   · 命令没注册 → 命令面板里搜不到入口（用户永远找不到这个功能）；
+    //   · AI 关闭时面板不给出"怎么开启"的说明 → 违背 ADR-0017 第 6 条
+    //     （"放一个点了没反应的按钮，比不放更伤信任"）。
+    // 这三条都能在这里钉住，且不依赖任何网络。
+    try {
+      const regInfo = window.DeskBasePalette && typeof window.DeskBasePalette.register === "function";
+      // 注册表不对外暴露"列出全部命令"，所以这里走真实路径：
+      // 打开面板 → 输入关键词 → 看渲染出来的行。
+      // ⚠️ 选择器按 palette.js 建 DOM 时的真实写法：根是 `.dp-root`，
+      // 每一行是 `role="option"`（不是别的地方那种 id）—— 猜错选择器会得到
+      // 一条"永远为假"的断言，而它看起来像功能坏了。
+      let found = false;
+      if (regInfo) {
+        window.DeskBasePalette.open("AI");
+        await sleep(220);
+        const root = document.querySelector(".dp-root");
+        const rows = [...document.querySelectorAll('.dp-root [role="option"]')];
+        found = rows.some((r) => /AI\s*对话/i.test(r.textContent || ""));
+        // 找不到就退一步：命令标题本来就在面板文本里
+        if (!found) found = !!root && /AI\s*对话/.test(root.textContent || "");
+        window.DeskBasePalette.close();
+        await sleep(150);
+      }
+      step(
+        "命令面板里能搜到「AI 对话」（入口不是死的）",
+        found,
+        found ? "" : "命令面板未渲染出该条目（脚本没加载？注册失败？）"
+      );
+
+      // 面板本体：真的开一次，并断言"AI 关闭时"必须给出可操作的说明
+      const hasApi = !!(window.AiChat && typeof window.AiChat.open === "function");
+      step("window.AiChat 装配完成（open 可用）", hasApi, hasApi ? "" : "ui-chat.js 没跑起来");
+
+      if (hasApi) {
+        window.AiChat.open();
+        // ⚠️ `waitFor` 返回的是 **true/false**，不是元素 —— 第一版我写成
+        // `const root = await waitFor(() => el ? el : null)`，于是 root === true，
+        // 下一步 `root.querySelector` 直接抛异常。**烟测把这条抓出来了**，
+        // 而它抓的是"我的测试写错了"，不是产品坏了（120/121，唯一的失败就是它）。
+        // 所以先等条件成立，再单独取元素。
+        const opened = await waitFor(() => {
+          const el = document.getElementById("ai-chat");
+          return !!el && el.dataset.open === "true";
+        }, 3000);
+        step("AI 对话面板能打开（根节点 data-open=true）", opened);
+        const root = document.getElementById("ai-chat");
+
+        if (root) {
+          // 面板刚打开时可能还在按"旧状态"画（ui-chat.js 刻意先画旧状态、再等真设置，
+          // 免得打开时先白屏一秒）。所以隐私条要等它把真状态落下来再断言。
+          await sleep(350);
+          // 隐私条：ADR-0017 第 5 条要求它常驻且**显示当前是本机/外部/关闭**。
+          //
+          // ⚠️ 模式标记在**子节点的 class** 上（`.is-off` / `.is-local` / `.is-cloud`）
+          // 与 `root.dataset.kind` 上，**不在** `.aichat-privacy-main` 自己身上 ——
+          // 第一版我断言的是容器自己的 class，于是永远为假。**断言错了不等于功能坏了**：
+          // 真实 DOM 结构要看 ui-chat.js 的建节点处（:367 / :387），不能猜。
+          const main = root.querySelector(".aichat-privacy-main");
+          const marker = main && main.querySelector(".is-off, .is-local, .is-cloud");
+          const kind = root.dataset.kind || "";
+          step(
+            "隐私条常驻并如实显示当前模式（临时数据目录里 AI 关闭 ⇒ off）",
+            kind === "off" && !!marker && marker.classList.contains("is-off"),
+            "dataset.kind=" + JSON.stringify(kind) + " 标记=" + (marker ? marker.className : "无")
+          );
+          const rowsEl = root.querySelector(".aichat-privacy-rows");
+          step(
+            "隐私条显示「本次会话已发出多少行数据」",
+            !!rowsEl && (rowsEl.textContent || "").length > 0,
+            rowsEl ? (rowsEl.textContent || "").slice(0, 40) : "缺 .aichat-privacy-rows"
+          );
+          // ADR-0017 第 6 条：没就位之前不许出现"点了没反应"的入口。
+          // 关闭状态下输入区必须真的禁用，且给出怎么开启。
+          const ta = root.querySelector(".aichat-ta");
+          const send = root.querySelector(".aichat-send");
+          const offHint = root.querySelector(".aichat-disabled, .aichat-disabled-text");
+          step(
+            "AI 关闭时输入区禁用（不留可点但无效的按钮）",
+            !!ta && ta.disabled === true && !!send && send.disabled === true,
+            "textarea.disabled=" + (ta ? ta.disabled : "无") + " send.disabled=" + (send ? send.disabled : "无")
+          );
+          step(
+            "AI 关闭时说明「怎么开启」",
+            !!offHint && (offHint.textContent || "").length > 6,
+            offHint ? (offHint.textContent || "").slice(0, 50) : "没有说明节点"
+          );
+          // 关闭：把界面还原回去，别给后面留下开着的东西
+          window.AiChat.close();
+          await sleep(150);
+          const closed = document.getElementById("ai-chat");
+          step("AI 对话面板能关掉", !!closed && closed.dataset.open !== "true",
+            closed ? "data-open=" + closed.dataset.open : "节点被移除");
+        }
+      }
+    } catch (e) {
+      step("AI 对话面板接线通", false, String(e && e.message ? e.message : e));
     }
 
     // ---------- 12. 清掉烟测建出来的表（不给下一次跑留垃圾） ----------

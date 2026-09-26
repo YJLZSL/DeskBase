@@ -17,6 +17,9 @@
 <link rel="stylesheet" href="database.css" />
 <!-- recovery.css：崩溃恢复向导（只在上次未正常退出时渲染，平时零开销） -->
 <link rel="stylesheet" href="recovery.css" />
+<!-- ai-chat.css：AI 对话面板（v1.10.0）。同样只在用户打开面板时才用得上，
+     但样式表本身很小，且与 components.css 一样是自包含的（选择器都带 #ai-chat 前缀）。 -->
+<link rel="stylesheet" href="ai-chat.css" />
 <link rel="icon" href="brand/icon-64.png" />
 </head>
 <body>
@@ -221,6 +224,14 @@
             <button class="btn btn-ghost db-import" id="btn-export-all" type="button"
                     title="把所有表格与笔记导出成通用格式（CSV / Markdown）到 exports/，并附一份说明">
               导出全部数据
+            </button>
+            <!-- 单表导出为 Excel（v1.10.0）：用户每天真正要做的动作是
+                 "把**当前这张表**给别人 / 打出来"，而在此之前唯一的出口是
+                 "导出全部数据"（全库 CSV），还得自己去目录里翻出那一个文件。
+                 grid.js 里那个写着"导出"的分节一直是空的 —— 这个按钮补的就是它。 -->
+            <button class="btn btn-ghost db-import" id="btn-db-export" type="button"
+                    title="把当前这张表导出成 .xlsx（到一个新文件，绝不覆盖已有文件）">
+              导出当前表格
             </button>
             <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
                     title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
@@ -608,5 +619,9 @@
 <script src="help.js"></script>
 <script src="db-onboard.js"></script>
 <script src="recovery.js"></script>
+<!-- AI 对话面板（v1.10.0）：与 help.js 同一形态 —— 自包含、自带命令注册、
+     不需要 app.js 调用初始化。但**必须排在 palette.js 与 app.js 之后**：
+     它要靠 window.DeskBasePalette.register 注册命令，靠 window.__deskbase.call 通话。 -->
+<script src="ui-chat.js"></script>
 </body>
 </html>

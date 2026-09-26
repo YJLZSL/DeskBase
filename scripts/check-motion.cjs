@@ -43,6 +43,11 @@ const TARGETS = [
   path.join(ROOT, 'app', 'ui', 'db-onboard.css'),
   // 崩溃恢复向导（recovery.js 动态渲染）—— 新增样式表必须同步加进来，规矩见上
   path.join(ROOT, 'app', 'ui', 'recovery.css'),
+  // AI 对话面板（v1.10.0，ui-chat.js 动态渲染）。
+  // **门禁的覆盖范围是它自己的一个坑**：漏加一行，这份样式表就是"没被读过所以通过"，
+  // 而输出照样是绿勾。check-wiring.cjs 第 3 项会核对"每个 app/ui/*.css 都在 TARGETS 里"，
+  // 所以漏加会在接线门禁上红 —— 但别依赖那一道，写新样式表时就顺手加。
+  path.join(ROOT, 'app', 'ui', 'ai-chat.css'),
 ];
 
 /** 布局属性：动画它们会触发布局重算 */

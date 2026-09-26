@@ -1245,6 +1245,67 @@
       btn.textContent = "导出全部数据";
     }
   });
+  // 命令面板里的「AI 对话」入口：打开时**把当前表的结构一起递过去**。
+  //
+  // 为什么不让 AI 面板自己去 DOM 里抠（ui-chat.js 那侧有兜底）：
+  // 它只能从 `#db-current-name` 的文案里正则出表名，**列的类型还得靠表头的短类型猜** ——
+  // 而那正好是要发给模型的东西。猜错就等于让模型看错结构，回答跟着错，
+  // 而用户完全看不出哪里不对。这里的数据是权威的（`state.cols` 就是真类型）。
+  //
+  // 表在数据库页才存在；不在数据库页时 `state.current` 是 null，那就只开面板，
+  // 不做任何上下文注入（用户可能只是想问一句通用的）。
+  window.DeskBasePalette.register({
+    id: "ai.chat",
+    title: "AI 对话",
+    group: "AI",
+    py: "ai duihua lianliao chatbot",
+    shortcut: "",
+    run: () => {
+      const api = window.AiChat;
+      if (!api || typeof api.open !== "function") return; // 脚本没加载：宁可什么都不做
+      if (state.current) {
+        api.open({
+          table: state.current,
+          columns: (state.cols || []).map((c) => ({ name: c.name, type: c.type || "" })),
+        });
+      } else {
+        api.open();
+      }
+    },
+  });
+
+  // 单表导出为 Excel（v1.10.0）。
+  //
+  // 与上面「导出全部数据」的分工，必须在文案里说清，否则用户会以为它们是两件重复的事：
+  //   导出全部数据 → 整库 CSV，给"搬家 / 留底"用；
+  //   导出当前表格 → 这一张 .xlsx，给"发给别人 / 打出来"用。
+  //
+  // 为什么做成一个按钮而不是塞进网格的右键菜单：**发现不了的功能等于没做** ——
+  // 这张表最需要的用户（不熟电脑的办公人员）不会去右键试。
+  document.getElementById("btn-db-export").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-db-export");
+    if (!state.current) {
+      toast("先打开一张表再导出（左栏点一下表名）", "error");
+      return;
+    }
+    const name = state.current;
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = "导出中…";
+    try {
+      const r = await call("export.table", { name });
+      toast(
+        "已导出「" + name + "」" + r.count + " 行到：" + r.path +
+          "（在 exports 目录下，没有覆盖任何已有文件）"
+      );
+    } catch (e) {
+      toast("导出失败：" + errText(e), "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+
   // 表结构按钮：需要一个当前表，没有就由对话框自己提示
   document.getElementById("btn-db-schema").addEventListener("click", () => { openSchemaDialog(); });
   document.getElementById("btn-db-relations").addEventListener("click", () => { openRelationsDialog(); });

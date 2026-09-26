@@ -30,7 +30,10 @@ pub struct Report {
 ///
 /// Windows 文件名不许有 `/ \ : * ? " < > |`，而笔记标题里什么都可能有
 /// （"3/4 季度"、"问题：为什么"）。**换掉而不是删掉** —— 换掉还能看出原样。
-fn safe_name(s: &str) -> String {
+///
+/// `pub` 是给 `main.rs` 的单表导出用的：**同一条"表名不能直接当路径用"的规则
+/// 必须只有一处实现**。各写一份的话，将来只会有一处被修好，另一处继续漏。
+pub fn safe_name(s: &str) -> String {
     let t: String = s
         .chars()
         .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
