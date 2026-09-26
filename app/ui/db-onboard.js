@@ -166,19 +166,39 @@
     }
   }
 
-  // ---------- 同步：列表为空时注入引导块 ----------
+  // ---------- 同步：没有表时，把引导块放到**主区域** ----------
+  //
+  // 为什么放主区域而不是侧栏：没有表的时候，**主区域整片是空的**，
+  // 而侧栏只有 236px 宽。把三步引导塞在侧栏里会被挤成七八行、
+  // 底部还被裁掉（走查截图上看得清清楚楚）——
+  // 该放"下一步做什么"的地方本来是那块空地，不是那条窄缝。
   function sync(listEl) {
     if (!listEl) return;
-    const empty = listEl.querySelector(".db-empty");
-    const hasItems = listEl.querySelector(".db-table-item");
-    if (empty && !hasItems) {
-      if (!empty.dataset.onboard) {
-        empty.dataset.onboard = "1";
-        empty.textContent = "";
-        if (!guidance) guidance = buildGuidance();
-        empty.appendChild(guidance);
+    const hasItems = !!listEl.querySelector(".db-table-item");
+    const pane = document.getElementById("db-pane-grid");
+    if (!pane) return;
+
+    if (hasItems) {
+      // 有表了 → 收回引导。**保留单例**，用户把表全删了还能再用。
+      if (guidance && guidance.parentElement) {
+        guidance.parentElement.removeChild(guidance);
       }
+      if (pane.dataset.onboard === "1") {
+        pane.textContent = "";
+        delete pane.dataset.onboard;
+      }
+      return;
     }
+
+    // 没有表 → 引导住进主区域
+    if (!guidance) guidance = buildGuidance();
+    // 已经在里面了就别重复搬（MutationObserver 会被自己的改动再次触发）
+    if (guidance.parentElement === pane) return;
+    // 主区域此时理应没有内容。万一有（比如网格还没加载完留下的占位），
+    // **不动它** —— 那是真的错误提示，比引导重要。
+    if (pane.firstElementChild) return;
+    pane.dataset.onboard = "1";
+    pane.appendChild(guidance);
   }
 
   function init() {

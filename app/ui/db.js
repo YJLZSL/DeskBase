@@ -138,8 +138,10 @@
     listEl.textContent = "";
     if (!state.tables.length) {
       listEl.appendChild(
+        // 只留一句 —— **详细的三步引导在主区域**（那里整片空着，放得下）。
+        // 侧栏就 236px 宽，把三步塞在这儿会被挤成七八行（截图上挤成一团）。
         el("div", { class: "db-empty" },
-          "还没有表格。点上方「新建表格」建一张，或者把 Excel / CSV 拖进来。")
+          "还没有表格。")
       );
       return;
     }
