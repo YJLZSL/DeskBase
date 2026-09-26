@@ -190,7 +190,7 @@ mod tests {
 
     /// 正向：备份能建、能独立读回、数据在、表数一致。
     #[test]
-    fn 备份_创建后可独立读回且表数一致() {
+    fn backup_read_back_standalone_with_matching_table_count() {
         let d = tmp_dir("ok");
         let mut db = seed(&d);
         two_tables(&mut db);
@@ -214,7 +214,7 @@ mod tests {
 
     /// 列表要新的在前（界面靠它）。
     #[test]
-    fn 备份_列表按时间倒序() {
+    fn backup_list_newest_first() {
         let d = tmp_dir("list");
         let mut db = seed(&d);
         two_tables(&mut db);
@@ -230,7 +230,7 @@ mod tests {
 
     /// 负向：0 字节文件必须被拦下（"看起来像备份"是最危险的）。
     #[test]
-    fn 备份_空文件校验必失败() {
+    fn backup_empty_file_must_fail_verify() {
         let d = tmp_dir("empty");
         let p = d.join("empty.dkb");
         std::fs::write(&p, b"").unwrap();
@@ -241,7 +241,7 @@ mod tests {
 
     /// 负向：不是快照的文件要被拦下。
     #[test]
-    fn 备份_非快照文件校验必失败() {
+    fn backup_non_snapshot_must_fail_verify() {
         let d = tmp_dir("notjson");
         let p = d.join("broken.dkb");
         std::fs::write(&p, b"not a snapshot at all").unwrap();
@@ -252,7 +252,7 @@ mod tests {
 
     /// 负向：表数对不上要报出来（挡住"备份中途失败留下的空壳"）。
     #[test]
-    fn 备份_表数对不上要被拦下() {
+    fn backup_table_count_mismatch_blocked() {
         let d = tmp_dir("mismatch");
         let mut db = seed(&d);
         two_tables(&mut db);
@@ -267,7 +267,7 @@ mod tests {
     /// **用固定的文件名，不用真实时钟** —— 原来那版靠"两次调用落在同一秒"，
     /// 机器稍卡就跨秒变红。测试要的是"同名时复用"这条逻辑，不是"时钟走得够慢"。
     #[test]
-    fn 备份_同名重复调用不覆盖() {
+    fn backup_same_name_repeat_does_not_overwrite() {
         let d = tmp_dir("again");
         let mut db = seed(&d);
         two_tables(&mut db);

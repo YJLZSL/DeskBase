@@ -1703,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn 位移估计等于真实滚动的行数() {
+    fn scroll_offset_estimation_matches_real_shift() {
         let doc = synth_doc();
         let header = synth_header();
         for d in [1u32, 2, 17, 40, 63] {
@@ -1718,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn 顶部有固定表头时不被表头骗() {
+    fn sticky_header_does_not_fool_offset_estimation() {
         let doc = synth_doc();
         let header = synth_header();
         let d = 23u32;
@@ -1740,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有滚动时估计为零() {
+    fn no_scroll_estimates_zero() {
         let doc = synth_doc();
         let header = synth_header();
         let a = make_frame(&doc, &header, 100);
@@ -1749,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn 三帧拼接高度等于帧高加两倍位移() {
+    fn three_frame_stitch_height_equals_frame_plus_two_shifts() {
         let doc = synth_doc();
         let header = synth_header();
 
@@ -1788,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn 位移为零时不重复追加() {
+    fn zero_shift_does_not_append_twice() {
         let doc = synth_doc();
         let header = synth_header();
         let frames = vec![
@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn 超过最大帧数时提前停止() {
+    fn stops_early_past_max_frames() {
         let doc = synth_doc();
         let header = synth_header();
         let max_frames = 5usize;
@@ -1837,7 +1837,7 @@ mod tests {
     }
 
     #[test]
-    fn 超过内存上限时提前停止并说明() {
+    fn stops_early_and_explains_on_memory_limit() {
         let doc = synth_doc();
         let header = synth_header();
 
@@ -1872,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn 连续两帧没有位移判定为到底() {
+    fn two_consecutive_frames_without_shift_means_bottom() {
         let doc = synth_doc();
         let header = synth_header();
         let mut st = Stitcher::new(make_frame(&doc, &header, 0), 50, MAX_STITCH_BYTES).unwrap();
@@ -1887,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn 尺寸不同的帧不能拼接() {
+    fn frames_of_different_size_cannot_stitch() {
         let doc = synth_doc();
         let header = synth_header();
         let a = make_frame(&doc, &header, 0);
@@ -1990,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn png_以魔数开头且能被解回原始像素() {
+    fn png_starts_with_magic_and_decodes_to_pixels() {
         let doc = synth_doc();
         let header = synth_header();
         let f = make_frame(&doc, &header, 100);
@@ -2049,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn 越界的抓屏区域被拒绝而不是给黑图() {
+    fn out_of_range_capture_region_rejected() {
         // 宽高为 0 与"大到申请几 GB"这两类，必须在碰系统之前就被挡掉
         assert!(capture_region(0, 0, 0, 100).unwrap_err().contains("大于 0"));
         assert!(capture_region(0, 0, 100, 0).unwrap_err().contains("大于 0"));
@@ -2058,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn css_像素按dpi换算成物理像素() {
+    fn css_pixels_scaled_to_physical_by_dpi() {
         // 100%
         assert_eq!(css_rect_to_physical(10.0, 20.0, 100.0, 50.0, 1.0), (10, 20, 100, 50));
         // 125%：起点会落在半像素上，用"两个端点分别取整再相减"才不会系统性少 1 像素
@@ -2073,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn png_不覆盖已有文件() {
+    fn png_does_not_overwrite_existing_file() {
         let dir = std::env::temp_dir().join("deskbase-capture-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("exists.png");

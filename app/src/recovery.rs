@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn 尾部半写被认成可恢复而不是损坏() {
+    fn torn_tail_is_recoverable_not_corrupt() {
         let d = tmp_dir("half");
         let (db, log) = paths(&d);
         begin_boot(&d, &db);
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn 日志头部被毁要如实报出来() {
+    fn destroyed_log_header_reported_honestly() {
         let d = tmp_dir("corrupt");
         let (db, log) = paths(&d);
         begin_boot(&d, &db);

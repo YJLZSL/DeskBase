@@ -650,7 +650,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 前导零的编号必须当文本写() {
+    fn leading_zero_id_written_as_text() {
         // 这条是回归测试：曾经 is_plain_amount("007") 返回 true，
         // 于是商品编码 007 导出后变成数字 7 —— 前导零静默消失，
         // 对账时才发现编号全对不上。而这类编码在中小企业的表里到处都是
@@ -668,14 +668,14 @@ mod tests {
     }
 
     #[test]
-    fn 长编号与科学计数法都当文本() {
+    fn long_ids_and_scientific_notation_as_text() {
         assert!(!is_plain_amount("110101199003072316"), "18 位身份证");
         assert!(!is_plain_amount("6222021234567890123"), "银行卡");
         assert!(!is_plain_amount("1e5"), "科学计数法写法");
     }
 
     #[test]
-    fn 按魔数识别格式而不是扩展名() {        let dir = std::env::temp_dir().join("deskbase-sniff-test");
+    fn format_detected_by_magic_not_extension() {        let dir = std::env::temp_dir().join("deskbase-sniff-test");
         std::fs::create_dir_all(&dir).unwrap();
 
         // ZIP（假装是 xlsx）
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn 长编号必须当文本写不能当数值() {
+    fn long_id_must_be_text_not_number() {
         // 18 位身份证：当数值写进 Excel 会丢后 3 位
         assert!(!is_plain_amount("110101199003072587"), "18 位数字必须当文本");
         assert!(!is_plain_amount("1234567890123456"), "16 位数字必须当文本");
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn 整数不写成科学计数法() {
+    fn integers_not_written_as_scientific() {
         // 这正是 Excel 毁掉长编号的呈现方式，我们不能复现它
         assert_eq!(fmt_number(1234.0), "1234");
         assert_eq!(fmt_number(-88.0), "-88");
@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn 导出不覆盖已有文件() {
+    fn export_does_not_overwrite_existing() {
         let dir = std::env::temp_dir().join("deskbase-xlsx-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("exists.xlsx");
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn 导出的文件能被读回来() {
+    fn exported_file_readable_back() {
         let dir = std::env::temp_dir().join("deskbase-xlsx-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("out.xlsx");

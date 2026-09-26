@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn ai设置_默认是关闭的() {
+    fn ai_settings_default_off() {
         // ADR-0017：AI 能力默认关闭、默认不联网。这条必须有测试钉住。
         let s = load(&db());
         assert!(!s.enabled, "AI 默认必须是关的");
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn ai设置_存了能读回来() {
+    fn ai_settings_persist_then_read_back() {
         let mut conn = db();
         let s = AiSettings {
             enabled: true,
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn ai设置_厂商清单里有主流那几家() {
+    fn ai_settings_providers_include_mainstream() {
         let p = providers();
         let arr = p.as_array().unwrap();
         assert!(arr.len() >= 8, "主流厂商不该少于 8 家");
@@ -246,7 +246,7 @@ mod tests {
         }
     }
     #[test]
-    fn ai审计_写得进读得回且不含数据本体() {
+    fn ai_audit_write_read_back_without_payload() {
         let dir = std::env::temp_dir().join(format!("deskbase-ai-audit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn ai审计_没文件时返回空而不是报错() {
+    fn ai_audit_missing_file_returns_empty() {
         let dir = std::env::temp_dir().join(format!("deskbase-ai-audit-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(audit_tail(&dir, 5).is_empty(), "没审计过就是空表，不是错误");

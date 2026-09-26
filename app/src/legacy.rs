@@ -582,7 +582,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 变长整数解得对() {
+    fn varint_decodes_correctly() {
         // 0x7f = 127（单字节）
         assert_eq!(read_varint(&[0x7f], 0), (127, 1));
         // 0x81 0x00 = 128（两字节：1<<7 | 0）
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn 建表语句能抠出列名() {
+    fn create_table_statement_yields_column_names() {
         assert_eq!(
             parse_create_table_columns("CREATE TABLE 客户 (客户名 TEXT, 余额 INTEGER)"),
             vec!["客户名", "余额"]
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn 能读出表清单和列名() {
+    fn table_list_and_column_names_readable() {
         let d = std::env::temp_dir().join("dkb_legacy_min.db");
         std::fs::write(&d, build_two_page_db()).unwrap();
         let db = LegacyDb::open(&d).unwrap();
@@ -708,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn 能读出表里的行和值() {
+    fn rows_and_values_readable() {
         let d = std::env::temp_dir().join("dkb_legacy_rows.db");
         std::fs::write(&d, build_two_page_db()).unwrap();
         let db = LegacyDb::open(&d).unwrap();
@@ -726,7 +726,7 @@ mod tests {
     /// 而用户要的是"数据真的进了新库"。中间还有类型映射、行补齐、
     /// 值转换三段胶水，任何一段错了，用户看到的都是"导进去是空的"。
     #[test]
-    fn 导入链路_从旧库读出来能建新表写进去() {
+    fn legacy_import_creates_and_fills_new_table() {
         use crate::model::{ColType, ColumnDef, Db, TableSpec};
 
         let old = std::env::temp_dir().join("dkb_legacy_chain.db");
@@ -810,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn 页数对不上要报文件不完整() {
+    fn page_count_mismatch_reports_incomplete_file() {
         let mut f = build_two_page_db();
         // 头部说 99 页，实际只有 2 页
         f[28..32].copy_from_slice(&99u32.to_be_bytes());
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn 文件头不对要明确报错() {
+    fn bad_file_header_errors_clearly() {
         let d = std::env::temp_dir().join("dkb_legacy_notsqlite.db");
         std::fs::write(&d, vec![0u8; 200]).unwrap();
         let e = LegacyDb::open(&d).unwrap_err();

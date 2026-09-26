@@ -1513,7 +1513,7 @@ mod tests {
     // ---------- 版本号 ----------
 
     #[test]
-    fn 版本号解析认正式版与预发布() {
+    fn version_parse_accepts_release_and_prerelease() {
         let a = Version::parse("0.2.1").unwrap();
         assert_eq!((a.major, a.minor, a.patch), (0, 2, 1));
         assert!(a.pre.is_none(), "0.2.1 是正式版，没有预发布后缀");
@@ -1522,14 +1522,14 @@ mod tests {
     }
 
     #[test]
-    fn 版本号形态不对就拒绝_绝不猜() {
+    fn malformed_version_rejected_never_guess() {
         for bad in ["", "v0.2.1", "1.2", "1.2.3.4", "abc", "0.2.1-", "0.-1.0"] {
             assert!(Version::parse(bad).is_none(), "不该接受：{bad}");
         }
     }
 
     #[test]
-    fn 版本比较() {
+    fn version_compare() {
         let p = |s: &str| Version::parse(s).unwrap();
         assert!(p("0.2.1").is_newer_than(&p("0.2.0")));
         assert!(p("0.3.0").is_newer_than(&p("0.2.99")));
@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn 版本显示能与解析互逆() {
+    fn version_display_and_parse_inverse() {
         for s in ["0.2.1", "0.2.0-beta.3", "1.0.0"] {
             assert_eq!(Version::parse(s).unwrap().to_string(), s);
         }
@@ -1553,7 +1553,7 @@ mod tests {
     // ---------- 资产挑选 ----------
 
     #[test]
-    fn 资产名按约定拼出来() {
+    fn asset_name_built_by_convention() {
         assert_eq!(asset_name("0.2.1"), "deskbase-0.2.1-windows-x64-portable.zip");
         assert_eq!(
             asset_name("0.2.0-beta.3"),
@@ -1562,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn 挑包必须严格同名() {
+    fn package_pick_requires_exact_name() {
         let assets = v(&[
             ("deskbase-0.2.0-windows-x64-portable.zip", 100),
             ("deskbase-0.2.1-windows-x64-portable.zip", 200),
@@ -1582,7 +1582,7 @@ mod tests {
     // ---------- 校验和 ----------
 
     #[test]
-    fn 校验和文件两种写法都认() {
+    fn checksum_file_both_formats_accepted() {
         let h = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let (a, n) = parse_sha256_file(&format!("{h}  deskbase-0.2.1-windows-x64-portable.zip")).unwrap();
         assert_eq!(a, h);
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn 算出来的哈希与权威测试向量一致() {
+    fn computed_hash_matches_authoritative_vector() {
         // NIST 的 "abc" 向量 —— 这条要是错了，整个校验链都是白搭
         let d = tmp("sha256");
         let f = d.join("abc.bin");
@@ -1617,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn 校验和不符时要把两个值都说出来() {
+    fn checksum_mismatch_reports_both_values() {
         let d = tmp("verify");
         let f = d.join("pkg.bin");
         std::fs::write(&f, b"abc").unwrap();
@@ -1642,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn 包里有可执行文件才算数() {
+    fn package_needs_executable_to_count() {
         let d = tmp("zip");
         let good = d.join("good.zip");
         make_zip(&good, &["deskbase.exe", "README.md", "LICENSE"]);
@@ -1657,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn 包里的路径穿越要被拒() {
+    fn path_traversal_in_package_rejected() {
         let d = tmp("traversal");
         let evil = d.join("evil.zip");
         make_zip(&evil, &["..\\..\\Windows\\System32\\evil.exe", "deskbase.exe"]);
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn 白名单外的文件不复制但要说出来() {
+    fn non_whitelisted_files_skipped_but_reported() {
         let entries: Vec<String> = ["deskbase.exe", "README.md", "startup.bat", "payload.dll"]
             .iter()
             .map(|s| s.to_string())
@@ -1682,7 +1682,7 @@ mod tests {
     // ---------- 替换计划与底线 ----------
 
     #[test]
-    fn 拒绝把安装目录写成暂存目录() {
+    fn install_dir_equal_staging_rejected() {
         let d = tmp("plan_same");
         let err = plan_apply(
             &d,
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn 拒绝安装目录落在数据目录里() {
+    fn install_dir_inside_data_dir_rejected() {
         let d = tmp("plan_data");
         let data = d.join("data");
         let install = data.join("program");
@@ -1716,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn 包内没有可执行文件就不出计划() {
+    fn no_plan_when_no_executable() {
         let d = tmp("plan_noexe");
         let err = plan_apply(
             &d.join("staged"),
@@ -1732,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn 正常情形出的计划里写明数据目录不受影响() {
+    fn normal_plan_states_data_dir_untouched() {
         let d = tmp("plan_ok");
         let plan = plan_apply(
             &d.join("staged"),
@@ -1753,7 +1753,7 @@ mod tests {
     // ---------- 真的替换一次 ----------
 
     #[test]
-    fn 替换会把新文件覆盖上去并留下备份() {
+    fn apply_overwrites_and_leaves_backup() {
         let d = tmp("apply");
         let install = d.join("install");
         let staged = d.join("staged");
@@ -1787,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn 替换失败要能回滚回原样() {
+    fn failed_apply_rolls_back() {
         let d = tmp("rollback");
         let install = d.join("install");
         let staged = d.join("staged");
@@ -1807,7 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn 备份目录名带旧版本号方便手动回滚() {
+    fn backup_dir_carries_old_version_for_rollback() {
         let v = Version::parse("0.2.1").unwrap();
         assert_eq!(backup_dir_name(&v), "update-backup-0.2.1");
         let v2 = Version::parse("0.2.0-beta.3").unwrap();
@@ -1833,7 +1833,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 真实夹具能解析出四个发布() {
+    fn real_fixture_parses_four_releases() {
         let rs = fixture();
         assert_eq!(rs.len(), 4, "夹具里有 4 个发布");
         for r in &rs {
@@ -1854,7 +1854,7 @@ mod tests_release {
     /// 跑法：`cargo test -- --ignored`
     #[test]
     #[ignore]
-    fn 真联网能取到发布列表() {
+    fn live_network_fetches_release_list() {
         let rs = match fetch_releases() {
             Ok(x) => x,
             Err(e) => panic!("取不到发布列表：{e}"),
@@ -1867,7 +1867,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 标签带前缀v也能解析出版本() {
+    fn tag_with_v_prefix_parses() {
         let r = Release {
             tag: "v0.2.1".into(),
             draft: false,
@@ -1886,7 +1886,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 预发布小于同号正式版_这是语义化版本的规矩() {
+    fn prerelease_below_release_per_semver() {
         // 夹具里是 0.2.0-beta.1/2/3 与 0.1.0-alpha.1。
         // 从 0.2.0 出发它们**都不算更新** —— beta 小于同号正式版。
         // 这条先钉住，免得后面有人"顺手"把 beta 当成比正式版新。
@@ -1898,7 +1898,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 稳定通道下只有测试版时必须单独报出来() {
+    fn stable_channel_reports_when_only_prerelease() {
         // 这是最要紧的一条：不能报"已是最新"（假话），不能报 404，更不能把 beta 当正式版装。
         // 用一个比 beta 低的当前版本，这样 beta 才成立为"更新的预发布"。
         let rs = fixture();
@@ -1912,7 +1912,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 测试通道下能看到预发布() {
+    fn beta_channel_sees_prerelease() {
         let rs = fixture();
         match check(&rs, &v("0.1.5"), Channel::Prerelease) {
             CheckOutcome::Newer { tag, prerelease, .. } => {
@@ -1924,7 +1924,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 已经是最新时不报更新() {
+    fn up_to_date_reports_nothing() {
         let rs = fixture();
         assert!(matches!(
             check(&rs, &v("0.2.0-beta.3"), Channel::Prerelease),
@@ -1952,7 +1952,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 有正式版时稳定通道挑正式版() {
+    fn stable_channel_prefers_release() {
         let rs = vec![
             rel("v0.3.0-beta.1", true, false),
             rel("v0.2.5", false, false),
@@ -1968,7 +1968,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 草稿绝不参与挑选() {
+    fn drafts_never_considered() {
         let rs = vec![rel("v0.9.0", false, true), rel("v0.2.5", false, false)];
         match check(&rs, &v("0.2.0"), Channel::Stable) {
             CheckOutcome::Newer { tag, .. } => assert_eq!(tag, "v0.2.5", "草稿 v0.9.0 不该被选中"),
@@ -1977,7 +1977,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 只有更旧的版本时算已是最新() {
+    fn older_only_means_up_to_date() {
         let rs = vec![rel("v0.1.0", false, false)];
         assert!(matches!(
             check(&rs, &v("0.2.0"), Channel::Stable),
@@ -1986,7 +1986,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 未上传完的资产不算可用() {
+    fn incomplete_asset_not_usable() {
         let r = Release {
             tag: "v0.3.0".into(),
             draft: false,
@@ -2002,7 +2002,7 @@ mod tests_release {
     }
 
     #[test]
-    fn 清单格式不对时报错而不是给空结果() {
+    fn bad_manifest_errors_not_empty() {
         // 给空结果会让界面显示"已是最新" —— 那是假话。必须报错。
         assert!(parse_releases("not json").is_err());
         assert!(parse_releases("{}").is_err(), "顶层应当是数组");
@@ -2025,7 +2025,7 @@ mod tests_net {
     /// ```
     #[test]
     #[ignore = "需要网络；手动用 cargo test -- --ignored 跑"]
-    fn 联网检查更新能拿到清单() {
+    fn online_check_fetches_manifest() {
         match fetch_releases() {
             Ok(rs) => {
                 assert!(!rs.is_empty(), "至少应当有一个发布");
@@ -2046,7 +2046,7 @@ mod tests_net {
 
     /// 取数地址必须写死在官方仓库上 —— 它是"下载源不可配置"这条要求的锚点。
     #[test]
-    fn 取数地址写死在官方仓库且不是_latest() {
+    fn endpoint_hardcoded_official_and_not_latest() {
         let u = releases_api_url();
         assert!(u.starts_with("https://api.github.com/repos/YJLZSL/DeskBase/releases"));
         assert!(
@@ -2057,7 +2057,7 @@ mod tests_net {
 
     /// 非 https 的地址必须被拒（不进网络栈就拒）。
     #[test]
-    fn 只允许_https_地址() {
+    fn only_https_allowed() {
         let err = http::get("http://api.github.com/x", ACCEPT_JSON, 1000, 1024).unwrap_err();
         assert!(err.contains("https"), "{err}");
     }
@@ -2069,7 +2069,7 @@ mod tests_net {
     /// 排查方向整个被带偏。错误码翻译错了比不翻译更坏。
     #[test]
     #[cfg(target_os = "windows")]
-    fn 错误码翻译对上号() {
+    fn error_code_translation_matches() {
         assert!(
             http::explain(12029).contains("连不上"),
             "12029 是 CANNOT_CONNECT：{}",
@@ -2085,7 +2085,7 @@ mod tests_net {
     /// 兜底顺序：默认"系统代理 → 直连"；兜底过一次后翻成"直连 → 系统代理"。
     #[test]
     #[cfg(target_os = "windows")]
-    fn 双路顺序会随兜底翻转() {
+    fn dual_route_order_flips_on_fallback() {
         let def = http::order_routes(false);
         assert_eq!(def[0].1, "系统代理", "默认必须先尊重用户的系统代理");
         assert_eq!(def[1].1, "直连");
@@ -2128,7 +2128,7 @@ mod tests_stage {
 
     /// 一次成功的暂存：三件事都要成立 —— 计划对了、文件解出来了、plan.json 写了。
     #[test]
-    fn 正常情况能暂存并写出替换计划() {
+    fn normal_case_stages_and_writes_plan() {
         let d = tmp("ok");
         let data = d.join("data");
         let install = d.join("install");
@@ -2195,7 +2195,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 大小与清单不符时必须拒绝() {
+    fn size_mismatch_must_reject() {
         let d = tmp("size");
         let data = d.join("data");
         let install = d.join("install");
@@ -2224,7 +2224,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 校验和不符时必须拒绝并说清两个值() {
+    fn checksum_mismatch_must_reject_and_report() {
         let d = tmp("sha");
         let data = d.join("data");
         let install = d.join("install");
@@ -2252,7 +2252,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 校验和文件格式不对时拒绝继续() {
+    fn bad_checksum_format_refuses_to_continue() {
         let d = tmp("shafmt");
         let data = d.join("data");
         let install = d.join("install");
@@ -2279,7 +2279,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 包里没有可执行文件时拒绝暂存() {
+    fn no_executable_refuses_staging() {
         let d = tmp("noexe");
         let data = d.join("data");
         let install = d.join("install");
@@ -2307,7 +2307,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 暂存目录在数据目录下而不是程序目录() {
+    fn staging_under_data_dir_not_program_dir() {
         let data = PathBuf::from("C:/data/DeskBaseData");
         let s = staging_dir(&data, &v("0.3.0"));
         assert!(s.starts_with(&data), "暂存放数据目录：{}", s.display());
@@ -2315,7 +2315,7 @@ mod tests_stage {
     }
 
     #[test]
-    fn 下载地址走的是资产端点() {
+    fn download_url_uses_assets_endpoint() {
         let a = Asset { id: 571438036, name: "x.zip".into(), size: 1 };
         let u = asset_api_url(&a);
         assert!(u.contains("/releases/assets/571438036"), "{u}");
@@ -2336,7 +2336,7 @@ mod tests_e2e {
     /// 会真的下载几 MB。安装目录与数据目录都用临时目录，**不会碰任何真实文件**。
     #[test]
     #[ignore = "需要网络且会真下载几 MB；手动用 cargo test -- --ignored 跑"]
-    fn 端到端下载并暂存() {
+    fn end_to_end_download_and_stage() {
         let releases = match fetch_releases() {
             Ok(r) => r,
             Err(e) if e.contains("rate limit") => {
@@ -2452,7 +2452,7 @@ mod tests_settings {
     }
 
     #[test]
-    fn 默认是从不检查且稳定通道() {
+    fn defaults_to_never_and_stable_channel() {
         let c = db();
         let s = load_settings(&c);
         assert_eq!(s.mode, UpdateMode::Never, "「网络默认关闭」是红线级默认值，不许改松");
@@ -2460,7 +2460,7 @@ mod tests_settings {
     }
 
     #[test]
-    fn 设置能存能读且重复存不炸() {
+    fn settings_persist_and_repeat_save_safe() {
         let mut c = db();
         let s = UpdateSettings {
             mode: UpdateMode::DownloadAsk,
@@ -2475,7 +2475,7 @@ mod tests_settings {
     }
 
     #[test]
-    fn 设置里出现不认识的档位时回退到不联网() {
+    fn unknown_mode_falls_back_to_never() {
         let mut c = db();
         // 直接塞一个读不懂的档位值（原来靠 INSERT INTO sys_meta，现在写键值即可）
         c.meta_set("net.update.mode", "whatever").unwrap();
@@ -2489,7 +2489,7 @@ mod tests_settings {
     /// **这条是红线级的行为**：默认档位下必须一个包都不发。
     /// 能离线跑本身就是证明 —— 它没有进网络栈。
     #[test]
-    fn 从不检查档位下不发起任何网络行为() {
+    fn never_mode_makes_no_network_call() {
         let c = db();
         let rep = check_by_settings(&c, &current_version()).unwrap();
         assert!(!rep.checked, "Never 档位下 checked 必须是 false");
@@ -2500,7 +2500,7 @@ mod tests_settings {
     }
 
     #[test]
-    fn 档位与通道的人话字符串能互转() {
+    fn mode_and_channel_strings_roundtrip() {
         for m in [
             UpdateMode::Never,
             UpdateMode::Notify,

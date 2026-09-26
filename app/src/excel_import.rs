@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn 计划能认出表头与类型() {
+    fn plan_recognizes_header_and_types() {
         let p = tmp_csv(
             "plan",
             "客户台账\n2026-09-01 导出\n客户名称,联系电话,金额,是否结清\n甲,13800000000,1234.50,是\n乙,13900000000,88,否\n",
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn 落库后数据真的进去了() {
+    fn data_actually_lands_in_db() {
         let p = tmp_csv(
             "run",
             "客户名称,金额,是否结清\n甲,1234.50,是\n乙,88,否\n",
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn 表头之前的行不会进库() {
+    fn rows_before_header_not_imported() {
         let p = tmp_csv(
             "skip",
             "标题行\n2026-09-01\n姓名,数量\n甲,1\n乙,2\n",
@@ -750,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn 表已存在时明确拒绝而不是覆盖() {
+    fn existing_table_rejected_not_overwritten() {
         let p = tmp_csv("dup", "姓名\n甲\n");
         let mut conn = mem();
         let plan = build_plan(&p, 0).unwrap();
@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn 导入失败不留半张表() {
+    fn failed_import_leaves_no_partial_table() {
         let p = tmp_csv("fail", "编号,数量\n甲,不是数字\n");
         let mut conn = mem();
         let plan = build_plan(&p, 0).unwrap();
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn 整行全空的行被跳过并计数() {
+    fn fully_empty_rows_skipped_and_counted() {
         let p = tmp_csv("empty", "姓名,数量\n甲,1\n,\n乙,2\n");
         let mut conn = mem();
         let plan = build_plan(&p, 0).unwrap();
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn 可以只保留部分列且顺序打乱() {
+    fn subset_of_columns_kept_in_shuffled_order() {
         let p = tmp_csv("subset", "a,b,c\n1,2,3\n");
         let mut conn = mem();
         let cols = vec![
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn 令牌取不回时给可操作的话() {
+    fn actionable_message_when_token_unavailable() {
         clear_sources();
         let e = source("不存在的令牌").unwrap_err();
         assert!(e.contains("重新选一次"), "报错要告诉用户下一步做什么：{e}");
@@ -853,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn 存进去的来源能取回来且互不干扰() {
+    fn stored_source_reads_back_without_interference() {
         clear_sources();
         let a = stash(Source {
             path: PathBuf::from("C:/a.csv"),
@@ -873,7 +873,7 @@ mod tests {
     /// 这两者一旦分叉，导入时用户选的类型就会解析失败 —— 而报错会指向"不认识的
     /// 字段类型"，跟真正的原因（两处名字不一样）隔着好几层。
     #[test]
-    fn 类型名与序列化形式逐字一致() {
+    fn type_names_match_serialized_form_exactly() {
         use model::ColType::*;
         let all = [
             Text, Integer, Real, Money, Boolean, Date, DateTime, Json, Blob,
@@ -897,7 +897,7 @@ mod tests {
     /// 让 7 行数据跨 3 批 —— 只测"一次写完"是测不出分批的边界问题的
     /// （比如最后一批不足时被漏掉，那正是最容易写错的地方）。
     #[test]
-    fn 分批写完且进度累计() {
+    fn batched_write_with_cumulative_progress() {
         let mut body = String::from("名称,数量\n");
         for i in 1..=7 {
             body.push_str(&format!("第{i}行,{i}\n"));
@@ -936,7 +936,7 @@ mod tests {
 
     /// 取消：表必须被删掉，不能留半张。
     #[test]
-    fn 取消导入会清掉已建的半张表() {
+    fn cancel_import_removes_partial_table() {
         let p = tmp_csv("abort", "名称
 甲
 乙

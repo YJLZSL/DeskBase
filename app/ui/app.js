@@ -1241,6 +1241,147 @@
     }
   });
 
+  // ---------- 滚动捕获（可截外部应用）----------
+  //
+  // 和上面「长截图」的分工：
+  //   长截图     → 只能截 DeskBase 自己（由界面驱动滚动，滚哪个元素它知道）
+  //   滚动捕获   → 能截**任何外部窗口**（浏览器、资源管理器…）—— **你自己滚**
+  //
+  // **为什么不帮你滚**：模拟滚轮（SendInput）会把事件注入到你的其它应用里，
+  // 而那时焦点在哪、你正在做什么，程序都不知道。那是很重的越界。
+  // 截外部应用不需要跨那条线 —— 你滚，我们抓。
+  async function recordShot() {
+    const btn = $("#btn-record-shot");
+    if (!btn) return;
+
+    // 已在进行中 → 这一下是"停止"
+    if (btn.dataset.rec === "1") {
+      btn.dataset.rec = "0";
+      btn.disabled = true;
+      btn.textContent = "拼接中…";
+      try {
+        const r = await call("capture.recordStop", {});
+        toast("长图已存：" + r.path + "（" + r.frames + " 帧，高 " + r.height + "px）");
+      } catch (e) {
+        toast("拼接失败：" + ((e && e.message) || e), "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "滚动捕获";
+      }
+      return;
+    }
+
+    // 开始
+    try {
+      const r = await call("capture.recordStart", {});
+      btn.dataset.rec = "1";
+      btn.textContent = "停止并拼接";
+      const g = (r && r.region) || {};
+      toast(
+        "开始捕获 " + g.w + "×" + g.h + " 区域。" +
+          "现在切到目标窗口，自己滚动它；滚完切回来点「停止并拼接」。"
+      );
+    } catch (e) {
+      toast("开始捕获失败：" + ((e && e.message) || e), "error");
+    }
+  }
+
+  // ---------- 截图历史 ----------
+  //
+  // 截图**一直在往 shots/ 里存**（单帧与长图都存），但在这一版之前没人能看见它们 ——
+  // 存了个寂寞。这个面板把那个目录变成看得见、能删的历史。
+  async function openShotHistory() {
+    let dlg = document.getElementById("shot-history");
+    if (!dlg) {
+      dlg = el("dialog", { class: "db-dialog shot-history", id: "shot-history" });
+      dlg.append(el("h3", null, "截图历史"));
+      dlg.append(
+        el(
+          "p",
+          { class: "hint" },
+          "截图都保存在数据目录的 shots/ 里，这里按时间倒序显示。删掉就是真删。"
+        )
+      );
+      const grid = el("div", { class: "shot-grid" });
+      dlg.append(grid);
+      const actions = el("div", { class: "db-dialog-actions" });
+      const closeBtn = el("button", { class: "btn", type: "button" }, "关闭");
+      closeBtn.addEventListener("click", () => dlg.close("ok"));
+      actions.append(closeBtn);
+      dlg.append(actions);
+      document.body.appendChild(dlg);
+      dlg.addEventListener("click", (ev) => {
+        if (ev.target === dlg) dlg.close("cancel");
+      });
+    }
+
+    const grid = dlg.querySelector(".shot-grid");
+    grid.textContent = "";
+    grid.append(el("p", { class: "hint" }, "读取中…"));
+    dlg.showModal();
+
+    async function reload() {
+      grid.textContent = "";
+      let r;
+      try {
+        r = await call("shots.list", {});
+      } catch (e) {
+        grid.append(el("p", { class: "hint" }, "读不到截图目录：" + errText(e)));
+        return;
+      }
+      const list = (r && r.shots) || [];
+      if (!list.length) {
+        grid.append(
+          el("p", { class: "hint" }, "还没有截图。按「截屏」或「长截图」之后，这里会出现。")
+        );
+        return;
+      }
+      list.forEach((it) => {
+        const fig = el("figure", { class: "shot-item" });
+        const img = el("img", {
+          // 文件名可能含中文，必须编码 —— 不编就是 404（而且是静默的）
+          src: "deskbase://localhost/shot/" + encodeURIComponent(it.name),
+          alt: it.name,
+          loading: "lazy",
+        });
+        fig.append(img);
+        const cap = el("figcaption");
+        cap.append(el("span", { class: "n" }, fmtShotTime(it.at_ms)));
+        cap.append(el("span", { class: "m" }, fmtBytes(it.size)));
+        fig.append(cap);
+        const del = el("button", { class: "btn btn-ghost db-mini", type: "button" }, "删掉");
+        del.setAttribute("aria-label", "删掉 " + it.name);
+        del.addEventListener("click", async (ev) => {
+          // 截图是真文件，删了就没了 —— 问一句再删
+          const okGo = window.confirm("删掉这张截图？文件会从磁盘上删掉。");
+          if (!okGo) return;
+          ev.stopPropagation();
+          try {
+            await call("shots.delete", { name: it.name });
+            await reload();
+          } catch (e) {
+            toast("删不掉：" + errText(e), "error");
+          }
+        });
+        fig.append(del);
+        grid.append(fig);
+      });
+    }
+    await reload();
+  }
+
+  // 截图时间写成"今天 14:03 / 昨天 / 3 天前"这种人话。
+  function fmtShotTime(ms) {
+    if (!ms) return "（时间未知）";
+    const d = new Date(Number(ms));
+    const hhmm = d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    const days = Math.floor((Date.now() - Number(ms)) / 86400000);
+    if (days <= 0) return "今天 " + hhmm;
+    if (days === 1) return "昨天 " + hhmm;
+    if (days < 7) return days + " 天前";
+    return d.toLocaleDateString("zh-CN");
+  }
+
   // ---------- 滚动长截图 ----------
   //
   // **为什么由界面驱动滚动**：滚哪个元素、滚多少，只有界面知道 ——
@@ -1311,6 +1452,9 @@
   // ============================================================
   // 截图
   // ============================================================
+  const $rec = $("#btn-record-shot");
+  if ($rec) $rec.addEventListener("click", recordShot);
+
   const $long = $("#btn-longshot");
   if ($long) $long.addEventListener("click", longScreenshot);
 
@@ -1345,6 +1489,29 @@
     if (!P || typeof P.register !== "function") return false;
 
     const cmds = [
+      {
+        id: "shot.history",
+        title: "截图历史",
+        group: "截图",
+        py: "jietulishi",
+        run: () => openShotHistory(),
+      },
+      {
+        id: "shot.record",
+        title: "滚动捕获（可截外部应用）",
+        group: "截图",
+        py: "gundongbohuo",
+        run: () => $("#btn-record-shot") && $("#btn-record-shot").click(),
+      },
+
+      {
+        id: "shot.long",
+        title: "长截图（整页拍一张）",
+        group: "截图",
+        py: "changjietu",
+        run: () => $("#btn-longshot") && $("#btn-longshot").click(),
+      },
+
       {
         id: "note.new", title: "新建笔记", group: "笔记", shortcut: "Ctrl+N", py: "xinjianbiji",
         run: () => $("#btn-new-note").click(),

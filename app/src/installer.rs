@@ -281,7 +281,7 @@ mod tests {
     /// 跑法：`cargo test -- --ignored 安装`
     #[test]
     #[ignore]
-    fn 安装之后能在注册表看到_卸载之后消失() {
+    fn visible_in_registry_after_install_gone_after_uninstall() {
         let data = std::env::temp_dir().join("dkb_inst_test_data");
         let _ = std::fs::create_dir_all(&data);
 

@@ -447,6 +447,13 @@
                       title="把当前可滚动区域整页拍成一张长图（每滚一屏抓一帧再拼接）">
                 长截图
               </button>
+
+              <!-- 滚动捕获：能截**外部应用**。用户自己滚，程序连续抓帧再拼接。
+                   为什么不模拟滚轮：那会往用户的其他应用注入输入，越界了。 -->
+              <button class="btn btn-ghost db-mini" id="btn-record-shot" type="button"
+                      title="截外部应用的长图：点开始后切到目标窗口自己滚动，滚完回来点停止">
+                滚动捕获
+              </button>
                 <button class="btn btn-ghost" id="btn-reveal-shot" hidden>打开所在文件夹</button>
               </div>
               <div class="hint" id="shot-hint">

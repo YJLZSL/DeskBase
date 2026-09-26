@@ -3232,7 +3232,7 @@ mod tests {
     // ---------------- 表格 ----------------
 
     #[test]
-    fn xlsx拆成csv每张表一个文件() {
+    fn xlsx_split_to_csv_one_file_per_sheet() {
         let d = tmp("split");
         let xlsx = d.join("台账.xlsx");
         make_xlsx(
@@ -3272,7 +3272,7 @@ mod tests {
     }
 
     #[test]
-    fn 只导出一张表时plan点名另外两张() {
+    fn exporting_one_sheet_plan_names_other_two() {
         let d = tmp("drop-sheets");
         let xlsx = d.join("多表.xlsx");
         make_xlsx(
@@ -3299,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn xlsx的公式合并单元格与嵌入图片都被数出来() {
+    fn xlsx_formulas_merges_and_images_counted() {
         let d = tmp("count-losses");
         // 先造一张真 PNG 用来嵌进 xlsx（rust_xlsxwriter 会读它的文件头拿尺寸）
         let png = d.join("图.png");
@@ -3351,7 +3351,7 @@ mod tests {
     }
 
     #[test]
-    fn csv到xlsx能被calamine读回来() {
+    fn csv_to_xlsx_readable_by_calamine() {
         let d = tmp("csv2xlsx");
         let csv = d.join("客户.csv");
         // 中文 + 金额 + 18 位订单号（长编号必须当文本）
@@ -3388,7 +3388,7 @@ mod tests {
     }
 
     #[test]
-    fn 带前导零的编号转xlsx后不会被变成数字() {
+    fn leading_zero_id_stays_text_in_xlsx() {
         let d = tmp("leading-zero");
         let csv = d.join("编号.csv");
         std::fs::write(&csv, "编号,数量\n007,3\n0012,4\n".as_bytes()).unwrap();
@@ -3413,7 +3413,7 @@ mod tests {
     }
 
     #[test]
-    fn 多个csv合并成一个xlsx每源一张表() {
+    fn many_csv_merged_into_one_xlsx_one_sheet_each() {
         let d = tmp("merge");
         let a = d.join("一月.csv");
         let b = d.join("二月.csv");
@@ -3434,7 +3434,7 @@ mod tests {
     }
 
     #[test]
-    fn csv换分隔符成tsv并保住了字段里的逗号() {
+    fn csv_to_tsv_keeps_commas_in_fields() {
         let d = tmp("reshape");
         let csv = d.join("地址.csv");
         std::fs::write(&csv, "客户,地址\n张三,\"北京市朝阳区,安贞路1号\"\n".as_bytes()).unwrap();
@@ -3452,7 +3452,7 @@ mod tests {
     // ---------------- 覆盖保护 ----------------
 
     #[test]
-    fn 目标已存在时plan直接报错而不是覆盖() {
+    fn existing_target_plan_errors_not_overwrite() {
         let d = tmp("no-overwrite");
         let xlsx = d.join("源.xlsx");
         make_xlsx(&xlsx, &[("表", vec![vec!["a"], vec!["1"]])]);
@@ -3467,7 +3467,7 @@ mod tests {
     }
 
     #[test]
-    fn 从plan到run之间目标冒出来也要报错() {
+    fn target_appearing_between_plan_and_run_errors() {
         let d = tmp("race");
         let csv = d.join("源.csv");
         std::fs::write(&csv, "a,b\n1,2\n".as_bytes()).unwrap();
@@ -3485,7 +3485,7 @@ mod tests {
     }
 
     #[test]
-    fn 源和目标同一个文件会被拦住() {
+    fn same_source_and_target_blocked() {
         let d = tmp("same-file");
         let f = d.join("同一个.csv");
         std::fs::write(&f, "a\n1\n".as_bytes()).unwrap();
@@ -3497,7 +3497,7 @@ mod tests {
     // ---------------- 编码转换 ----------------
 
     #[test]
-    fn gbk中文转utf8往返不丢字() {
+    fn gbk_to_utf8_roundtrip_loses_nothing() {
         let d = tmp("gbk");
         let text = "客户,金额\n张三,100\n李四,200\n（备注：中文标点。";
         let e = encode_text(text, Encoding::Gb18030);
@@ -3524,7 +3524,7 @@ mod tests {
     }
 
     #[test]
-    fn 同编码同分隔符会被拒绝而不是白干一场() {
+    fn same_encoding_and_delimiter_rejected() {
         let d = tmp("nothing-todo");
         let f = d.join("已经是了.csv");
         std::fs::write(&f, "a,b\n1,2\n".as_bytes()).unwrap();
@@ -3569,7 +3569,7 @@ mod tests {
     // ---------------- 图片 ----------------
 
     #[test]
-    fn png转jpg再转回png尺寸不变() {
+    fn png_to_jpg_to_png_size_unchanged() {
         let d = tmp("img-roundtrip");
         let png = d.join("原.png");
         RgbImage::from_fn(41, 23, |x, y| {
@@ -3595,7 +3595,7 @@ mod tests {
     }
 
     #[test]
-    fn exif方向会被应用否则手机照片会躺倒() {
+    fn exif_orientation_applied_else_photo_rotated() {
         let d = tmp("exif");
         // 造一张 41×23 的 jpg，然后在 SOI 之后插一段 EXIF：Orientation = 6（顺时针 90°）
         let base = d.join("竖着拍的.jpg");
@@ -3633,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn 透明像素转jpg会被精确计数并压到白底() {
+    fn transparent_pixels_counted_and_flattened_to_white() {
         let d = tmp("alpha");
         // 整张图都是透明的：转成 JPEG 之后必须是纯白，不能是黑块
         let png = d.join("透明.png");
@@ -3658,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn webp是无损的所以往返必须逐像素一致() {
+    fn lossless_webp_roundtrip_pixel_identical() {
         let d = tmp("webp");
         let png = d.join("原.png");
         RgbImage::from_fn(37, 19, |x, y| Rgb([(x * 7) as u8, (y * 13) as u8, 200]))
@@ -3687,7 +3687,7 @@ mod tests {
     }
 
     #[test]
-    fn 缩放只缩不放且旋转会换宽高() {
+    fn scale_down_only_rotate_swaps_dimensions() {
         let d = tmp("resize");
         let png = d.join("长图.png");
         RgbImage::from_pixel(100, 50, Rgb([10, 200, 10])).save(&png).unwrap();
@@ -3735,7 +3735,7 @@ mod tests {
     // ---------------- 错误路径 ----------------
 
     #[test]
-    fn 空文件不存在的文件同格式都报错而不是panic() {
+    fn empty_missing_and_same_format_error_not_panic() {
         let d = tmp("errors");
 
         // 不存在的文件
@@ -3777,7 +3777,7 @@ mod tests {
     }
 
     #[test]
-    fn 计划与执行对账时只说种类不说数量() {
+    fn reconcile_reports_kind_not_count() {
         let d = tmp("reconcile");
         // png 带透明 → jpg：计划里 alpha 记 1（具体数量要解码后才知道），
         // 实际是 1 个像素。两者数量不同但种类相同，**不该**报"与计划不符"。
@@ -3796,7 +3796,7 @@ mod tests {
     }
 
     #[test]
-    fn 计划的摘要能直接拿去显示() {
+    fn plan_summary_is_display_ready() {
         let d = tmp("summary");
         let xlsx = d.join("两张表.xlsx");
         make_xlsx(

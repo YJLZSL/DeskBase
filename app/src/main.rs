@@ -272,6 +272,50 @@ fn err(id: u64, message: impl Into<String>) -> String {
 /// 用 Mutex 是因为 IPC 可能并发进来（界面连点两下）。
 static SCROLL_FRAMES: std::sync::Mutex<Vec<capture::Frame>> = std::sync::Mutex::new(Vec::new());
 
+/// 把数据目录里的一张截图给界面。
+///
+/// ⚠️ **只认纯文件名**：带目录分隔符或 `..` 的一律拒掉。
+/// 这个入口的名字来自 URL，而 URL 是能被构造的 ——
+/// 不拦的话 `deskbase://localhost/shot/../../main.dkb` 就能读到任意文件。
+/// 是否正在「滚动捕获」。
+///
+/// **为什么是"用户自己滚"而不是我们模拟滚轮**：
+/// `capture.rs` 顶部写着模块的设计底线 ——「不合成输入」。
+/// 模拟滚轮（SendInput）会把事件注入到**用户的其它应用**里，
+/// 那是很重的越界：你不知道焦点在哪、用户正在做什么。
+/// 截外部应用不需要跨那条线 —— 让用户自己滚，我们只负责连续抓帧与拼接。
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn serve_shot(
+    dir: &std::path::Path,
+    name: &str,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let bad = name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || !name.ends_with(".png");
+    if bad {
+        return wry::http::Response::builder()
+            .status(wry::http::StatusCode::NOT_FOUND)
+            .body(std::borrow::Cow::Owned(Vec::new()))
+            .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Owned(Vec::new())));
+    }
+    match std::fs::read(dir.join(name)) {
+        Ok(b) => wry::http::Response::builder()
+            .status(wry::http::StatusCode::OK)
+            .header("Content-Type", "image/png")
+            // 重新标注后同名文件会变，别让 WebView 缓存旧图
+            .header("Cache-Control", "no-store")
+            .body(std::borrow::Cow::Owned(b))
+            .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Owned(Vec::new()))),
+        Err(_) => wry::http::Response::builder()
+            .status(wry::http::StatusCode::NOT_FOUND)
+            .body(std::borrow::Cow::Owned(Vec::new()))
+            .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Owned(Vec::new()))),
+    }
+}
+
 fn main() -> wry::Result<()> {
     // ---------- 命令行模式（走在最前面，且不碰数据库）----------
     //
@@ -445,8 +489,15 @@ fn main() -> wry::Result<()> {
     // UI 资源（HTML / CSS / JS / 字体）不再拼成一个大字符串，改为通过
     // `deskbase://localhost/...` 按路径取（见 assets.rs）。这样才能装二进制资源。
     let asset_log_dir = data_dir.clone();
+    let shot_dir = data_dir.join("shots");
     let asset_handler = move |_id: &str, req: wry::http::Request<Vec<u8>>| {
         let path = req.uri().path().to_string();
+        // 截图走这里。**单独拦一层而不是塞进 assets.rs** —— 那边是"编译进 exe 的
+        // 静态资源表"，而这些是用户数据目录里的文件，职责不同；
+        // 混在一起会让 assets.rs 被迫知道数据目录在哪。
+        if let Some(name) = path.strip_prefix("/shot/") {
+            return serve_shot(&shot_dir, name);
+        }
         let resp = assets::handle(req);
         if resp.status() != wry::http::StatusCode::OK {
             log_line(
@@ -1657,6 +1708,225 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 为什么让**界面**驱动循环而不是 Rust 主动滚：滚动的实现方式取决于内容
         // （读文章的滚动、表格的横竖滚、第三方页面的滚，各不相同），Rust 猜不准；
         // 而界面自己知道该滚哪个元素、滚多少。Rust 只负责"抓"和"拼"。
+        // ---------- 截图历史（v1.8.0）----------
+        //
+        // 截图**一直在往 shots/ 里存**（单帧与长图都存），但从来没人能看见它们 ——
+        // 存了个寂寞。这两条命令把那个目录变成看得见、能删的历史。
+        "shots.list" => {
+            let dir = state.data_dir.join("shots");
+            let mut items: Vec<serde_json::Value> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) != Some("png") {
+                        continue;
+                    }
+                    let name = p
+                        .file_name()
+                        .map(|x| x.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let meta = std::fs::metadata(&p).ok();
+                    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let at_ms = meta
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    items.push(serde_json::json!({
+                        "name": name,
+                        "size": size,
+                        "at_ms": at_ms,
+                    }));
+                }
+            }
+            // 新的在前 —— 找刚截的那张是最常见的用法
+            items.sort_by(|a, b| {
+                b.get("at_ms")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+                    .cmp(&a.get("at_ms").and_then(|v| v.as_i64()).unwrap_or(0))
+            });
+            ok(
+                id,
+                serde_json::json!({ "shots": items, "dir": dir.to_string_lossy() }),
+            )
+        }
+
+        "shots.delete" => {
+            let name = req
+                .args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 和 serve_shot 同样的拦截：删文件比读文件更不能含糊
+            if name.is_empty()
+                || name.contains('/')
+                || name.contains('\\')
+                || name.contains("..")
+            {
+                return err(id, "文件名不合法");
+            }
+            let p = state.data_dir.join("shots").join(&name);
+            if !p.exists() {
+                return err(id, "这张截图不在了");
+            }
+            match std::fs::remove_file(&p) {
+                Ok(()) => ok(id, serde_json::json!({ "deleted": name })),
+                Err(e) => err(id, format!("删不掉：{e}")),
+            }
+        }
+
+        // ---------- 滚动捕获（可截外部应用）----------
+        //
+        // 与上面那套「站内长截图」的区别：那套由**界面**驱动滚动，只能截 DeskBase 自己；
+        // 这一套**用户自己滚**，所以能截浏览器、资源管理器、任何外部窗口。
+        // 代价是抓帧节奏由 Rust 后台线程控制（不能靠 WebView 的定时器 ——
+        // 用户点走外部窗口后，WebView 的定时器会被节流甚至暂停）。
+        "capture.recordStart" => {
+            // 不传区域就抓主屏全屏 —— 用户自己把目标窗口摆好、自己滚。
+            let region = if let (Some(x), Some(y), Some(w), Some(h)) = (
+                req.args.get("x").and_then(|v| v.as_i64()),
+                req.args.get("y").and_then(|v| v.as_i64()),
+                req.args.get("w").and_then(|v| v.as_u64()),
+                req.args.get("h").and_then(|v| v.as_u64()),
+            ) {
+                (x as i32, y as i32, w as u32, h as u32)
+            } else {
+                let ms = capture::monitors().unwrap_or_default();
+                let m = ms
+                    .iter()
+                    .find(|m| m.primary)
+                    .or_else(|| ms.first());
+                match m {
+                    Some(m) => (m.x, m.y, m.w, m.h),
+                    None => return err(id, "量不出屏幕尺寸"),
+                }
+            };
+            let (x, y, w, h) = region;
+            if w == 0 || h == 0 {
+                return err(id, "抓取区域宽高不能是 0");
+            }
+            match SCROLL_FRAMES.lock() {
+                Ok(mut v) => v.clear(),
+                Err(_) => return err(id, "截图缓冲被锁住了"),
+            }
+            RECORDING.store(true, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                while RECORDING.load(Ordering::SeqCst) {
+                    if let Ok(f) = capture::grab_frame(x, y, w, h) {
+                        match SCROLL_FRAMES.lock() {
+                            Ok(mut v) => {
+                                // 上限兜底：5 分钟 × 每秒 5 帧也才 300 ——
+                                // 真撑到这个数，说明用户忘了点停
+                                if v.len() >= 300 {
+                                    RECORDING.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                                v.push(f);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(180));
+                }
+            });
+            ok(
+                id,
+                serde_json::json!({
+                    "started": true,
+                    "region": { "x": x, "y": y, "w": w, "h": h },
+                }),
+            )
+        }
+
+        "capture.recordStop" => {
+            RECORDING.store(false, Ordering::SeqCst);
+            // 给抓帧线程一点时间退出，否则最后一帧可能正在写
+            std::thread::sleep(std::time::Duration::from_millis(260));
+            let out = req
+                .args
+                .get("out")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let frames: Vec<capture::Frame> = match SCROLL_FRAMES.lock() {
+                Ok(mut v) => std::mem::take(&mut *v),
+                Err(_) => return err(id, "截图缓冲被锁住了"),
+            };
+            if frames.len() < 2 {
+                return err(id, "抓到的帧太少 —— 录制期间滚过目标窗口吗？");
+            }
+            // ---- 去重：用户停手时抓到的帧是一样的，必须丢掉 ----
+            //
+            // 这是"录屏式"与"滚一屏抓一帧"最大的不同：后者每帧必有位移，
+            // 前者大部分帧是重复的。**把重复帧拼进去，长图里就会出现大段重复内容。**
+            let max_shift = frames[0].h;
+            let mut kept: Vec<capture::Frame> = Vec::new();
+            let mut offs: Vec<u32> = Vec::new();
+            let mut last: Option<capture::Frame> = None;
+            for f in frames.into_iter() {
+                match last.take() {
+                    None => last = Some(f),
+                    Some(prev) => match capture::estimate_scroll_offset(&prev, &f, max_shift) {
+                        // 位移 > 0 = 确实滚了，留下这两帧
+                        Some(o) if o > 0 => {
+                            offs.push(o);
+                            kept.push(prev);
+                            last = Some(f);
+                        }
+                        // 位移 0 / 估不出来 = 没滚，丢掉当前帧，继续和下一帧比
+                        _ => last = Some(prev),
+                    },
+                }
+            }
+            if let Some(l) = last {
+                kept.push(l);
+            }
+            if kept.len() < 2 {
+                return err(id, "没检测到滚动 —— 你在录制期间滚过目标窗口吗？");
+            }
+            // kept[0] 是起点，对应位移 0
+            let mut offsets: Vec<u32> = vec![0];
+            offsets.extend(offs);
+            // dispatch_sync 返回的是 String 不是 Result，所以这里不能用 ? ——
+            // 与文件里其它 IPC 分支保持一致，走 match。
+            let (img, total_h) = match capture::stitch(&kept, &offsets) {
+                Ok(v) => v,
+                Err(e) => return err(id, e),
+            };
+            let path = if out.is_empty() {
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                state
+                    .data_dir
+                    .join("shots")
+                    .join(format!("滚动长图-{ms}.png"))
+            } else {
+                std::path::PathBuf::from(&out)
+            };
+            match capture::save_png(&img, &path) {
+                Ok(()) => {
+                    log_line(
+                        &state.data_dir,
+                        &format!("滚动捕获：{} 帧里留下 {} 帧", kept.len(), kept.len()),
+                    );
+                    ok(
+                        id,
+                        serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "frames": kept.len(),
+                            "height": total_h,
+                        }),
+                    )
+                }
+                Err(e) => err(id, e),
+            }
+        }
+
         "capture.scrollStart" => {
             match SCROLL_FRAMES.lock() {
                 Ok(mut v) => {
@@ -3724,7 +3994,7 @@ mod acceptance {
 
     /// 验收 1 + 2 + 5 + 6：新建表格（含金额列）→ 录一行 → 金额按分存 → 三位小数被拒。
     #[test]
-    fn 验收_新建表格录行与金额往返() {
+    fn accept_new_table_rows_and_money_roundtrip() {
         let (state, dir) = fixture("money");
         call(
             &state,
@@ -3787,7 +4057,7 @@ mod acceptance {
     /// 这一步专门留了测试：v0.2.0-beta.1 的 P1 就是这里坏的
     /// （`has_more` 被读成 `hasMore`，值恒为 undefined，"加载更多"永不出现）。
     #[test]
-    fn 验收_超过一页的表能翻到第二页且不重不漏() {
+    fn accept_paging_second_page_no_dup_no_gap() {
         let (state, dir) = fixture("paging");
         call(
             &state,
@@ -3834,7 +4104,7 @@ mod acceptance {
 
     /// 验收 7 + 8：表头排序（升 / 降）与列筛选。
     #[test]
-    fn 验收_排序与筛选() {
+    fn accept_sort_and_filter() {
         let (state, dir) = fixture("sortfilter");
         call(
             &state,
@@ -3905,7 +4175,7 @@ mod acceptance {
 
     /// 验收 9 + 10：改单元格（含设为 NULL）与批量删行。
     #[test]
-    fn 验收_改单元格与删行() {
+    fn accept_edit_cell_and_delete_row() {
         let (state, dir) = fixture("edit");
         call(
             &state,
@@ -3966,7 +4236,7 @@ mod acceptance {
     }
     /// 验收 14 + 15：工作区状态存下去、重启后能读回来。
     #[test]
-    fn 验收_工作区状态重启后能恢复() {
+    fn accept_workspace_state_survives_restart() {
         let (state, dir) = fixture("workspace");
         call(
             &state,
@@ -4009,7 +4279,7 @@ mod acceptance {
 
     /// 新建表格向导的「默认值」输入框（v0.2.1 新增）。
     #[test]
-    fn 新建表格默认值能落库() {
+    fn new_table_defaults_persist() {
         let (state, dir) = fixture("default");
         call(
             &state,
@@ -4052,7 +4322,7 @@ mod acceptance {
     /// 用这个类型建过表，所以它一直躺在那里没人碰。
     /// **类型清单是一份跨语言协议，每一种都要有覆盖。**
     #[test]
-    fn 九种列类型都能新建表格() {
+    fn nine_column_types_all_creatable() {
         let (state, dir) = fixture("types");
 
         // 类型清单来自 Rust（唯一来源），界面就是按这批名字传的
@@ -4097,7 +4367,7 @@ mod acceptance {
     /// 并列的两条读路径（`csv_import::read_rows`）—— 这条覆盖了，xlsx 那侧
     /// 由 `xlsx.rs` 自己的往返测试覆盖。
     #[test]
-    fn 导入新建表格走完整路径() {
+    fn import_new_table_full_path() {
         let (state, dir) = fixture("import");
         // 造一个带"表头上面还有标题行"的 CSV —— 这是中文台账最常见的形态
         let csv = dir.join("客户台账.csv");

@@ -1072,7 +1072,7 @@ mod tests {
     // ---------------- 编码探测 ----------------
 
     #[test]
-    fn 编码探测_合法utf8的中文() {
+    fn encoding_detect_valid_utf8_chinese() {
         // 严格 UTF-8 校验能确认合法 UTF-8 —— 哪怕全是中文，也不该被误判成 GBK
         let s = "订单号,客户,金额\nA001,张三,1200.50\n";
         assert_eq!(detect_encoding(s.as_bytes()), Encoding::Utf8);
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn 编码名字的解析_大小写与别名都要认() {
+    fn encoding_name_parse_case_and_alias() {
         // 用户在界面上可能写这些写法中的任何一种
         for s in ["UTF-8", "utf8", "Utf_8", "utf-8"] {
             assert_eq!(Encoding::from_name(s), Some(Encoding::Utf8), "{s}");
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn 编码探测_非法的gbk中文() {
+    fn encoding_detect_invalid_gbk_chinese() {
         // "中文" 的 GBK 是 D6 D0 CE C4 —— 这不是合法 UTF-8（第一步就失败）
         let gbk = b"\xD6\xD0\xCE\xC4";
         assert!(
@@ -1121,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn 编码探测_四种编码与bom() {
+    fn encoding_detect_four_encodings_and_bom() {
         // UTF-8 BOM
         assert_eq!(detect_encoding(b"\xEF\xBB\xBFid\n1\n"), Encoding::Utf8Bom);
         // UTF-16LE BOM（Excel「Unicode 文本」的格式：'i' = 69 00）
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有bom的utf16靠nul分布认出来() {
+    fn utf16_without_bom_detected_by_nul_distribution() {
         // 纯 ASCII 的 UTF-16LE 文件整个都是合法 UTF-8（0x00 是合法 UTF-8 字符），
         // 如果在 UTF-8 校验之后才看 NUL，这种文件会被误判成 UTF-8
         let le: Vec<u8> = "id,name\r\n1,a\r\n".bytes().flat_map(|b| [b, 0]).collect();
@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn 空的bom不能留在第一个字段里() {
+    fn empty_bom_not_left_in_first_field() {
         let d = tmp("bom");
         let p = write_temp(&d, "bom-utf8.csv", "\u{FEFF}姓名,金额\n张三,100\n".as_bytes());
 
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn 解码不了的字节会报替换字符() {
+    fn undecodable_bytes_report_replacement_char() {
         let d = tmp("fffd");
         // 0xFF 0xFE 之后按 GB18030 是解不出东西的（这里没有 BOM，走 GB18030 分支）
         let p = write_temp(&d, "bad.csv", b"id,name\n1,\xFF\xFF\xFF\n");
@@ -1209,7 +1209,7 @@ mod tests {
     // ---------------- 分隔符探测 ----------------
 
     #[test]
-    fn 分隔符探测_逗号制表符分号() {
+    fn delimiter_detect_comma_tab_semicolon() {
         assert_eq!(detect_delimiter("a,b,c\n1,2,3\n"), ',');
         assert_eq!(detect_delimiter("a\tb\tc\n1\t2\t3\n"), '\t');
         assert_eq!(detect_delimiter("a;b;c\n1;2;3\n"), ';');
@@ -1217,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn 地址里的逗号不会把制表符文件带偏() {
+    fn commas_in_address_do_not_mislead_tab_file() {
         // 干扰案例：真正的分隔符是 Tab，但每一行的中文地址里都有逗号
         let tsv = "姓名\t地址\t金额\n\
                    张三\t北京市朝阳区,安贞路1号\t100\n\
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn 单列文件不会硬凑出一个分隔符() {
+    fn single_column_file_gets_no_delimiter() {
         let (d, found) = detect_delimiter_ex("名称\n中文\n英文\n");
         assert!(!found, "没有任何分隔符时应当承认探测失败");
         assert_eq!(d, ',');
@@ -1251,7 +1251,7 @@ mod tests {
     // ---------------- 引号规则 ----------------
 
     #[test]
-    fn 引号里的逗号和换行都是字段内容() {
+    fn quoted_comma_and_newline_are_field_content() {
         let text = "id,addr,note\n1,\"北京市,朝阳区\",ok\n2,\"第一行\n第二行\",ok\n";
         let rows = parse(text, ',');
         assert_eq!(rows.len(), 3, "引号里的换行不能把一条记录劈成两条");
@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn 两个连续引号是一个字面量引号() {
+    fn double_quote_is_one_literal_quote() {
         let rows = parse("id,note\n1,\"他说\"\"你好\"\"\"\n", ',');
         assert_eq!(rows[1][1], "他说\"你好\"");
         // 引号内的分隔符和 `""` 一起出现时也不能乱
@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn 引号前有空格也当作字段开始() {
+    fn space_before_quote_still_starts_field() {
         // RFC 严格来说这里引号是字面量，但真实导出大量这么写。
         // 当成字面量的话那个逗号会被算成分隔符，从此整表错位 —— 后果严重得多。
         let rows = parse("a,b\n1, \"x,y\"\n", ',');
@@ -1282,7 +1282,7 @@ mod tests {
     // ---------------- 结构异常 ----------------
 
     #[test]
-    fn 列数不一致的行会被计数并告警() {
+    fn inconsistent_column_count_counted_and_warned() {
         let d = tmp("ragged");
         let p = write_temp(
             &d,
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn 空行被跳过并计数() {
+    fn blank_rows_skipped_and_counted() {
         let text = "a,b\n1,2\n\n\n3,4\n";
         let rows = parse(text, ',');
         assert_eq!(rows.len(), 3, "两条空行不能变成两条空记录");
@@ -1318,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn 行尾多余分隔符与整列为空都被点名() {
+    fn trailing_delimiter_and_empty_column_named() {
         let d = tmp("trailing");
         let p = write_temp(
             &d,
@@ -1334,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn 全角数字被检测出来() {
+    fn fullwidth_digits_detected() {
         let d = tmp("fullwidth");
         let p = write_temp(&d, "fw.csv", "客户,金额\n张三,１２３.４５\n李四,200\n".as_bytes());
         let r = inspect(&p).unwrap();
@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn 长编号在编号列里被点名() {
+    fn long_ids_named_in_id_column() {
         let d = tmp("longid");
         let p = write_temp(
             &d,
@@ -1380,7 +1380,7 @@ mod tests {
     // ---------------- 闸门 ----------------
 
     #[test]
-    fn 文件过大与行数过多都被拒绝() {
+    fn oversized_file_and_too_many_rows_rejected() {
         // 500 MB 这条线单独测；真造一个 500 MB 文件来测太蠢了
         assert!(check_size(MAX_FILE_BYTES).is_ok());
         let err = check_size(600 * 1024 * 1024).unwrap_err();
@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn 报告的形状符合界面预期() {
+    fn report_shape_matches_ui_expectation() {
         let d = tmp("shape");
         let mut text = String::from("客户,金额\n");
         for i in 0..20 {

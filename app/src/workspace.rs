@@ -106,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn 保存后重开读到同一份() {
+    fn reopen_reads_same_state() {
         let (d, mut db) = fresh("roundtrip");
         let st = WorkspaceState {
             view: "database".into(),
@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn 缺字段给安全默认值() {
+    fn missing_field_gets_safe_default() {
         let (_d, mut db) = fresh("partial");
         db.meta_set(KEY, "{\"view\":\"settings\"}").unwrap();
         let got = load(&db).unwrap();
@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn 损坏的记录回退默认而不是崩() {
+    fn corrupt_record_falls_back_to_default() {
         let (_d, mut db) = fresh("corrupt");
         db.meta_set(KEY, "这不是 json").unwrap();
         let got = load(&db).unwrap();
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有记录时给默认() {
+    fn no_record_returns_default() {
         let (_d, db) = fresh("empty");
         let got = load(&db).unwrap();
         assert_eq!(got, WorkspaceState::default());

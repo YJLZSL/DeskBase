@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn 写入后能读回() {
+    fn write_then_read_back() {
         let d = tmp_dir("basic");
         let mut s = Store::open(&d).unwrap();
         s.put("sys/theme", "dark").unwrap();
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn 重开后数据还在() {
+    fn data_survives_reopen() {
         let d = tmp_dir("reopen");
         {
             let mut s = Store::open(&d).unwrap();
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn 一个事务里的多个操作要么全在要么全不在() {
+    fn transaction_all_or_nothing() {
         let d = tmp_dir("atomic");
         {
             let mut s = Store::open(&d).unwrap();
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn 尾部半写条目被丢弃_前面的数据完好() {
+    fn torn_tail_entry_dropped_earlier_data_intact() {
         let d = tmp_dir("halfwrite");
         {
             let mut s = Store::open(&d).unwrap();
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn crc不符的条目被丢弃() {
+    fn bad_crc_entry_dropped() {
         let d = tmp_dir("badcrc");
         {
             let mut s = Store::open(&d).unwrap();
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn 非magic的垃圾被丢弃() {
+    fn non_magic_garbage_dropped() {
         let d = tmp_dir("junk");
         {
             let mut s = Store::open(&d).unwrap();
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn 快照之后日志归零且数据完整() {
+    fn log_reset_after_snapshot_data_intact() {
         let d = tmp_dir("snap");
         {
             let mut s = Store::open(&d).unwrap();
@@ -707,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn 快照之后再写再重开_数据都对() {
+    fn write_after_snapshot_then_reopen_all_correct() {
         let d = tmp_dir("snap2");
         {
             let mut s = Store::open(&d).unwrap();
@@ -723,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn 前缀扫描按字典序返回() {
+    fn prefix_scan_returns_lexicographic_order() {
         let d = tmp_dir("scan");
         let mut s = Store::open(&d).unwrap();
         s.put("rec/t1/r2", "b").unwrap();
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn 按前缀删除是事务的() {
+    fn prefix_delete_is_transactional() {
         let d = tmp_dir("delprefix");
         let mut s = Store::open(&d).unwrap();
         s.put("rec/t1/r1", "a").unwrap();
@@ -751,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn 空事务不产生日志也不推进seq() {
+    fn empty_transaction_no_log_no_seq_advance() {
         let d = tmp_dir("empty");
         let mut s = Store::open(&d).unwrap();
         let before = s.seq();
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn 残留的临时文件被清理且不影响打开() {
+    fn leftover_temp_file_cleaned_without_harming_open() {
         let d = tmp_dir("tmpfile");
         {
             let mut s = Store::open(&d).unwrap();
@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn 中文键值能正确往返() {
+    fn chinese_key_value_roundtrip() {
         let d = tmp_dir("cjk");
         let mut s = Store::open(&d).unwrap();
         s.put("tbl/客户表", "{\"name\":\"客户表\"}").unwrap();
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn 一万个键的往返与重开() {
+    fn ten_thousand_keys_roundtrip_and_reopen() {
         let d = tmp_dir("bulk");
         {
             let mut s = Store::open(&d).unwrap();

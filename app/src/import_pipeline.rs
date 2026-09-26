@@ -1318,7 +1318,7 @@ mod tests {
     // ---------------------------------------------------------- 基础
 
     #[test]
-    fn 小批量导入能原样读回来() {
+    fn small_batch_import_reads_back_unchanged() {
         let p = tmp_db("small");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1359,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn 自然键去重_同样的数据导两次第二次零新增() {
+    fn natural_key_dedup_second_import_adds_nothing() {
         let p = tmp_db("idem");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn 中途插入的新行只有新增的那些被写进去() {
+    fn mid_run_inserted_rows_only_new_ones_written() {
         let p = tmp_db("partial");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn update_existing为假时保留已有行_为真时才覆盖() {
+    fn update_existing_false_keeps_true_overwrites() {
         let p = tmp_db("update");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn 约束违规必须报错而不是被静默吞掉() {
+    fn constraint_violation_errors_not_silently_swallowed() {
         let p = tmp_db("notnull");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1474,7 +1474,7 @@ mod tests {
     // ---------------------------------------------------------- 校验
 
     #[test]
-    fn 列数不匹配时报错并指出是哪一行() {
+    fn column_count_mismatch_reports_row() {
         let p = tmp_db("width");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1498,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn 目标列不存在时报错并点名是哪一列() {
+    fn missing_target_column_reports_column() {
         let p = tmp_db("nocol");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn 自然键必须是本次导入的列() {
+    fn natural_key_must_be_in_this_import() {
         let p = tmp_db("badkey");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn 元数据列不能被当成业务列导入() {
+    fn metadata_columns_not_imported_as_business() {
         let p = tmp_db("reserved");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1545,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn 目标表不存在时报错而不是去建表() {
+    fn missing_target_table_errors_not_created() {
         let p = tmp_db("notable");
         let mut db = open_db(&p);
         let err = import(&mut db, &rows(1), &opts(&["no"]), &mut freeze).unwrap_err();
@@ -1554,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn 空输入不报错也不写任何东西() {
+    fn empty_input_no_error_no_write() {
         let p = tmp_db("empty");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1584,7 +1584,7 @@ mod tests {
     // ---------------------------------------------------------- 分批与进度
 
     #[test]
-    fn 超过一批的行数时会分多次提交且进度与批号一致() {
+    fn multi_batch_commit_with_consistent_progress() {
         let p = tmp_db("batch");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1612,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn 进度回调单调不减且最后停在总数() {
+    fn progress_monotonic_ends_at_total() {
         let p = tmp_db("progress");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1640,7 +1640,7 @@ mod tests {
     // ---------------------------------------------------------- 撤销
 
     #[test]
-    fn 撤销删掉本次导入的行_且只删这一作业的行() {
+    fn undo_deletes_only_this_job_rows() {
         let p = tmp_db("undo");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1692,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn 撤销不动用户后来改过的行() {
+    fn undo_leaves_user_edited_rows() {
         let p = tmp_db("undo_modified");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1726,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn 撤销不会删掉本次覆盖过的老行() {
+    fn undo_keeps_previously_overwritten_rows() {
         let p = tmp_db("undo_updated");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1766,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn 撤销之后能重新导入同样的数据() {
+    fn reimport_after_undo_works() {
         let p = tmp_db("redo");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有唯一索引也靠内存去重保证幂等() {
+    fn in_memory_dedup_gives_idempotence_without_unique_index() {
         let p = tmp_db("nkidx");
         let mut db = open_db(&p);
         // 不带任何唯一索引：幂等完全靠本模块的内存去重映射
@@ -1811,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn 表里已有重复的自然键时明确报错而不是硬来() {
+    fn duplicate_natural_keys_in_table_errors() {
         let p = tmp_db("dupkey");
         let mut db = open_db(&p);
         make_table(
@@ -1846,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn 撤销只认自己的作业_别的作业写的行不动() {
+    fn undo_only_touches_own_job() {
         let p = tmp_db("tworun");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1871,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn 数字亲和性的列不会被误判成用户改过() {
+    fn numeric_affinity_not_mistaken_for_user_edit() {
         let p = tmp_db("affinity");
         let mut db = open_db(&p);
         // qty 是 INTEGER：输入串 "007" 原样存成字符串，指纹按原串算，绝不靠数据库亲和性。
@@ -1900,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn 空自然键的行会被计数并点名() {
+    fn empty_natural_key_rows_counted_and_named() {
         let p = tmp_db("blankkey");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1926,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有自然键时重跑会产生重复_报告里要说清楚() {
+    fn rerun_without_natural_key_duplicates_and_reports() {
         let p = tmp_db("nokey");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -1946,7 +1946,7 @@ mod tests {
 
     /// 手工造出"作业还在进行中、行只写了一半"的现场 —— 这正是被强杀后库里的样子。
     #[test]
-    fn 崩在中间_启动时能报出已导入和未导入的行数() {
+    fn crash_midway_reports_imported_and_pending() {
         let p = tmp_db("halfway");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -2015,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn 没有元数据表时_恢复接口是安静的只读() {
+    fn recovery_api_readonly_without_meta_table() {
         let p = tmp_db("nometa");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -2030,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn 失败后可以撤销已提交的部分() {
+    fn partial_commit_undoable_after_failure() {
         let p = tmp_db("failundo");
         let mut db = open_db(&p);
         orders_table(&mut db);
@@ -2068,12 +2068,16 @@ mod tests {
     // ---------------------------------------------------------- 跨进程强杀
 
     const CRASH_DB_ENV: &str = "DESKBASE_IMPORT_CRASH_DB";
-    const CRASH_TEST: &str = "跨进程强杀后重启能报出正确进度且数据可以继续用";
+    // ⚠️ 这个常量**必须和下面那个测试函数名一模一样** —— 子进程靠它筛测试。
+    // 2026-09-26 给测试改名时，这里漏改过一次：子进程匹配不到任何测试，
+    // 于是正常退出，断言报子进程本该被强杀，却正常退出了。
+    // **测试名被字符串引用时，改名就不是零风险了。**
+    const CRASH_TEST: &str = "kill_and_restart_reports_progress_data_usable";
 
     /// 真的起一个子进程，导到第二批发完就 `abort()` —— 不走析构、不回滚、
     /// 不改作业状态，和"用户在任务管理器里结束进程"是同一回事。
     #[test]
-    fn 跨进程强杀后重启能报出正确进度且数据可以继续用() {
+    fn kill_and_restart_reports_progress_data_usable() {
         if let Ok(path) = std::env::var(CRASH_DB_ENV) {
             crash_child(&path);
             unreachable!("子进程本该在提交第二批之后杀掉自己");

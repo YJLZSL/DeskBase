@@ -2203,7 +2203,7 @@ mod tests {
     // ---------- 变更历史（"改错了能回退"）----------
 
     #[test]
-    fn 改一格能退回去() {
+    fn edit_cell_can_undo() {
         let dir = tmp("hist-update");
         let mut d = Db::open(&dir).unwrap();
         d.create_table(&spec("账本", &[("名称", ColType::Text), ("金额", ColType::Money)]))
@@ -2239,7 +2239,7 @@ mod tests {
     }
 
     #[test]
-    fn 删掉一行能整行恢复() {
+    fn delete_row_can_restore_whole_row() {
         let dir = tmp("hist-delete");
         let mut d = Db::open(&dir).unwrap();
         d.create_table(&spec("名单", &[("名称", ColType::Text), ("备注", ColType::Text)]))
@@ -2276,7 +2276,7 @@ mod tests {
     }
 
     #[test]
-    fn 历史有上限不会无限涨() {
+    fn history_capped_not_unbounded() {
         let dir = tmp("hist-prune");
         let mut d = Db::open(&dir).unwrap();
         d.create_table(&spec("流水", &[("值", ColType::Text)]))
@@ -2331,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn 建表列表改名删除() {
+    fn create_list_rename_drop_table() {
         let d = tmp("crud");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("客户", &[("客户名", ColType::Text), ("余额", ColType::Money)]))
@@ -2347,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn 删表要确认名一致() {
+    fn drop_table_requires_name_match() {
         let d = tmp("confirm");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("a", ColType::Text)])).unwrap();
@@ -2356,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn 插入与分页() {
+    fn insert_and_paging() {
         let d = tmp("page");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("名字", ColType::Text), ("序号", ColType::Integer)]))
@@ -2384,7 +2384,7 @@ mod tests {
     }
 
     #[test]
-    fn 关键词筛选能过滤行() {
+    fn keyword_filter_filters_rows() {
         let d = tmp("filter");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("名字", ColType::Text)])).unwrap();
@@ -2402,7 +2402,7 @@ mod tests {
     }
 
     #[test]
-    fn 改单元格与删行() {
+    fn edit_cell_and_delete_row() {
         let d = tmp("cell");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("a", ColType::Text)])).unwrap();
@@ -2416,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn 类型校验拦住脏值() {
+    fn type_check_blocks_dirty_values() {
         let d = tmp("coerce");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("n", ColType::Integer), ("m", ColType::Money)]))
@@ -2433,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn 金额解析与显示() {
+    fn money_parse_and_display() {
         assert_eq!(money_parse("1,234.56").unwrap(), 123456);
         assert_eq!(money_parse("¥12").unwrap(), 1200);
         assert_eq!(money_parse("(5.00)").unwrap(), -500);
@@ -2442,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn 日期规范化() {
+    fn date_normalization() {
         assert_eq!(normalize_date("2026/9/20").unwrap(), "2026-09-20");
         assert_eq!(normalize_date("2026年9月20日").unwrap(), "2026-09-20");
         assert!(normalize_date("2026-02-30").is_err(), "2 月没有 30 号");
@@ -2450,7 +2450,7 @@ mod tests {
     }
 
     #[test]
-    fn 标识符校验() {
+    fn identifier_validation() {
         assert!(validate_identifier("客户表").is_ok());
         assert!(validate_identifier("_a1").is_ok());
         assert!(validate_identifier("1表").is_err());
@@ -2459,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn 加列删列改列名_记录里的值跟着走() {
+    fn add_drop_rename_column_values_follow() {
         let d = tmp("cols");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("t", &[("a", ColType::Text), ("b", ColType::Text)]))
@@ -2483,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn 系统键值取代sys_meta表() {
+    fn system_kv_replaces_sys_meta_table() {
         let d = tmp("meta");
         let mut db = Db::open(&d).unwrap();
         db.meta_set("ai/enabled", "1").unwrap();
@@ -2495,7 +2495,7 @@ mod tests {
     // ---------- 共通字段 ----------
 
     #[test]
-    fn 共通字段改定义会推到所有引用表() {
+    fn shared_field_definition_propagates_to_referencing_tables() {
         let d = tmp("shared");
         let mut db = Db::open(&d).unwrap();
         let sf = SharedField {
@@ -2557,7 +2557,7 @@ mod tests {
     }
 
     #[test]
-    fn 改源表_目标表跟着改_并留下来源标记() {
+    fn source_change_propagates_and_marks_origin() {
         let d = tmp("sync1");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec(
@@ -2622,7 +2622,7 @@ mod tests {
     /// 而加列是更常用的入口（建表时要先有目标表，加列时两边往往都已存在）。
     /// 索引要真的把"行数"压成"唯一值数" —— 否则它就是个摆设。
     #[test]
-    fn 索引_建了能列出来_且值是去重的() {
+    fn index_listed_and_values_deduplicated() {
         let d = tmp("idx1");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
@@ -2659,7 +2659,7 @@ mod tests {
     /// 增量维护只要漏掉一种写路径，索引就会静默地和资料不一致，
     /// 而现象只是"偶尔搜不到"，极难查。所以这里选了"写即作废"。
     #[test]
-    fn 索引_写操作后跟着数据变() {
+    fn index_follows_writes() {
         let d = tmp("idx2");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
@@ -2701,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn 加列关联到不存在的表要被拦下() {
+    fn link_to_missing_table_blocked() {
         let d = tmp("linkadd");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("订单", &[("单号", ColType::Text)])).unwrap();
@@ -2739,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn 关掉规则就不再同步_而且目标恢复可编辑() {
+    fn rule_off_stops_sync_and_target_editable_again() {
         let d = tmp("sync2");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
@@ -2777,7 +2777,7 @@ mod tests {
     }
 
     #[test]
-    fn 只填空模式不会覆盖已有值() {
+    fn fill_blanks_only_does_not_overwrite() {
         let d = tmp("sync3");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec("客户", &[("客户名", ColType::Text)])).unwrap();
@@ -2816,7 +2816,7 @@ mod tests {
     }
 
     #[test]
-    fn 互相同步不会死循环() {
+    fn mutual_sync_no_infinite_loop() {
         let d = tmp("cycle");
         let mut db = Db::open(&d).unwrap();
         // 先建两张普通表 —— 建表时校验关联目标必须已存在，不能互相指着还没建的表
@@ -2896,7 +2896,7 @@ mod tests {
     // ---------- 视图 ----------
 
     #[test]
-    fn 命名视图能筛选排序_不需要任何查询语言() {
+    fn named_view_filters_and_sorts_without_query_language() {
         let d = tmp("view");
         let mut db = Db::open(&d).unwrap();
         db.create_table(&spec(
@@ -2940,7 +2940,7 @@ mod tests {
     }
 
     #[test]
-    fn 表中数据可持久化重开后仍在() {
+    fn table_data_persists_across_reopen() {
         let d = tmp("persist");
         {
             let mut db = Db::open(&d).unwrap();

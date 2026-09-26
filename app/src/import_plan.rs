@@ -634,20 +634,20 @@ mod tests {
     // ---------- 编号类：判成数字就会永久改坏数据 ----------
 
     #[test]
-    fn 前导零的工号必须判成文本() {
+    fn leading_zero_employee_id_is_text() {
         let g = guess_type("工号", &v(&["007", "0123", "0042"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
         assert_eq!(g.confidence, C_HIGH);
     }
 
     #[test]
-    fn 十六位以上的订单号必须判成文本() {
+    fn order_id_over_16_digits_is_text() {
         let g = guess_type("订单号", &v(&["202609190001234567", "202609190001234568"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
     }
 
     #[test]
-    fn 没有线索的长数字也按文本_因为双精度存不下() {
+    fn long_digits_without_hint_is_text() {
         // 列名不带"编号"字样，但值本身有 18 位
         let g = guess_type("参考", &v(&["123456789012345678"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
@@ -655,13 +655,13 @@ mod tests {
     }
 
     #[test]
-    fn 科学计数法不认_转文本() {
+    fn scientific_notation_not_accepted_becomes_text() {
         let g = guess_type("型号", &v(&["1e5", "2e3"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
     }
 
     #[test]
-    fn 单个零与零点五不算前导零() {
+    fn single_zero_and_half_not_leading_zero() {
         assert!(!looks_like_id("0"));
         assert!(!looks_like_id("0.5"));
         assert!(looks_like_id("007"));
@@ -671,13 +671,13 @@ mod tests {
     // ---------- 金额 ----------
 
     #[test]
-    fn 列名像金额且两位小数判成金额() {
+    fn amount_like_name_with_2_decimals_is_money() {
         let g = guess_type("金额", &v(&["12.34", "0.50", "1000.00"]));
         assert_eq!(g.ty, T_MONEY, "{}", g.reason);
     }
 
     #[test]
-    fn 列名像金额但有三位小数只判成小数_不判金额() {
+    fn amount_like_name_3_decimals_is_real_not_money() {
         // 金额列只接受 2 位小数，判成 money 会让导入直接失败
         let g = guess_type("单价", &v(&["12.345", "1.234"]));
         assert_eq!(g.ty, T_REAL, "{}", g.reason);
@@ -685,13 +685,13 @@ mod tests {
     }
 
     #[test]
-    fn 整数金额也判金额() {
+    fn integer_amount_is_money() {
         let g = guess_type("费用合计", &v(&["100", "2000"]));
         assert_eq!(g.ty, T_MONEY, "{}", g.reason);
     }
 
     #[test]
-    fn 没有金额线索的小数判成小数() {
+    fn decimals_without_money_hint_is_real() {
         let g = guess_type("温度", &v(&["36.5", "37.2"]));
         assert_eq!(g.ty, T_REAL, "{}", g.reason);
     }
@@ -699,14 +699,14 @@ mod tests {
     // ---------- 整数与布尔 ----------
 
     #[test]
-    fn 纯整数判整数() {
+    fn pure_integer_is_int() {
         let g = guess_type("数量", &v(&["3", "12", "0"]));
         assert_eq!(g.ty, T_INTEGER, "{}", g.reason);
         assert_eq!(g.confidence, C_HIGH);
     }
 
     #[test]
-    fn 只有零和一且列名像布尔才判布尔() {
+    fn only_0_1_and_bool_like_name_is_bool() {
         let yes = guess_type("是否结清", &v(&["1", "0", "1"]));
         assert_eq!(yes.ty, T_BOOLEAN, "{}", yes.reason);
 
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn 是否这类写法直接判布尔() {
+    fn yes_no_wording_is_bool() {
         let g = guess_type("状态", &v(&["是", "否", "是"]));
         assert_eq!(g.ty, T_BOOLEAN, "{}", g.reason);
     }
@@ -724,7 +724,7 @@ mod tests {
     // ---------- 日期 ----------
 
     #[test]
-    fn 多种年在前写法都认成日期() {
+    fn multiple_year_first_formats_are_date() {
         for col in [
             v(&["2026-09-19", "2026-01-02"]),
             v(&["2026/9/7", "2026/12/31"]),
@@ -738,20 +738,20 @@ mod tests {
     }
 
     #[test]
-    fn 日期要带分隔符_单独的年份是整数() {
+    fn date_needs_separator_bare_year_is_int() {
         let g = guess_type("年份", &v(&["2026", "2025"]));
         assert_eq!(g.ty, T_INTEGER, "{}", g.reason);
     }
 
     #[test]
-    fn 不认日月在前的写法_绝不猜() {
+    fn day_month_first_not_accepted_never_guess() {
         // 03/04/2026 到底是 3 月 4 日还是 4 月 3 日？猜错的代价是整列日期错位
         let g = guess_type("日期", &v(&["03/04/2026", "05/06/2026"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
     }
 
     #[test]
-    fn 非法日期不算日期() {
+    fn invalid_date_is_not_date() {
         assert_eq!(parse_date("2026-02-30"), None, "2 月没有 30 号");
         assert_eq!(parse_date("2026-13-01"), None, "没有 13 月");
         assert_eq!(parse_date("2026-09-19"), Some("2026-09-19".into()));
@@ -762,7 +762,7 @@ mod tests {
     // ---------- 清洗 ----------
 
     #[test]
-    fn 千分位与货币符号能当数字() {
+    fn thousands_separator_and_currency_symbol_as_number() {
         assert_eq!(clean_number("¥1,234.50").as_deref(), Some("1234.50"));
         assert_eq!(clean_number("1,234"), Some("1234".into()));
         assert_eq!(clean_number("$12"), Some("12".into()));
@@ -773,14 +773,14 @@ mod tests {
     }
 
     #[test]
-    fn 不合法的千分位不当数字() {
+    fn invalid_thousands_separator_not_number() {
         // 1,23 不是合法的千分位写法，可能是笔误也可能是别的含义 —— 不猜
         assert_eq!(clean_number("1,23"), None);
         assert_eq!(clean_number("12,3456"), None);
     }
 
     #[test]
-    fn 万元不换算_转文本() {
+    fn ten_thousand_unit_not_converted_becomes_text() {
         // 1万元 到底是 10000 还是 1？这里不猜 —— 猜错就是差一万倍
         assert_eq!(clean_number("3万元"), None);
         let g = guess_type("预算", &v(&["3万元", "5万元"]));
@@ -788,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn 不换行空格要去掉() {
+    fn non_breaking_space_stripped() {
         assert_eq!(trim_cell("\u{00a0}甲\u{00a0}"), "甲");
         assert_eq!(trim_cell("  乙  "), "乙");
     }
@@ -796,21 +796,21 @@ mod tests {
     // ---------- 兜底 ----------
 
     #[test]
-    fn 空列默认文本且标注低置信() {
+    fn empty_column_defaults_text_low_confidence() {
         let g = guess_type("备注", &v(&[]));
         assert_eq!(g.ty, T_TEXT);
         assert_eq!(g.confidence, C_LOW);
     }
 
     #[test]
-    fn 混进非数字时按文本并指出是谁() {
+    fn non_numeric_mixed_text_and_names_offender() {
         let g = guess_type("数量", &v(&["3", "待定", "5"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
         assert!(g.reason.contains("待定"), "要指出让这一列当不成数字的值：{}", g.reason);
     }
 
     #[test]
-    fn 只要有一个像编号整列就按文本() {
+    fn one_id_like_value_makes_column_text() {
         // 不能"大部分是数字就存数字" —— 那一行的编号会被毁掉
         let g = guess_type("单据", &v(&["123", "456", "007"]));
         assert_eq!(g.ty, T_TEXT, "{}", g.reason);
@@ -819,7 +819,7 @@ mod tests {
     // ---------- 表头行 ----------
 
     #[test]
-    fn 表头在第三行时能认出来() {
+    fn header_on_third_row_recognized() {
         let rows = vec![
             v(&["2026 年度报销台账"]),                       // 标题行
             v(&["制表：财务部"]),                             // 说明行
@@ -834,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn 表头就在第一行时也认得出() {
+    fn header_on_first_row_recognized() {
         let rows = vec![
             v(&["事项", "金额"]),
             v(&["打车", "12.34"]),
@@ -845,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn 空表返回第零行且低置信() {
+    fn empty_table_zero_row_low_confidence() {
         let (idx, conf, _) = suggest_header_row(&[]);
         assert_eq!(idx, 0);
         assert_eq!(conf, C_LOW);
@@ -854,20 +854,20 @@ mod tests {
     // ---------- 列名 ----------
 
     #[test]
-    fn 空表头按原表序号补名() {
+    fn empty_header_named_by_original_index() {
         let names = suggest_names(&v(&["事项", "", "金额", ""]));
         assert_eq!(names, v(&["事项", "列2", "金额", "列4"]));
     }
 
     #[test]
-    fn 重名列名加后缀() {
+    fn duplicate_column_names_get_suffix() {
         let names = suggest_names(&v(&["金额", "金额", "金额"]));
         assert_eq!(names, v(&["金额", "金额2", "金额3"]));
         assert_eq!(names.len(), 3);
     }
 
     #[test]
-    fn 名字里的空白会被去掉() {
+    fn whitespace_in_names_stripped() {
         let names = suggest_names(&v(&["  事项  ", "金额\u{00a0}"]));
         assert_eq!(names, v(&["事项", "金额"]));
     }

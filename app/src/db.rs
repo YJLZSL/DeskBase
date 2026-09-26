@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn 建笔记后能读回() {
+    fn note_read_back_after_create() {
         let (_d, mut db) = fresh("basic");
         let n = create_note(&mut db, "测试").unwrap();
         assert_eq!(n.title, "测试");
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn 保存后内容与时间戳都更新() {
+    fn save_updates_content_and_timestamp() {
         let (_d, mut db) = fresh("save");
         let n = create_note(&mut db, "").unwrap();
         let ts = save_note(&mut db, &n.id, "标题", "正文").unwrap();
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn 删除是软删除_列表里不再出现但记录还在() {
+    fn delete_is_soft_list_hides_record_remains() {
         let (_d, mut db) = fresh("del");
         let n = create_note(&mut db, "待删").unwrap();
         delete_note(&mut db, &n.id).unwrap();
@@ -213,13 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn 保存不存在的笔记要报错而不是静默成功() {
+    fn saving_missing_note_errors_not_silent() {
         let (_d, mut db) = fresh("missing");
         assert!(save_note(&mut db, "不存在", "x", "y").is_err());
     }
 
     #[test]
-    fn 中文标题与内容能正确往返() {
+    fn chinese_title_and_content_roundtrip() {
         let (_d, mut db) = fresh("cjk");
         let n = create_note(&mut db, "会议记录").unwrap();
         save_note(&mut db, &n.id, "会议记录", "讨论了「宣纸主题」的落地。\n第二行。")
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn 列表摘要会把换行压成空格并截断() {
+    fn list_excerpt_flattens_newlines_and_truncates() {
         let (_d, mut db) = fresh("excerpt");
         let n = create_note(&mut db, "带正文").unwrap();
         let long = "第一行\n第二行\r\n".to_string() + &"很长".repeat(200);
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn 空笔记的摘要为空串而不是缺失() {
+    fn empty_note_excerpt_is_empty_string() {
         let (_d, mut db) = fresh("emptyex");
         create_note(&mut db, "空").unwrap();
         let list = list_notes(&db).unwrap();
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn 笔记在重开后仍在() {
+    fn note_survives_reopen() {
         let (d, mut db) = fresh("persist");
         let n = create_note(&mut db, "持久").unwrap();
         save_note(&mut db, &n.id, "持久", "内容").unwrap();
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn 数据目录不落在程序目录内() {
+    fn data_dir_not_inside_program_dir() {
         // 覆盖 exe / 解压新便携包更新时，数据不能被一起替换掉
         let data_dir = default_data_dir();
         let exe = std::env::current_exe().expect("拿不到当前 exe 路径");

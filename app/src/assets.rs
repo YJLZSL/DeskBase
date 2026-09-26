@@ -235,14 +235,14 @@ mod tests {
     }
 
     #[test]
-    fn 首页与三份文本资源都在表里() {
+    fn index_and_three_text_assets_registered() {
         for p in ["/", "/index.html", "/theme.css", "/app.js"] {
             assert_eq!(get(p).status(), StatusCode::OK, "{p} 应当可服务");
         }
     }
 
     #[test]
-    fn 字体是可服务的合法_woff2() {
+    fn font_is_servable_valid_woff2() {
         let r = get("/fonts/smiley-sans-oblique.woff2");
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "font/woff2");
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn 未登记路径一律_404_不做文件系统访问() {
+    fn unregistered_path_404_without_fs_access() {
         for p in [
             "/../Cargo.toml",
             "/../../Cargo.toml",
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn 非_get_方法被拒绝() {
+    fn non_get_method_rejected() {
         let r = handle(
             Request::builder()
                 .method("POST")
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn 界面引用到的每个品牌图标都在资源表里() {
+    fn every_brand_icon_used_by_ui_registered() {
         // UI 里出现过的品牌资源路径，漏登记就会变成破图 —— 这个坑踩过一次
         // （关于页写的是 icon-128.png，但资源表里只有 64 和 svg）
         let ui_html = std::str::from_utf8(include_bytes!("../ui/index.html")).unwrap();
@@ -303,7 +303,7 @@ mod tests {
     ///
     /// 所以这里把所有**站内**引用（相对路径、非 http/data/# ）都扫一遍。
     #[test]
-    fn 首页引用的每个脚本与样式都能被服务() {
+    fn every_script_and_style_used_by_index_servable() {
         let html = std::str::from_utf8(include_bytes!("../ui/index.html")).unwrap();
 
         // 取出 src="..." 与 href="..." 的值
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn 许可文本随字体一起分发_可以不在资源表里但必须在仓库里() {
+    fn license_text_shipped_with_font_may_skip_table_not_repo() {
         // OFL 要求许可随字体分发。资源表不服务它（UI 不需要），
         // 但文件必须存在，由 tools/fonts/fetch-fonts.cjs 校验。
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

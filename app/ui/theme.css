@@ -1304,6 +1304,46 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
 .note-preview pre code { padding: 0; background: none; }
 .note-preview a { color: var(--accent, var(--ink-1)); }
 
+/* 截图历史：网格缩略图。缩略图用固定高度 + object-fit，
+   这样长图和普通截图混在一起也不会把网格撑得参差不齐。 */
+.shot-history {
+  max-width: min(900px, 92vw);
+}
+.shot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sp-3);
+  max-height: 60vh;
+  overflow: auto;
+  padding: var(--sp-2) 0;
+}
+.shot-item {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--sp-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-md, 8px);
+  background: var(--card);
+}
+.shot-item img {
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  object-position: top;
+  border-radius: 4px;
+  background: var(--bg);
+}
+.shot-item figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-aux);
+}
+.shot-item figcaption .n { color: var(--ink-2); }
+.shot-item figcaption .m { color: var(--ink-3); }
+
 .settings-nav {
   position: sticky;
   top: 0;
