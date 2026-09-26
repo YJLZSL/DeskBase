@@ -1274,6 +1274,75 @@
     },
   });
 
+  // 命令面板：把"设置页里那一整张教程卡片"变成搜得到的入口。
+  //
+  // 为什么值得单做（调研 `reference/31` 点的就是这个）：教程**已经有了**，
+  // 但入口只有"设置页 → 滚到底"这一条路 —— 而命令面板（Ctrl+K）才是这个程序里
+  // 找东西的正确入口。**发现不了的功能等于没做**，尤其对不熟电脑的办公人员。
+  //
+  // 顺带把"去设置页"这件事也给了个入口：以前只能点左侧导航，而命令面板更快。
+  window.DeskBasePalette.register([
+    {
+      id: "help.tutorial",
+      title: "办公套件使用教程",
+      group: "帮助",
+      py: "bangong taozhuang shiyong jiaocheng tutorial help jiaocheng",
+      shortcut: "",
+      run: () => window.DeskBaseApp && window.DeskBaseApp.gotoCard("settings", "db-help-card"),
+    },
+    {
+      id: "help.settings",
+      title: "打开设置",
+      group: "帮助",
+      py: "dakai shezhi settings preferences",
+      shortcut: "",
+      run: () => window.DeskBaseApp && window.DeskBaseApp.gotoCard("settings"),
+    },
+    {
+      id: "help.whereIsData",
+      title: "我的数据存在哪（打开数据目录）",
+      group: "帮助",
+      py: "shuju cunzai na mulu datadir open folder beifen",
+      shortcut: "",
+      run: () => window.DeskBaseApp && window.DeskBaseApp.gotoCard("settings", "card-install"),
+    },
+  ]);
+
+  // 打印当前表格 → 生成打印友好的 A4 视图，然后用浏览器打开。
+  //
+  // 与「导出当前表格」的分工（文案里也要说清，否则用户以为两件事重复）：
+  //   导出 Excel → 给"还要继续拿 Excel 处理"的人；
+  //   打印视图   → 给"打出来贴墙上 / 发给不看电子表格的人"的人（A4 横向、表头每页重复）。
+  //
+  // 为什么要"生成 + 打开"两步而不是自动弹打印对话框：**打印对话框属于用户**，
+  // 由程序弹出来等于替用户按了按钮。给他一个打开好的页面，Ctrl+P 是他自己的决定。
+  document.getElementById("btn-db-print").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-db-print");
+    if (!state.current) {
+      toast("先打开一张表再打印（左栏点一下表名）", "error");
+      return;
+    }
+    const name = state.current;
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = "生成中…";
+    try {
+      const r = await call("report.exportTable", { name });
+      toast("已生成打印视图：" + r.count + " 行，正在用浏览器打开…");
+      // 打开失败**不算整体失败** —— 文件已经生成好了，如实说文件在哪就行
+      try {
+        await call("app.openExport", { path: r.path });
+      } catch (e2) {
+        toast("打印视图已生成，但没能自动打开：" + r.path, "error");
+      }
+    } catch (e) {
+      toast("生成打印视图失败：" + errText(e), "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+
   // 单表导出为 Excel（v1.10.0）。
   //
   // 与上面「导出全部数据」的分工，必须在文案里说清，否则用户会以为它们是两件重复的事：

@@ -16,9 +16,12 @@
    （历史：早先塞进 .db-empty 时，那个类自带 text-align:center，
    导致正文被推到容器右半边、越出侧栏。所以这里所有对齐都显式写。） */
 .db-onboard {
-  /* 限宽 + 居中：让这块读起来像一页说明，而不是一行拉到边的告示 */
+  /* 限宽 + 居中：让这块读起来像一页说明，而不是一行拉到边的告示。
+     居中**不再靠 `margin: auto`** —— 主区域的空态现在是 flex 居中容器
+     （`database.css` 的 `.db-pane[data-onboard="1"]`），
+     两者都写会让这个块被"再居中一次"而垂直上出现偏移。
+     所以这里只保留限宽与内边距，位置交给容器决定。 */
   max-width: 46ch;
-  margin: auto;
   padding: var(--sp-4);
   text-align: left;
 }

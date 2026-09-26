@@ -50,15 +50,42 @@ pub struct AiSettings {
 
 impl Default for AiSettings {
     fn default() -> Self {
+        // ⚠️ 默认值里 provider 与 base_url **必须指向同一家**。
+        //
+        // 这里曾经是 `provider: "deepseek"` + `base_url: PROVIDERS[0].2`（本机 Ollama）——
+        // 一个真实的首启缺陷：用户第一次打开设置页，看到的是「服务商：深度求索 DeepSeek」
+        // 配着「接口地址：http://127.0.0.1:11434/v1」。
+        // 后果不是"看着别扭"：他会以为自己配的是云端 DeepSeek，
+        // **然后把自己的 API Key 填进一个指向本机的地址**；更糟的是他可能据此
+        // 以为"数据发给 DeepSeek 了"，而实际请求去哪完全取决于那个地址。
+        //
+        // 现在的做法：**以 provider 为准去清单里取它自己的默认地址**，
+        // 而不是按数组下标取（下标会随清单顺序变化而含义漂移 —— 这正是当初出错的机制）。
         Self {
             enabled: false,
-            provider: "deepseek".into(),
-            // PROVIDERS[0] 现在是本机 Ollama —— ADR-0007「AI 默认本地推理」
-            base_url: PROVIDERS[0].2.into(),
+            provider: DEFAULT_PROVIDER.into(),
+            base_url: default_base_url(DEFAULT_PROVIDER),
             model: String::new(),
             api_key: String::new(),
         }
     }
+}
+
+/// 首次使用时的默认服务商。
+///
+/// 选本机项（而不是某家云厂商）：ADR-0007 定的是「AI 默认本地推理」，
+/// 而 ADR-0017 第 1 条明确「本机没有可用模型时 AI 不可用，**不许静默降级到云端**」。
+/// 默认指向本机，用户没配之前什么都不会发出去。
+pub const DEFAULT_PROVIDER: &str = "ollama";
+
+/// 取某家厂商的默认 endpoint。找不到就返回空串（让"没填地址"在界面上如实显示，
+/// 而不是偷偷给一个别的厂商的地址）。
+pub fn default_base_url(provider: &str) -> String {
+    PROVIDERS
+        .iter()
+        .find(|(id, _, _, _)| *id == provider)
+        .map(|(_, _, base, _)| (*base).to_string())
+        .unwrap_or_default()
 }
 
 fn get(db: &Db, key: &str) -> Option<String> {
@@ -208,6 +235,41 @@ mod tests {
         let s = load(&db());
         assert!(!s.enabled, "AI 默认必须是关的");
         assert!(s.api_key.is_empty(), "默认不该有任何凭据");
+    }
+
+    /// ⭐ 默认的 provider 与 base_url **必须指向同一家**。
+    ///
+    /// 这条钉的是一个真实发生过的首启缺陷：默认曾是「DeepSeek + 本机 Ollama 的地址」
+    /// （因为 base_url 按**数组下标**取，而清单顺序变过）。
+    /// 那个组合会让用户以为自己在配云端服务，并把 Key 填进一个指向本机的地址。
+    #[test]
+    fn ai_settings_default_provider_and_endpoint_agree() {
+        let s = load(&db());
+        let expect = default_base_url(&s.provider);
+        assert!(
+            !expect.is_empty(),
+            "默认服务商「{}」必须在厂商清单里，否则地址无从取起",
+            s.provider
+        );
+        assert_eq!(
+            s.base_url, expect,
+            "默认地址必须属于默认服务商「{}」—— 否则用户看到的是「A 厂商 + B 家地址」",
+            s.provider
+        );
+        // 默认必须是**本机**项：ADR-0007 默认本地推理；没配好之前不该把任何东西发出去。
+        assert!(
+            provider_is_local(&s.provider, &s.base_url),
+            "默认服务商应当是本机的（默认 {}，实际 {}）",
+            DEFAULT_PROVIDER,
+            s.provider
+        );
+        // 清单里**每一家**都要能取到自己的默认地址（不是只有默认那一家对）
+        for (id, _, _, _) in PROVIDERS.iter() {
+            assert!(
+                !default_base_url(id).is_empty(),
+                "厂商「{id}」取不到默认地址"
+            );
+        }
     }
 
     #[test]

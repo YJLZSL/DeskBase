@@ -209,46 +209,68 @@
               <span class="db-side-title">表格</span>
               <button class="btn btn-ghost db-mini" id="btn-db-refresh" title="刷新表列表" type="button">刷新</button>
             </div>
-            <button class="btn db-newtable" id="btn-db-new-table" type="button">新建表格</button>
-            <button class="btn btn-ghost db-import" id="btn-db-import" type="button"
-                    title="把 Excel / CSV 导入成一张新表（不会覆盖已有数据）">
-              从 Excel 导入
-            </button>
-            <button class="btn btn-ghost db-import" id="btn-db-backup" type="button"
-                    title="把当前数据整份备份到数据目录的 backups/ 并做完整性校验">
-              备份数据
-            </button>
-            <!-- 一键全量导出：把所有数据整成通用格式（.csv / .md）+ 一份人类可读的
-                 README。它兑现的是"不锁定用户"——就算 DeskBase 将来没有了，
-                 这个文件夹依然打得开、看得懂。 -->
-            <button class="btn btn-ghost db-import" id="btn-export-all" type="button"
-                    title="把所有表格与笔记导出成通用格式（CSV / Markdown）到 exports/，并附一份说明">
-              导出全部数据
-            </button>
-            <!-- 单表导出为 Excel（v1.10.0）：用户每天真正要做的动作是
-                 "把**当前这张表**给别人 / 打出来"，而在此之前唯一的出口是
-                 "导出全部数据"（全库 CSV），还得自己去目录里翻出那一个文件。
-                 grid.js 里那个写着"导出"的分节一直是空的 —— 这个按钮补的就是它。 -->
-            <button class="btn btn-ghost db-import" id="btn-db-export" type="button"
-                    title="把当前这张表导出成 .xlsx（到一个新文件，绝不覆盖已有文件）">
-              导出当前表格
-            </button>
-            <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
-                    title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
-              表结构
-            </button>
-            <button class="btn btn-ghost db-import" id="btn-db-relations" type="button"
-                    title="共通字段（改一处，所有引用它的表一起变）与同步规则（改一张表，关联表跟着更新，可随时关掉）">
-              关系与同步
-            </button>
-            <button class="btn btn-ghost db-import" id="btn-db-views" type="button"
-                    title="把当前的筛选、排序、分组存成一个命名视图，以后一键回到这个视角（替代写查询语句）">
-              视图
-            </button>
-            <button class="btn btn-ghost db-import" id="btn-db-history" type="button"
-                    title="最近改了什么、删了什么，都能在这里退回去（最多留 500 条）">
-              历史
-            </button>
+
+            <!-- 侧栏按钮**必须分组**（2026-09-27 改）。
+                 之前这里是 8 个按钮一条直列、没有任何标题：截图上它们占满整列、
+                 彼此间距一样，用户根本分不清"新建表格"和"导出当前表格"哪个是主动作。
+                 分组之后每一组只有一个主题，主动作（新建 / 导入）留在最上面。 -->
+            <div class="db-side-group">
+              <h2 class="db-side-group-title">开始</h2>
+              <button class="btn db-newtable" id="btn-db-new-table" type="button">新建表格</button>
+              <button class="btn btn-ghost db-import" id="btn-db-import" type="button"
+                      title="把 Excel / CSV 导入成一张新表（不会覆盖已有数据）">
+                从 Excel 导入
+              </button>
+            </div>
+
+            <div class="db-side-group">
+              <h2 class="db-side-group-title">拿出去</h2>
+              <!-- 单表导出为 Excel（v1.10.0）：用户每天真正要做的动作是
+                   "把**当前这张表**给别人 / 打出来"，而在此之前唯一的出口是
+                   "导出全部数据"（全库 CSV），还得自己去目录里翻出那一个文件。 -->
+              <button class="btn btn-ghost db-import" id="btn-db-export" type="button"
+                      title="把当前这张表导出成 .xlsx（到一个新文件，绝不覆盖已有文件）">
+                导出当前表格
+              </button>
+              <!-- 打印视图（v1.10.0）：导出 Excel 是给"继续用它处理"的人；
+                   打印视图是给"打出来贴墙上 / 发给不看电子表格的人"的人。 -->
+              <button class="btn btn-ghost db-import" id="btn-db-print" type="button"
+                      title="生成打印友好的 A4 视图（用浏览器打开后 Ctrl+P 打印或存成 PDF）">
+                打印当前表格
+              </button>
+              <!-- 一键全量导出：把所有数据整成通用格式（.csv / .md）+ 一份人类可读的
+                   README。它兑现的是"不锁定用户"——就算 DeskBase 将来没有了，
+                   这个文件夹依然打得开、看得懂。 -->
+              <button class="btn btn-ghost db-import" id="btn-export-all" type="button"
+                      title="把所有表格与笔记导出成通用格式（CSV / Markdown）到 exports/，并附一份说明">
+                导出全部数据
+              </button>
+              <button class="btn btn-ghost db-import" id="btn-db-backup" type="button"
+                      title="把当前数据整份备份到数据目录的 backups/ 并做完整性校验">
+                备份数据
+              </button>
+            </div>
+
+            <div class="db-side-group">
+              <h2 class="db-side-group-title">管理</h2>
+              <button class="btn btn-ghost db-import" id="btn-db-schema" type="button"
+                      title="查看并编辑当前表的结构：改名、加列、删列、改表注释">
+                表结构
+              </button>
+              <button class="btn btn-ghost db-import" id="btn-db-relations" type="button"
+                      title="共通字段（改一处，所有引用它的表一起变）与同步规则（改一张表，关联表跟着更新，可随时关掉）">
+                关系与同步
+              </button>
+              <button class="btn btn-ghost db-import" id="btn-db-views" type="button"
+                      title="把当前的筛选、排序、分组存成一个命名视图，以后一键回到这个视角（替代写查询语句）">
+                视图
+              </button>
+              <button class="btn btn-ghost db-import" id="btn-db-history" type="button"
+                      title="最近改了什么、删了什么，都能在这里退回去（最多留 500 条）">
+                历史
+              </button>
+            </div>
+
             <div class="db-table-list" id="db-table-list"></div>
             <div class="db-side-foot">
               <div class="db-foot-line">数据目录</div>
@@ -289,8 +311,14 @@
             </div>
             <div class="field">
               <label for="ai-provider">服务商</label>
-              <select id="ai-provider" class="select"></select>
-              <span class="ico-wrap" id="ai-provider-icon" title=""></span>
+              <!-- 图标必须与下拉**同一行**。它原来跟在下拉后面各占一行 ——
+                   截图上服务商下拉占一行、"本机/云端"图标孤零零掉到下一行，
+                   而那个图标正是"数据出不出本机"的唯一视觉线索，
+                   掉行之后它看起来像个别的东西。包一层 .field-inline 让它们同行。 -->
+              <div class="field-inline">
+                <select id="ai-provider" class="select"></select>
+                <span class="ico-wrap" id="ai-provider-icon" title=""></span>
+              </div>
               <span class="hint" id="ai-cloud-warn" hidden>
                 云端服务：发给它的内容会离开本机。
               </span>
@@ -484,6 +512,24 @@
             <div class="field">
               <span>当前状态</span>
               <div class="hint" id="install-state">正在读取…</div>
+            </div>
+            <div class="field">
+              <span>装完之后</span>
+              <div class="hint">
+                <b>开始菜单</b>里会出现「DeskBase 桌库」，用它启动即可。<br />
+                安装目录：<code class="mono" id="install-dir">—</code>
+              </div>
+            </div>
+            <!-- 桌面快捷方式默认**不勾**：桌面是用户自己的空间，
+                 程序不该不问就往上面放图标。开始菜单那条是必须的（不然装完没入口）。 -->
+            <div class="field">
+              <span>选项</span>
+              <div class="hint">
+                <label class="check-line">
+                  <input type="checkbox" id="install-desktop" />
+                  同时在桌面上放一个快捷方式
+                </label>
+              </div>
             </div>
             <div class="db-dialog-actions">
               <button class="btn btn-primary" id="btn-install" type="button">安装到本机</button>

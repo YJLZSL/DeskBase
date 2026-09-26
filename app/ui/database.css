@@ -113,6 +113,37 @@
   gap: var(--sp-2);
 }
 
+/* ---------- 侧栏分组 ----------
+   为什么分组：8 个按钮原本是一条直列、没有标题，于是"新建表格"与"导出当前表格"
+   在视觉上完全同权 —— 截图上它们占满整列、间距一致，用户没有"主动作在哪"的线索。
+   分组之后每组只有一个主题，间距也从"按钮之间"降到"组内按钮之间"。
+
+   组的间距（--sp-4）**大于**组内间距（--sp-1），这是让分组看起来成立的关键：
+   两个间距一样时，眼睛读到的还是一条长列。 */
+.db-side-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  /* 与相邻组拉开距离：上面一条细线 + 上内边距，组成"分节"的样子 */
+  padding-top: var(--sp-3);
+  border-top: var(--line-w) solid var(--line);
+}
+.db-side-group:first-of-type {
+  /* 第一组紧跟在标题栏后面，不需要分节线（那就是标题栏自己的下边界） */
+  padding-top: 0;
+  border-top: none;
+}
+
+.db-side-group-title {
+  /* h2 只用来分组，不该有 h2 的体量 —— 字号与颜色都按"小标签"来 */
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-aux);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-3, var(--ink-2));
+  text-transform: none;
+}
+
 .db-side-title {
   font-family: var(--font-heading);
   font-size: var(--fs-group);
@@ -290,6 +321,17 @@
 }
 .db-pane[hidden] {
   display: none;
+}
+
+/* 空态（还没有表格）时把引导块**竖着也居中**。
+   为什么需要单独一条：`.db-onboard` 自己写了 `margin: auto`，那在**块级**容器里
+   只能水平居中 —— 截图上引导块贴着顶部、下面一大片空白，看着像没画完。
+   这里只在 `data-onboard="1"` 时把它变成 flex 居中容器（那个标记由 db-onboard.js
+   在注入时打上），所以**有表格时完全不受影响** —— 网格照旧撑满。 */
+.db-pane[data-onboard="1"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* ---------- 建表 / 删表对话框 ----------

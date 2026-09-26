@@ -26,6 +26,72 @@ pub struct Report {
     pub bytes: u64,
 }
 
+/// 一页的行数。**必须 ≤ `model::MAX_PAGE_LIMIT`（500）** —— 后端会把更大的 limit
+/// 悄悄夹到这个上限，而"悄悄"正是下面那个 bug 的成因。
+pub const EXPORT_PAGE: usize = 500;
+
+/// 取**整张表**（逐页翻到没有下一页为止），返回 `(列名, 行)`。
+///
+/// ## 为什么必须有这个函数（这不是重构，是修 bug）
+///
+/// 单表导出一开始写的是 `db.page_rows(table, None, false, None, usize::MAX)`，
+/// 想当然地以为"传 usize::MAX 就是全部"。但 `page_rows` 会把 limit
+/// **夹到 `MAX_PAGE_LIMIT`（500）**（`model/mod.rs:1663`）——
+/// 于是**超过 500 行的表会被静默截断**：导出的文件里只有前 500 行，
+/// 没有报错、没有提示，用户拿到一个"看起来完整"的残缺文件。
+///
+/// 这是数据丢失类缺陷里最坏的一种：**用户不会去看第 501 行在不在**。
+/// 而它是一行代码就能写出来的错误 —— 所以修法不是"改那一行"，
+/// 而是**把"取整张表"变成一个有名字、有测试、只能有一种正确实现的函数**。
+///
+/// 实现按游标翻页：`finish_page` 靠"多取一行"判断 `has_more`，
+/// 所以翻到 `has_more == false` 就是真的到底了。
+pub fn read_all_rows(db: &Db, table: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    let mut headers: Vec<String> = Vec::new();
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // 上限只作为"防死循环"的护栏（游标实现坏了时不要转不出来），不是产品限制。
+    // 200 万行远超本项目任何真实用法，正常表格永远碰不到。
+    const HARD_STOP: usize = 2_000_000;
+    loop {
+        let page = db.page_rows(table, None, false, cursor.as_deref(), EXPORT_PAGE)?;
+        if headers.is_empty() {
+            // 第 0 列是 rowid（内部行号），导出去对用户没有意义 —— 与既有导出行为一致
+            headers = page.columns.iter().skip(1).cloned().collect();
+        }
+        if page.rows.is_empty() {
+            break;
+        }
+        for row in &page.rows {
+            out.push(
+                row.iter()
+                    .skip(1)
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => String::new(),
+                        other => other.to_string(),
+                    })
+                    .collect(),
+            );
+        }
+        if out.len() >= HARD_STOP {
+            return Err(format!(
+                "「{table}」超过 {HARD_STOP} 行，导出已停下（这不是产品限制，是防死循环的护栏）"
+            ));
+        }
+        if !page.has_more {
+            break;
+        }
+        let Some(next) = page.next_cursor.clone() else {
+            // has_more 为真却没有游标 = 后端契约被破坏。**宁可报错也不要静默截断** ——
+            // 截断过一次的教训就在上面的文档注释里。
+            return Err(format!("「{table}」翻页没给出游标，为避免少导数据已中止"));
+        };
+        cursor = Some(next);
+    }
+    Ok((headers, out))
+}
+
 /// 把标题之类变成能当文件名用的东西。
 ///
 /// Windows 文件名不许有 `/ \ : * ? " < > |`，而笔记标题里什么都可能有
@@ -49,8 +115,7 @@ pub fn safe_name(s: &str) -> String {
     }
 }
 
-fn csv_line(cells: &[String]) -> String {
-    cells
+fn csv_line(cells: &[String]) -> String {    cells
         .iter()
         .map(|c| {
             if c.contains(',') || c.contains('"') || c.contains('\n') || c.contains('\r') {
@@ -271,4 +336,103 @@ checksums.sha256 每个文件的校验和 —— 用来确认文件没有损坏�
         files: written.len() + 2,
         bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ColType, ColumnDef, TableSpec};
+
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn tmp_db() -> Db {
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("dkb_expall_{}_{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Db::open(&d).unwrap()
+    }
+
+    fn spec(name: &str, cols: &[(&str, ColType)]) -> TableSpec {
+        TableSpec {
+            name: name.to_string(),
+            comment: None,
+            columns: cols
+                .iter()
+                .map(|(n, t)| ColumnDef {
+                    name: n.to_string(),
+                    ty: *t,
+                    not_null: false,
+                    default: None,
+                    primary_key: false,
+                    comment: None,
+                    shared: None,
+                    link: None,
+                    lookup: None,
+                    rollup: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// ⭐ 这条测试是为了钉住一个**真实发生过的静默数据丢失**。
+    ///
+    /// 背景：单表导出原先调 `page_rows(..., usize::MAX)` 取全部，
+    /// 而 `page_rows` 会把 limit 夹到 `MAX_PAGE_LIMIT = 500` ——
+    /// **超过 500 行的表只会导出前 500 行，且不报错**。
+    /// 本测试用 **1200 行**（刻意大于 500 且不是 500 的整数倍）验证：
+    /// 行数一条不少，而且**最后一行也在**（只数行数的话，
+    /// "少的是最后一行"这种错也可能被行数凑巧掩盖，所以两头都验）。
+    #[test]
+    fn read_all_rows_returns_every_row_past_the_page_limit() {
+        let mut db = tmp_db();
+        db.create_table(&spec("台账", &[("编号", ColType::Text)])).unwrap();
+        const TOTAL: usize = 1200;
+        // 分批插入：一次插 1200 行会让测试慢，而且这里要验的是"读"，不是"写"
+        let mut i = 0usize;
+        while i < TOTAL {
+            let batch: Vec<Vec<Option<String>>> = (i..(i + 200).min(TOTAL))
+                .map(|k| vec![Some(format!("{k:06}"))])
+                .collect();
+            db.insert_rows("台账", &["编号".to_string()], &batch).unwrap();
+            i += 200;
+        }
+
+        let (headers, rows) = read_all_rows(&db, "台账").unwrap();
+        assert_eq!(headers, vec!["编号".to_string()], "表头应当只剩数据列（rowid 跳过）");
+        assert_eq!(rows.len(), TOTAL, "1200 行的表必须导出 1200 行（曾被静默截到 500）");
+        assert_eq!(rows[0][0], "000000", "第一行要在");
+        assert_eq!(
+            rows[TOTAL - 1][0],
+            format!("{:06}", TOTAL - 1),
+            "最后一行也要在 —— 只数行数会漏掉『少的正好是尾巴』这种情况"
+        );
+        // 值不能串行/错位（翻页时游标算错最容易表现为整体位移）
+        assert_eq!(rows[500][0], "000500", "第 501 行必须是它自己（翻页边界）");
+        assert_eq!(rows[501][0], "000501", "第 502 行必须是它自己（翻页边界）");
+    }
+
+    /// 空表与单列表要能正常返回，而不是报错或死循环。
+    #[test]
+    fn read_all_rows_handles_empty_and_single_row() {
+        let mut db = tmp_db();
+        db.create_table(&spec("空表", &[("名称", ColType::Text)])).unwrap();
+        let (h, r) = read_all_rows(&db, "空表").unwrap();
+        assert_eq!(h, vec!["名称".to_string()]);
+        assert!(r.is_empty(), "空表应当是 0 行，不是报错");
+
+        db.insert_rows("空表", &["名称".to_string()], &[vec![Some("甲".into())]])
+            .unwrap();
+        let (_, r2) = read_all_rows(&db, "空表").unwrap();
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r2[0][0], "甲");
+    }
+
+    /// 不存在的表要报错（而不是返回空表让人以为"这张表是空的"）。
+    #[test]
+    fn read_all_rows_rejects_unknown_table() {
+        let db = tmp_db();
+        let e = read_all_rows(&db, "没有这张表").unwrap_err();
+        assert!(!e.is_empty(), "要给出原因");
+    }
 }

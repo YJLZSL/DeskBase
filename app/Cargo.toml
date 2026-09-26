@@ -1,6 +1,6 @@
 [package]
 name = "deskbase"
-version = "1.10.0"
+version = "1.11.0"
 edition = "2021"
 description = "DeskBase 桌库 —— 本地优先、隐私优先的办公工具箱，内置轻量数据表引擎（多表 + 关联 + 协同更新，无 SQL）"
 license = "Apache-2.0"
@@ -72,6 +72,18 @@ windows = { version = "0.62", features = [
     "Win32_System_Registry",
     # 卸载时把"正在运行的自己"标记为重启后删除（MoveFileExW）
     "Win32_Storage_FileSystem",
+    # 安装版要建 .lnk 快捷方式（开始菜单 + 可选桌面，见 src/installer.rs）。
+    # 为什么走 COM 的 IShellLink/IPersistFile 而不是自己拼 .lnk 的二进制：
+    # `.lnk` 是带 CLSID、链路跟踪信息与 LinkTargetIDList 的复合文档格式，
+    # 手写等于赌一个会随系统版本变化的格式；系统自己那套实现只要几十行胶水。
+    # 体积代价实测约 +1.5 KB（opt-level=z + LTO 下同配置探针：109568 → 111104 字节），
+    # 当前 exe 约 5.1 MB、阈值 10 MB，放得下。
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
 ] }
 
 # 原生文件选择框（导入 Excel、选备份目录等）。

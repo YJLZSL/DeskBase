@@ -21,6 +21,9 @@ mod csv_import;
 mod db;
 mod excel_import;
 mod export_all;
+// 表格的打印 / 报表出口（自包含 HTML）。与 export_all 同属"数据出口"，
+// 区别在产物是**给人看、给人打印**的，不是给别的软件吃的中间格式。
+mod report;
 mod recovery;
 mod import_pipeline;
 mod workspace;
@@ -1061,31 +1064,18 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
             }
             // 一次锁里把数据取完（取完就放锁）—— 导出大表可能要几秒，
             // 但**不能**握着数据库锁去写文件：那期间界面所有操作都会卡住。
+            //
+            // ⚠️ 这里曾经写的是 `d.page_rows(&name, None, false, None, usize::MAX)`，
+            // 以为"传 usize::MAX 就是全部" —— 而 `page_rows` 会把 limit **夹到
+            // MAX_PAGE_LIMIT（500）**，于是**超过 500 行的表被静默截断**：
+            // 导出的 xlsx 里只有前 500 行，不报错、不提示。
+            // 现在走 `export_all::read_all_rows`（逐页翻到 has_more == false），
+            // 并有一条测试钉住"1200 行的表导出 1200 行"。
             let (headers, rows) = match state.db.lock() {
-                Ok(d) => {
-                    let page = match d.page_rows(&name, None, false, None, usize::MAX) {
-                        Ok(p) => p,
-                        Err(e) => return err(id, e),
-                    };
-                    // 跳过第 0 列（rowid）：它是内部行号，导出去对用户没有意义
-                    let headers: Vec<String> =
-                        page.columns.iter().skip(1).cloned().collect();
-                    let rows: Vec<Vec<String>> = page
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            row.iter()
-                                .skip(1)
-                                .map(|v| match v {
-                                    serde_json::Value::String(s) => s.clone(),
-                                    serde_json::Value::Null => String::new(),
-                                    other => other.to_string(),
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    (headers, rows)
-                }
+                Ok(d) => match crate::export_all::read_all_rows(&d, &name) {
+                    Ok(v) => v,
+                    Err(e) => return err(id, e),
+                },
                 Err(_) => return err(id, "数据库锁失败"),
             };
             if headers.is_empty() {
@@ -1131,6 +1121,77 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
                         }),
                     )
                 }
+                Err(e) => err(id, e),
+            }
+        }
+
+        // ---------- 单表打印视图（v1.10.0 补的另一个"接不住"） ----------
+        //
+        // 与上面 `export.table`（Excel）是两个出口，服务两类人：
+        //   · 导出 Excel  → 还要拿去做表、算数的人；
+        //   · 打印视图    → 要打出来贴墙上、或发给不看电子表格的人
+        //                   （A4 横向、表头每页重复、打印时去掉斑马纹省墨）。
+        // 策略与 `export.table` 一致：只写 `<数据目录>/exports/` 下的**新文件**、
+        // 绝不覆盖；文件名由 Rust 拼（前端传不了路径），表名过 `safe_name`。
+        // 渲染与转义全在 `report.rs`（自包含 HTML + 内联 CSS + 强制转义）。
+        "report.exportTable" => {
+            let name = req
+                .args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.trim().is_empty() {
+                return err(id, "没指定要打印哪张表");
+            }
+            let dir = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err(id, format!("创建导出目录失败：{e}"));
+            }
+            // 取数在 `report` 内部按游标分页（一页 500 行）—— 大表导出要翻很多页，
+            // 期间握着数据库锁，所以这条命令和 `export.table` 一样是"慢命令"。
+            let (path, count) = match state.db.lock() {
+                Ok(d) => match report::export_table_html(&d, &name, &dir) {
+                    Ok(v) => v,
+                    Err(e) => return err(id, e),
+                },
+                Err(_) => return err(id, "数据库锁失败"),
+            };
+            log_line(
+                &state.data_dir,
+                &format!("导出表格打印视图：{name}（{count} 行）"),
+            );
+            ok(
+                id,
+                serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "count": count,
+                    "name": name,
+                }),
+            )
+        }
+
+        // 用系统默认程序打开**导出目录里的**文件（打印视图要用它交给浏览器）。
+        //
+        // 为什么单独一条而不是复用 `xlsx.revealExport`（资源管理器里定位）：
+        // 打印视图的下一步是 Ctrl+P，用户要的是"打开它"，不是在文件夹里看见它。
+        //
+        // 路径校验与 revealExport 同一条纪律：**只允许导出目录里的文件**。
+        // 这条不能省 —— 它把"打开任意文件"缩成"打开我们刚生成的那个"。
+        "app.openExport" => {
+            let p = req.args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let exports = state.data_dir.join("exports");
+            let ok_path = std::path::Path::new(p)
+                .canonicalize()
+                .ok()
+                .zip(exports.canonicalize().ok())
+                .map(|(a, b)| a.starts_with(&b))
+                .unwrap_or(false);
+            if !ok_path {
+                return err(id, "只能打开导出目录里的文件");
+            }
+            match open_with_default_app(p) {
+                Ok(()) => ok(id, serde_json::json!({})),
                 Err(e) => err(id, e),
             }
         }
@@ -1406,10 +1467,31 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
 
         "app.install" => {
             let ver = env!("CARGO_PKG_VERSION").to_string();
-            match installer::install(&ver) {
-                Ok(dir) => {
-                    log_line(&state.data_dir, &format!("安装到本机：{dir}"));
-                    ok(id, serde_json::json!({ "dir": dir, "version": ver }))
+            // 桌面快捷方式是**用户勾的**（默认不勾）：桌面是用户自己的空间，
+            // 程序不该不问就往上面放东西。开始菜单则总是建 —— 不然装完没入口。
+            let want_desktop = req
+                .args
+                .get("desktop_shortcut")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match installer::install(&ver, want_desktop) {
+                Ok(report) => {
+                    // 日志只记目录与"建了哪些快捷方式"，不记别的
+                    log_line(
+                        &state.data_dir,
+                        &format!(
+                            "安装到本机：{}（开始菜单 ✓{}）",
+                            report.dir,
+                            if report.desktop_link.is_some() { "，桌面 ✓" } else { "" }
+                        ),
+                    );
+                    match serde_json::to_value(report) {
+                        Ok(mut v) => {
+                            v["version"] = serde_json::json!(ver);
+                            ok(id, v)
+                        }
+                        Err(e) => err(id, format!("安装结果序列化失败：{e}")),
+                    }
                 }
                 Err(e) => err(id, e),
             }
@@ -4353,6 +4435,33 @@ fn reveal_in_explorer(path: &str) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 fn reveal_in_explorer(_path: &str) -> Result<(), String> {
     Err("当前平台暂不支持定位文件".into())
+}
+
+/// 用系统默认程序打开一个**文件**（打印视图生成后要交给浏览器）。
+///
+/// 为什么用 `cmd /c start` 而不是别的：
+/// `start` 走的就是 Windows 的默认程序关联（用户装了哪个浏览器就用哪个），
+/// 而我们要的正是"让用户拿浏览器打开它、然后 Ctrl+P"。自己去找 Edge/Chrome 的
+/// 路径会把"用户的选择"替用户做掉，而且在只装了别的浏览器的机器上直接失效。
+///
+/// ⚠️ 调用方**必须**已经确认路径来自我们自己的导出目录（见 `app.openExport` 的校验）：
+/// 这个函数会执行"用默认程序打开"，等于把"打开任意文件"的能力交给调用者。
+fn open_with_default_app(path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // `start` 的第一个参数是窗口标题；不占位的话带引号的路径会被当成标题。
+    std::process::Command::new("cmd")
+        .args(["/c", "start", ""])
+        .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开失败：{e}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_with_default_app(_path: &str) -> Result<(), String> {
+    Err("当前平台暂不支持打开文件".into())
 }
 
 /// 另存为对话框的默认文件名：源文件主名 + 新扩展名以外的部分保持不变。

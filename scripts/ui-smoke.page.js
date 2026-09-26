@@ -405,6 +405,46 @@
           }
         })()
       );
+
+      // ---- 打印视图（v1.10.0）----
+      // 与「导出 Excel」是两件事：这个产出的是给人看/贴墙上的 A4 页面。
+      // 这里钉住"按钮在 + IPC 能产出文件 + 内容是自包含的 HTML"。
+      const $print = $("#btn-db-print");
+      step("数据库页有「打印当前表格」入口", !!$print, $print ? "" : "找不到 #btn-db-print");
+      const pr = await ipc("report.exportTable", { name: dbProbe });
+      step(
+        "打印视图真的写出了 .html",
+        !!(pr && /\.html$/.test(pr.path || "")),
+        pr ? pr.path : "无返回"
+      );
+      step(
+        "打印视图的行数与表对得上",
+        !!pr && pr.count === 1 && pr.name === dbProbe,
+        pr ? "count=" + pr.count + " name=" + pr.name : "无返回"
+      );
+      // 「打开导出文件」这条通道必须**只认导出目录** —— 它等于"用默认程序打开"的能力，
+      // 放开路径就等于放开"打开任意文件"。这里验的是**拒绝**那一半（执行那一半会弹浏览器，
+      // 不适合放在烟测里）。
+      step(
+        "拒绝打开导出目录之外的文件（路径闸门有效）",
+        await (async () => {
+          try {
+            await ipc("app.openExport", { path: "C:\\Windows\\notepad.exe" });
+            return false;
+          } catch (_) {
+            return true;
+          }
+        })()
+      );
+
+      // ---- 安装版：界面入口齐不齐（**不真装** —— 那会改系统状态）----
+      // 真装真卸由 `cargo test -- --ignored visible_in_registry` 验，这里只验界面接线：
+      // 按钮在、勾选项默认**不勾**（桌面是用户的地方，程序不该不问就放图标）。
+      step("设置页有「安装到本机」入口", !!$("#btn-install"));
+      step("设置页显示了安装目录", !!$("#install-dir"));
+      const $desk = $("#install-desktop");
+      step("桌面快捷方式是勾选项且默认不勾", !!$desk && $desk.checked === false,
+        $desk ? "checked=" + $desk.checked : "找不到 #install-desktop");
     } catch (e) {
       step("单表导出接线通", false, String(e && e.message ? e.message : e));
     }

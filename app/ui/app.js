@@ -960,25 +960,33 @@
     const $in = $("#btn-install");
     const $un = $("#btn-uninstall");
     const $note = $("#install-note");
+    const $dir = $("#install-dir");
+    const $desk = $("#install-desktop");
     if (!$s) return;
     try {
       const st = await call("app.installState", {});
       if (st.installed) {
+        // 「注册表里记的版本」与「正在跑的这个」可能不是同一个 —— 装完又换了 exe
+        // 就是这种状态。**分开说**，否则用户会以为自己在跑新版本。
+        const running = st.running_from_install
+          ? "，当前就是从安装目录启动的"
+          : "，但当前这次是别的目录里的程序在跑（换过 exe？）";
         $s.textContent =
-          "已安装到本机（注册表里记的版本 " +
-          (st.version || "?") +
-          "）。安装目录：" +
-          st.dir;
+          "已安装到本机（注册表记的版本 " + (st.version || "?") + running + "）";
         $in.hidden = true;
         $un.hidden = false;
+        // 已安装时"装完之后"那一栏没意义了，直接藏掉
+        if ($desk) $desk.closest(".field").hidden = true;
       } else {
         $s.textContent = "未安装 —— 当前以便携版方式运行（没有写任何注册表）";
         $in.hidden = false;
         $un.hidden = true;
+        if ($desk) $desk.closest(".field").hidden = false;
       }
+      if ($dir) $dir.textContent = st.dir || "—";
       // 数据目录会保留这件事必须**在这里说**：用户点卸载时最担心的正是"我的东西还在吗"
       $note.textContent =
-        "安装只写当前位置（用户级，不需要管理员权限）。卸载会删掉程序文件，" +
+        "安装只写当前位置（用户级，不需要管理员权限）。卸载会删掉程序文件与快捷方式，" +
         "但会保留你的数据目录：" +
         st.data_dir;
     } catch (e) {
@@ -988,10 +996,18 @@
 
   $("#btn-install").addEventListener("click", async () => {
     const $in = $("#btn-install");
+    const $desk = $("#install-desktop");
     $in.disabled = true;
     try {
-      const r = await call("app.install", {});
-      toast("已安装到：" + r.dir + "（Windows 的「应用和功能」里能看到）");
+      const r = await call("app.install", {
+        desktop_shortcut: !!($desk && $desk.checked),
+      });
+      // 说清"装到哪、去哪找" —— 用户点完安装最关心的就是这两件事。
+      // 桌面那条按**实际结果**报：勾了但没建成时如实说，不假装成功。
+      let msg = "已装到：" + r.dir + "；开始菜单里已有「DeskBase 桌库」";
+      if (r.desktop_link) msg += "；桌面快捷方式也放好了";
+      else if (r.desktop_error) msg += "；桌面快捷方式没建成（" + r.desktop_error + "）";
+      toast(msg);
       await loadInstallState();
     } catch (e) {
       toast("安装失败：" + e.message, "error");
@@ -2242,6 +2258,36 @@
   // 周期性兜底：页面一直开着不关，也能持续保留最新工作区状态
   setInterval(reportWorkspace, 5000);
 
+  // ---------- 对外只暴露"切页 + 跳到某张卡片" ----------
+  //
+  // 为什么需要它：本文件是一个大 IIFE，`showView` 关在里面。
+  // 而命令面板（palette.js）是**独立**的 IIFE —— 它注册的每条命令只能调用自己那点东西。
+  // 于是"教程"这件事虽然设置页里有一整张卡片，**命令面板里却一条都搜不到**
+  // （调研里点的就是这个：教程没有任何入口）。暴露这两个函数之后，
+  // 任何模块都能加"跳到某页某卡"的命令，而不必各自重写一遍切页逻辑。
+  //
+  // 只暴露两个：切页与滚动。**不暴露内部状态**，也不给"改视图内容"的能力。
+  window.DeskBaseApp = {
+    showView: showView,
+    /** 切到某页，并平滑滚到某张卡片（按卡片 id） */
+    async gotoCard(view, cardId) {
+      showView(view);
+      if (!cardId) return;
+      // 等一帧：showView 刚把 data-active 改掉，卡片此刻可能还没进入布局
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const card = document.getElementById(cardId);
+      if (!card) return false;
+      const host = card.closest(".view") || document.documentElement;
+      // 与 settings 侧栏同一套留白：吸顶导航会挡住标题，所以往上留余量
+      const top = card.getBoundingClientRect().top + host.scrollTop - 56;
+      host.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+      // 落点给一次视觉确认（否则用户不知道"跳过来了没有"）
+      card.classList.add("is-flash");
+      setTimeout(() => card.classList.remove("is-flash"), 1200);
+      return true;
+    },
+  };
+
   boot();
 })();
 
@@ -2343,6 +2389,16 @@
         $base.value = s.base_url || "";
         $model.value = s.model || "";
         $key.value = s.api_key || "";
+        // ⚠️ **读完设置必须再同步一次图标**。
+        //
+        // 之前只在两处调它：`loadProviders()` 末尾（那时下拉还是第一个选项）与
+        // 用户改选下拉时。而"用已保存的设置去改下拉的值"发生在**这两次之间** ——
+        // 于是图标停在了"清单第一家"上，和实际选中的服务商不一致。
+        // 截图里就是：下拉写着「深度求索 DeepSeek」，旁边却画着一台**本机**显示器。
+        //
+        // 这个图标是"数据出不出本机"的唯一视觉线索，**它错了比没有更糟** ——
+        // 用户会据此判断自己的数据去哪了。
+        syncProviderIcon();
       } catch (e) {
         console.warn("读 AI 设置失败", e);
       }

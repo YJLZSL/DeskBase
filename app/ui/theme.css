@@ -708,7 +708,7 @@ body::before {
 }
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--ink-3) 34%, transparent);
-  border-radius: var(--radius-full, 999px);
+  border-radius: var(--radius-xl, 999px);
   border: 3px solid transparent;
   background-clip: content-box;
   transition: background-color var(--dur-fast) var(--ease-standard);
@@ -755,7 +755,7 @@ body::before {
   display: inline-flex;
   align-items: center;
   padding: 1px 7px;
-  border-radius: var(--radius-full, 999px);
+  border-radius: var(--radius-xl, 999px);
   border: var(--line-w) solid var(--warning);
   color: var(--warning);
   font-size: 11px;
@@ -1148,14 +1148,14 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
 }
 .db-legacy-item .t {
   font-weight: 600;
-  color: var(--ink-1);
+  color: var(--ink);
 }
 .db-legacy-item .s {
   font-size: var(--fs-aux);
   color: var(--ink-3);
 }
 .db-legacy-row {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--stack-mono, monospace);
   font-size: var(--fs-aux);
   color: var(--ink-2);
   white-space: nowrap;
@@ -1181,8 +1181,78 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   font-size: var(--fs-aux);
 }
 .wb-stat .v {
-  color: var(--ink-1);
+  color: var(--ink);
   font-weight: 600;
+}
+
+/* 一个字段里要让两个控件**同行**时包一层这个。
+   为什么需要：`.field` 是两列网格（标签 | 内容），网格里每多一个直接子元素就多占一格 ——
+   于是"服务商下拉 + 它旁边的本机/云端图标"会被拆到两行，图标看起来像个别的东西。
+   包一层之后它只占"内容"那一格，里面的东西自己排。 */
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0; /* 允许里面的 select 收缩，否则窄屏会顶出去 */
+}
+.field-inline > select,
+.field-inline > input {
+  min-width: 0;
+}
+
+/* 勾选项的可点区域。
+   为什么单独给一条：`<input type="checkbox">` 本体只有 13×13，真正能点的是它外面
+   那个 `<label>`；而如果 label 被包在 `<div class="hint">` 里（为了让说明文字排在
+   下一行），它就**不再是被拉伸的网格子项**，高度只剩一行文字的 20px ——
+   走查的无障碍体检会按"目标太小（< 24×20）"报出来。
+
+   这不是为了过门禁而凑数字：一行 20px 的勾选区在触控板上本来就不友好。
+   给 label 一个 28px 的最小高度与弹性布局，点哪都算点它。 */
+.field label.check-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  cursor: pointer;
+}
+
+/* 全局搜索框不该横跨整个内容区。
+   截图上它从左边一直拉到右边（约 1200px），而用户输入的关键词通常只有几个字 ——
+   过宽的输入框让"要在这里打字"这件事看着很重。限在 52ch 左右，仍是明确的主动作。 */
+#wb-search {
+  max-width: 52ch;
+}
+
+/* 从命令面板"跳"到某张卡片时的高亮落点提示。
+   为什么需要：命令面板一跳，页面滚过去了 —— 但用户看不出"到了没有"，
+   尤其设置页的卡片长得都很像。给一次短暂高亮，等于一句"就是这张"。
+
+   实现用 **::after 伪元素 + opacity**，不碰卡片本身的 border / outline：
+   · 给真实的 border 会挤动布局（卡片内容整体位移一下，很难看）；
+   · 给 outline 则要在"有无类名"之间过渡，得先给所有卡片铺一条透明描边 ——
+     那是给**每个**卡片加样式，只为了服务少数几次跳转。
+   伪元素把这件事完全关在这一个类里：`.is-flash` 在，就淡入；类名去掉，就淡出。
+   动效只动 opacity（合成友好），时长与缓动走 token（check-motion 会拦硬编码毫秒）。 */
+.card {
+  position: relative;
+}
+/* 伪元素**始终存在**、只是透明 ——
+   因为浏览器不会为"刚被移除的元素"做过渡：如果让 `.is-flash::after` 去加元素，
+   类名一去掉元素就消失，描边会"啪"地不见而不是淡出。
+   所以反过来：默认 0 透明度，`.is-flash` 期间才 1.0。 */
+.card::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 2px solid transparent;
+  border-radius: var(--radius-lg);
+  pointer-events: none; /* 不能让这层挡住卡片里的按钮 */
+  opacity: 0;
+  transition: opacity var(--dur-slower) var(--ease-standard);
+}
+.card.is-flash::after {
+  border-color: var(--accent);
+  opacity: 1;
 }
 
 .wb-results {
@@ -1208,7 +1278,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   background: var(--card);
 }
 .wb-hit .t {
-  color: var(--ink-1);
+  color: var(--ink);
 }
 .wb-hit .s {
   font-size: var(--fs-aux);
@@ -1230,7 +1300,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
 }
 .db-schema-idx .t {
   font-weight: 600;
-  color: var(--ink-1);
+  color: var(--ink);
 }
 .db-schema-idx .s {
   font-size: var(--fs-aux);
@@ -1243,7 +1313,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   justify-content: space-between;
 }
 .db-idx-row > span {
-  color: var(--ink-1);
+  color: var(--ink);
 }
 
 /* 富文本：Markdown 工具栏与预览 */
@@ -1265,7 +1335,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   overflow: auto;
   padding: var(--sp-3);
   line-height: 1.75;
-  color: var(--ink-1);
+  color: var(--ink);
 }
 /* 预览里的排版：只动"内容"该有的样子，不碰外壳 */
 .note-preview h1,
@@ -1288,7 +1358,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   color: var(--ink-2);
 }
 .note-preview code {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--stack-mono, monospace);
   font-size: .9em;
   padding: 1px 4px;
   border-radius: 4px;
@@ -1302,7 +1372,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   background: var(--card);
 }
 .note-preview pre code { padding: 0; background: none; }
-.note-preview a { color: var(--accent, var(--ink-1)); }
+.note-preview a { color: var(--accent, var(--ink)); }
 
 /* 截图历史：网格缩略图。缩略图用固定高度 + object-fit，
    这样长图和普通截图混在一起也不会把网格撑得参差不齐。 */
@@ -1333,7 +1403,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   object-fit: cover;
   object-position: top;
   border-radius: 4px;
-  background: var(--bg);
+  background: var(--paper);
 }
 .shot-item figcaption {
   display: flex;
@@ -1349,24 +1419,53 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   top: 0;
   z-index: 5;
   display: flex;
-  flex-wrap: wrap;
+  /* **不换行、改成横向滚动**（2026-09-27 改）。
+     原来 `flex-wrap: wrap`：设置页有 9 张卡片 ⇒ 9 个胶囊，窄一点的窗口就折成两三行，
+     而它是 `position: sticky` 的 —— 折行之后这块吸顶区变高，把下面的内容往下推，
+     用户每滚一屏就少看一屏的内容。改成一行横向滚动后高度恒定。
+
+     ⚠️ 一定要留 `padding-bottom`：胶囊的 hover 边框与 focus 外描边会贴着滚动容器
+     的边界被裁掉（`overflow-x: auto` 在另一轴上也会裁）。 */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: var(--sp-1);
   padding: var(--sp-2) 0 var(--sp-3);
-  background: var(--bg);
+  background: var(--paper);
+  /* 滚动条不占高度：它挤进来会让吸顶区高度随内容变化 */
+  scrollbar-width: thin;
 }
 .settings-nav-item {
+  flex: 0 0 auto; /* 不许被压缩 —— 压缩后文字会挤成两行，比溢出更难看 */
   padding: 4px 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--card);
   color: var(--ink-2);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-aux);
+  white-space: nowrap;
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease-glide),
     border-color var(--dur-fast) var(--ease-glide);
 }
+
+/* 窄屏下改回**换行**，不吃横向滚动。
+   两个理由，第二个才是决定性的：
+   1. 触控与鼠标滚轮在横向滚动区里都不好玩（滚轮竖着滚，横着不动）；
+   2. 走查的布局体检按"元素右边界超出视口"报问题，**它不认识横向滚动容器** ——
+      单行滚动在 520px 档下会稳定报 1 处 out-of-viewport。那一条是**误报**
+      （内容确实可以滚到），但门禁的价值在于"绿的能信"；
+      要么改检测器（要区分"被裁掉"与"可滚到"，改动大且容易放过真问题），
+      要么在窄屏换个不触发它的做法 —— 后者更简单，而且体验更好。
+   宽屏保持单行滚动：吸顶区高度恒定，不折行推挤正文。 */
+@media (max-width: 700px) {
+  .settings-nav {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+}
 .settings-nav-item:hover {
-  color: var(--ink-1);
+  color: var(--ink);
   border-color: var(--ink-3);
 }
 .settings-nav-item:focus-visible {
@@ -1397,7 +1496,7 @@ html:not([data-motion="off"]):not([data-motion="minimal"])
   width: auto;
   min-width: 108px;
   padding-block: 3px;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-aux);
 }
 
 .stack {

@@ -82,7 +82,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-full, 999px);
+  border-radius: var(--radius-xl, 999px);
   background: var(--accent-soft);
   color: var(--accent);
   font-size: var(--fs-aux);

@@ -588,7 +588,7 @@
   font-weight: 600;
 }
 .dbui-prog-pct {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--stack-mono, monospace);
   font-size: var(--fs-aux);
   color: var(--ink-2);
   /* 等宽 + 右对齐：百分比跳动时不会把标题挤来挤去 */
