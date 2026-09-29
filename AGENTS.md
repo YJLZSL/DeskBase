@@ -97,7 +97,7 @@ DeskBase/
 | 构建 release | `node scripts/build.cjs` |
 | 构建 debug / 构建后启动 | `node scripts/build.cjs --debug` / `--run` |
 | **测试**（唯一入口） | `node scripts/build.cjs --test` |
-| 界面烟测（真实 WebView 里真实点击，31 步） | `node scripts/build.cjs --smoke` 或 `node scripts/ui-smoke.cjs <exe>` |
+| 界面烟测（真实 WebView 里真实点击） | `node scripts/build.cjs --smoke` 或 `node scripts/ui-smoke.cjs <exe>` |
 | **端到端验收**（真实数据走完整导入链路，28 步） | `node scripts/build.cjs --e2e` 或 `node tests/e2e-import.cjs <表格文件>` |
 | **导入压力测试**（默认 1万+10万；可指定） | `node tests/stress-import.cjs --sizes 10000,100000,200000` |
 | **崩溃恢复端到端**（强杀→重启验尸→复检，三阶段） | `node tests/crash-recovery.cjs` |
