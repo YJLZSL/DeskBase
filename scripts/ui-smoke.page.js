@@ -1193,6 +1193,67 @@
     ping("✖ 未捕获异常：" + msg);
   }
 
+  // ---------- 单据页（v1.12.0）----------
+  //
+  // 为什么要给它单独加一段：这一版新加了「单据」页与四个 IPC（forms.*），
+  // 而烟测原本一个单据步骤都没有 —— **新功能不进测试，等于没验过**。
+  // 这里只验界面行为（导航能到、模板列表加载、打开模板后画布有东西、能加元素），
+  // **故意不点「打印」** —— 那会真的打开浏览器，测试不该有这种副作用。
+  {
+    const btn = document.querySelector('.nav-item[data-target="forms"]');
+    step("单据 · 导航项存在", !!btn, btn ? "" : "找不到 .nav-item[data-target=forms]");
+    if (btn) {
+      btn.click();
+      await sleep(700);
+      const view = document.querySelector('section.view[data-view="forms"]');
+      step("单据 · 视图能激活", !!(view && view.dataset.active === "true"));
+
+      // 模板列表应由 forms.papers 填出内置模板（送货单/订货单/收据/空白 A4）
+      const items = [...document.querySelectorAll("#forms-list .forms-item")];
+      step(
+        "单据 · 模板列表已加载",
+        items.length >= 4,
+        items.length + " 个模板"
+      );
+
+      if (items.length) {
+        // 内置模板点开是**复制一份**再编辑的，这里顺带确认画布真的画出来了
+        items[0].click();
+        await sleep(600);
+        const before = document.querySelectorAll("#forms-sheet .fe").length;
+        step("单据 · 打开模板后画布有元素", before > 0, before + " 个元素");
+
+        // 加一个"文字"元素，看元素数是不是 +1
+        const addBtn = [...document.querySelectorAll("#forms-props .forms-add button")].find(
+          (b) => (b.textContent || "").trim() === "文字"
+        );
+        if (addBtn) {
+          addBtn.click();
+          await sleep(400);
+          const after = document.querySelectorAll("#forms-sheet .fe").length;
+          step("单据 · 能加元素", after === before + 1, before + " → " + after);
+        } else {
+          step("单据 · 能加元素", false, "找不到「文字」按钮");
+        }
+
+        // 属性面板应该跟着选中项长出内容（选中态是编辑器的核心反馈）
+        const props = document.querySelector("#forms-props");
+        step(
+          "单据 · 属性面板有内容",
+          !!(props && props.querySelectorAll(".row").length > 0),
+          props ? props.querySelectorAll(".row").length + " 行" : "没有属性面板"
+        );
+      }
+
+      // 回到笔记页，别影响后面的步骤
+      const back = document.querySelector('.nav-item[data-target="notes"]');
+      if (back) {
+        back.click();
+        await sleep(400);
+      }
+    }
+  }
+
   // ---------- 回报（失败重试一次；仍失败就交给驱动脚本按"缺报告"处理）----------
   clearInterval(heart);
   ping("准备回报（" + report.steps.length + " 步，" + report.failures.length + " 项失败）");
