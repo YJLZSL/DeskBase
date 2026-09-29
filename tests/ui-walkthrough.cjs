@@ -353,8 +353,8 @@ const AUDIT_JS = `(() => {
         await sleep(120);
       }
     }
-    const PAGE_NAMES = { workbench: "工作台", notes: "笔记", database: "数据库", settings: "设置" };
-    const PAGES = ["workbench", "notes", "database", "settings"];
+    const PAGE_NAMES = { workbench: "工作台", notes: "笔记", database: "数据库", forms: "单据", settings: "设置" };
+    const PAGES = ["workbench", "notes", "database", "forms", "settings"];
 
     async function navTo(t) {
       await cdp.eval(`(function(){ var b = document.querySelector('.nav-item[data-target="${t}"]'); if (b) b.click(); return !!b; })()`);

@@ -309,11 +309,13 @@
   // ============================================================
   // 视图切换 + 导航滑动指示块
   // ============================================================
-  const VIEW_ORDER = ["workbench", "notes", "database", "settings"];
+  const VIEW_ORDER = ["workbench", "notes", "database", "forms", "settings"];
   const TITLES = {
     workbench: "工具",
     notes: "笔记",
     database: "表格",
+    // 单据是表格的出口：台账摆成送货单/订货单再打印（v1.12.0）
+    forms: "单据",
     settings: "设置",
   };
   let currentView = "notes";

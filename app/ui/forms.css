@@ -1,0 +1,305 @@
+/* ============================================================
+   DeskBase 单据编辑器（forms.js）
+   ============================================================
+   一句话设计原则：**画布上的东西，打出来必须一模一样。**
+   所以画布用毫米排版、白底黑字、不用主题色 —— 屏幕上看到的
+   就是打印机出来的，不靠"预览大概是这样"糊弄。
+
+   整体布局：左（模板列表）｜中（画布）｜右（属性），
+   与"表格"页同构，用户不用重新学。
+   ============================================================ */
+
+.formswrap {
+  height: 100%;
+  display: grid;
+  grid-template-columns: clamp(200px, 18vw, 260px) minmax(0, 1fr);
+  gap: var(--sp-4);
+  min-height: 0;
+}
+
+/* ---------- 左栏：模板列表 ---------- */
+.forms-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sp-3);
+  background: var(--card);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+.forms-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.forms-side-title {
+  font-size: var(--fs-sub);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.forms-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.forms-group {
+  margin: var(--sp-2) 0 4px;
+  font-size: var(--fs-aux);
+  color: var(--ink-3);
+}
+
+.forms-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: var(--fs-sub);
+  color: var(--ink);
+  background: transparent;
+  border: var(--line-w) solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  /* 只过渡颜色与位移，不碰布局属性（check-motion 会把关） */
+  transition: background var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-glide);
+}
+
+.forms-item:hover {
+  background: var(--paper-2);
+  transform: translateX(2px);
+}
+
+.forms-item[aria-current="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.forms-item .tag {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 0.72em;
+  color: var(--ink-3);
+  border: var(--line-w) solid var(--line);
+  border-radius: 999px;
+}
+
+.forms-side-foot {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: var(--line-w) solid var(--line);
+}
+
+.forms-side-foot .btn:last-child {
+  grid-column: 1 / -1;
+}
+
+/* ---------- 中间：画布 ---------- */
+.forms-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(200px, 20vw, 280px);
+  gap: var(--sp-4);
+  min-height: 0;
+  min-width: 0;
+}
+
+.forms-canvas-wrap {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-4);
+  /* 画布区用中灰底，白纸才显得"是一张纸"—— 这是所有排版工具的共同做法 */
+  background: var(--paper-2);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* 纸张本身：白底、黑字、毫米尺寸由 JS 设。
+   **这里刻意不用主题色** —— 打印出来的东西不该跟着主题变。 */
+.forms-sheet {
+  position: relative;
+  flex: none;
+  background: #fff;
+  color: #000;
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.22);
+}
+
+.forms-empty-hint {
+  margin: auto;
+  color: var(--ink-3);
+  font-size: var(--fs-sub);
+}
+
+/* 画布元素 */
+.fe {
+  position: absolute;
+  box-sizing: border-box;
+  cursor: move;
+  user-select: none;
+}
+
+.fe-text {
+  display: flex;
+  white-space: pre-wrap;
+  /* 选中框：淡色描边，不挡内容 */
+  outline: 1px solid transparent;
+}
+
+.fe-field {
+  display: flex;
+  align-items: flex-end;
+  border-bottom: 1px solid #000;
+  padding-left: 1mm;
+  color: #555;
+}
+
+.fe-line {
+  border-top: 1px solid #000;
+}
+
+.fe-rect {
+  border: 1px solid #000;
+}
+
+.fe-table table {
+  border-collapse: collapse;
+  width: 100%;
+  height: 100%;
+}
+
+.fe-table th,
+.fe-table td {
+  border: 1px solid #000;
+  padding: 1mm 1.4mm;
+  text-align: left;
+}
+
+.fe-table th {
+  background: #f2f2f2;
+  font-weight: 600;
+}
+
+.fe:hover {
+  outline: 1px dashed var(--accent);
+  outline-offset: 1px;
+}
+
+.fe.sel {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 右下角的缩放热区：不画把手，但给个视觉暗示 */
+.fe.sel::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+/* ---------- 右栏：属性 ---------- */
+.forms-props {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3);
+  background: var(--card);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.forms-props-title {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-aux);
+  font-weight: 600;
+  color: var(--ink-3);
+  letter-spacing: 0.02em;
+}
+
+.forms-props-title:first-child {
+  margin-top: 0;
+}
+
+.forms-props .row {
+  display: grid;
+  grid-template-columns: 4.5em minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.forms-props .row label {
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+}
+
+.forms-props input[type="text"],
+.forms-props input[type="number"],
+.forms-props select,
+.forms-props textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: var(--fs-aux);
+  color: var(--ink);
+  background: var(--card);
+  border: var(--line-w) solid var(--line);
+  border-radius: var(--radius-sm, 4px);
+}
+
+.forms-props textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.forms-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-aux);
+  color: var(--ink-2);
+}
+
+/* ---------- 窄屏：画布优先，属性折到下面 ---------- */
+@media (max-width: 900px) {
+  .formswrap {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .forms-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .forms-side {
+    max-height: 30vh;
+  }
+}

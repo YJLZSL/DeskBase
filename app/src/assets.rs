@@ -152,6 +152,17 @@ fn lookup(path: &str) -> Option<Asset> {
             mime: JS,
         },
 
+        // ---------- 单据编辑器（v1.12.0）----------
+        // 它是"表格的出口"：把台账摆成送货单/订货单/收据，然后打印。
+        "/forms.css" => Asset {
+            bytes: include_bytes!("../ui/forms.css"),
+            mime: CSS,
+        },
+        "/forms.js" => Asset {
+            bytes: include_bytes!("../ui/forms.js"),
+            mime: JS,
+        },
+
         // ---------- 崩溃恢复向导（recovery.rs 的界面侧） ----------
         // 只在上次未正常退出时渲染；平时一个节点都不建。
         "/recovery.css" => Asset {

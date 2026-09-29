@@ -1289,6 +1289,30 @@ impl Db {
         Ok(self.propagate(table, rowid, column, 0))
     }
 
+    // ---------- 通用键值（给"不归表格管"的东西用）----------
+    //
+    // 为什么在这里开口子：`store` 是 Db 的**私有字段**，而单据模板既不是表、
+    // 也不是笔记 —— 它需要一个"能存任意 JSON 的地方"。
+    // 与其让别的模块伸手进 store，不如在这里留几个**窄方法**：
+    // 将来换存储实现，只要改这几个函数，调用方一行都不用动。
+
+
+    pub fn kv_put(&mut self, key: &str, value: &str) -> Result<()> {
+        self.store
+            .put(key.to_string(), value.to_string())
+            .map(|_| ())
+    }
+
+    pub fn kv_del(&mut self, key: &str) -> Result<()> {
+        let mut b = Batch::new();
+        b.del(key.to_string());
+        self.store.commit(b).map(|_| ())
+    }
+
+    pub fn kv_scan(&self, prefix: &str) -> Vec<(String, String)> {
+        self.store.scan(prefix)
+    }
+
     pub fn delete_rows(&mut self, table: &str, rowids: &[i64]) -> Result<usize> {
         self.invalidate_indexes(table);
         if rowids.is_empty() {

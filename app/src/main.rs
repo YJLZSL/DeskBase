@@ -21,6 +21,7 @@ mod csv_import;
 mod db;
 mod excel_import;
 mod export_all;
+mod forms;
 // 表格的打印 / 报表出口（自包含 HTML）。与 export_all 同属"数据出口"，
 // 区别在产物是**给人看、给人打印**的，不是给别的软件吃的中间格式。
 mod report;
@@ -2023,6 +2024,138 @@ fn dispatch_sync(state: &AppState, req: Request) -> String {
         // 为什么让**界面**驱动循环而不是 Rust 主动滚：滚动的实现方式取决于内容
         // （读文章的滚动、表格的横竖滚、第三方页面的滚，各不相同），Rust 猜不准；
         // 而界面自己知道该滚哪个元素、滚多少。Rust 只负责"抓"和"拼"。
+        // ---------- 单据模板（v1.12.0）----------
+        //
+        // 为什么要它：`reference/31` §0.3 的结论是"最该补的三处"里排第二的就是
+        // **打印/报表出口**，三条用户场景都点名"❌ 打印出库单/送货单/对账单"。
+        // `reference/30` §0.3 说得更准：Access 留下的空位是"能给同事用的小应用"，
+        // 而只有表、没有出口就接不住。详见 `app/src/forms.rs` 顶部。
+        "forms.papers" => ok(
+            id,
+            serde_json::json!({
+                "papers": forms::papers(),
+                "builtin": forms::builtin(),
+            }),
+        ),
+
+        "forms.list" => match state.db.lock() {
+            Ok(d) => {
+                let mut out: Vec<serde_json::Value> = Vec::new();
+                for (k, v) in d.kv_scan("form/") {
+                    // 单条坏数据不该让整个列表打不开 —— 跳过坏的，继续列好的
+                    if let Ok(t) = serde_json::from_str::<forms::Template>(&v) {
+                        out.push(serde_json::to_value(&t).unwrap_or(serde_json::Value::Null));
+                    } else {
+                        log_line(&state.data_dir, &format!("单据模板读不出来，已跳过：{k}"));
+                    }
+                }
+                ok(id, serde_json::json!({ "templates": out }))
+            }
+            Err(_) => err(id, "数据库锁失败"),
+        },
+
+        "forms.save" => {
+            let raw = req
+                .args
+                .get("template")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let t: forms::Template = match serde_json::from_value(raw) {
+                Ok(t) => t,
+                Err(e) => return err(id, format!("模板格式不对：{e}")),
+            };
+            if t.id.trim().is_empty() {
+                return err(id, "模板没有 id");
+            }
+            let body = match serde_json::to_string(&t) {
+                Ok(b) => b,
+                Err(e) => return err(id, format!("存不下来：{e}")),
+            };
+            match state.db.lock() {
+                Ok(mut d) => match d.kv_put(&format!("form/{}", t.id), &body) {
+                    Ok(()) => {
+                        log_line(&state.data_dir, &format!("保存单据模板：{}", t.name));
+                        ok(id, serde_json::json!({ "id": t.id }))
+                    }
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        "forms.delete" => {
+            let idv = req
+                .args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if idv.trim().is_empty() {
+                return err(id, "没指定要删哪个模板");
+            }
+            match state.db.lock() {
+                Ok(mut d) => match d.kv_del(&format!("form/{idv}")) {
+                    Ok(()) => ok(id, serde_json::json!({ "deleted": idv })),
+                    Err(e) => err(id, e),
+                },
+                Err(_) => err(id, "数据库锁失败"),
+            }
+        }
+
+        // 生成打印 HTML 并交给系统浏览器。
+        //
+        // **不自动弹打印对话框** —— 沿用 v1.11.0 立下的规矩：
+        // **打印对话框属于用户**（选打印机、纸张、份数都是他的决定），
+        // 程序只负责把"能打印的东西"准备好并打开。
+        "forms.print" => {
+            let raw = req
+                .args
+                .get("template")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let t: forms::Template = match serde_json::from_value(raw) {
+                Ok(t) => t,
+                Err(e) => return err(id, format!("模板格式不对：{e}")),
+            };
+            let html = forms::render_print_html(&t);
+            let dir = state.data_dir.join("exports");
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err(id, format!("建目录失败：{e}"));
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let name = t.name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path = dir.join(format!("{}-{}.html", name, stamp));
+            if let Err(e) = std::fs::write(&path, html.as_bytes()) {
+                return err(id, format!("写文件失败：{e}"));
+            }
+            log_line(
+                &state.data_dir,
+                &format!("生成单据打印视图：{} → {}", t.name, path.display()),
+            );
+            // **不自己开浏览器**：open_in_browser 只接受 http/https（刻意的白名单），
+            // file:// 会被它拒掉。用既有的 open_with_default_app ——
+            // 路径是 Rust 侧自己拼的，前端传不进来，不构成绕过。
+            let shown = path.to_string_lossy().to_string();
+            match open_with_default_app(&shown) {
+                Ok(()) => ok(
+                    id,
+                    serde_json::json!({ "path": path.to_string_lossy() }),
+                ),
+                // 打不开浏览器不算彻底失败 —— 文件已经生成好了，把路径给用户
+                Err(e) => ok(
+                    id,
+                    serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "opened": false,
+                        "warn": format!("打印视图已生成，但没能自动打开：{e}"),
+                    }),
+                ),
+            }
+        }
+
         // ---------- 截图历史（v1.8.0）----------
         //
         // 截图**一直在往 shots/ 里存**（单帧与长图都存），但从来没人能看见它们 ——

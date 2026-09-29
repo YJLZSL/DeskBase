@@ -41,6 +41,8 @@ const TARGETS = [
   // 设置页教程与数据库页首次使用引导
   path.join(ROOT, 'app', 'ui', 'help.css'),
   path.join(ROOT, 'app', 'ui', 'db-onboard.css'),
+  // 单据编辑器（v1.12.0）
+  path.join(ROOT, 'app', 'ui', 'forms.css'),
   // 崩溃恢复向导（recovery.js 动态渲染）—— 新增样式表必须同步加进来，规矩见上
   path.join(ROOT, 'app', 'ui', 'recovery.css'),
   // AI 对话面板（v1.10.0，ui-chat.js 动态渲染）。
